@@ -34,6 +34,10 @@ String getIntMinus1Div5(byte input);
 String getIntMinus1Div50(byte input);
 String getIntMinus1Times10(byte input);
 String getIntMinus1Times50(byte input);
+String getLowNibbleMinus1Times5(byte input);
+String getHighNibbleMinus1Times5(byte input);
+String getLowNibbleOffset(byte input);
+String getHighNibbleOffset(byte input);
 String getValvePID(byte input);
 String getOpMode(byte input);
 String getPower(byte input);
@@ -47,7 +51,7 @@ static const char _unknown[] PROGMEM = "unknown";
 
 
 
-#define NUMBER_OF_TOPICS 170 //last topic number + 1
+#define NUMBER_OF_TOPICS 180 //last topic number + 1
 #define NUMBER_OF_TOPICS_EXTRA 6 //last topic number + 1
 #define NUMBER_OF_OPT_TOPICS 7 //last topic number + 1
 #define MAX_TOPIC_LEN 42 // max length + 1
@@ -251,6 +255,16 @@ static const char topics[][MAX_TOPIC_LEN] PROGMEM = {
   "Backup_Heater_Enable", //TOP167
   "Cooling_Enable", //TOP168
   "Heat_Request_Temp_With_Buffer", //TOP169
+  "Static_Pressure", //TOP170
+  "Heating_On_Outdoor_Temp", //TOP171
+  "Heating_On_Delay", //TOP172
+  "DHW_Booster_Delay", //TOP173
+  "Efficiency_Stage1_Time", //TOP174
+  "Efficiency_Stage2_Time", //TOP175
+  "Efficiency_Stage3_Time", //TOP176
+  "Sensor_Offset_Remote_Th1", //TOP177
+  "Sensor_Offset_Outdoor", //TOP178
+  "Anti_Stick_Mode", //TOP179
 };
 
 static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit unsigned humber) as there aren't more then 255 bytes (actually only 203 bytes) to decode
@@ -424,6 +438,16 @@ static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit 
   120, //TOP167
   120, //TOP168
   152, //TOP169
+  31, //TOP170
+  108, //TOP171
+  109, //TOP172
+  60, //TOP173
+  33, //TOP174
+  33, //TOP175
+  34, //TOP176
+  35, //TOP177
+  35, //TOP178
+  34, //TOP179
 };
 
 
@@ -609,6 +633,16 @@ static const topicFP topicFunctions[] PROGMEM = {
   getBit3and4, //TOP167
   getBit5and6, //TOP168
   getIntMinus128, //TOP169
+  getBit3and4, //TOP170
+  getIntMinus128, //TOP171
+  getIntMinus1Times30, //TOP172
+  getIntMinus1, //TOP173
+  getLowNibbleMinus1Times5, //TOP174
+  getHighNibbleMinus1Times5, //TOP175
+  getLowNibbleMinus1Times5, //TOP176
+  getHighNibbleOffset, //TOP177
+  getLowNibbleOffset, //TOP178
+  getBit1and2, //TOP179
 };
 
 static const char *DisabledEnabled[] PROGMEM = {"2", "Disabled", "Enabled"};
@@ -848,4 +882,14 @@ static const char **topicDescription[] PROGMEM = {
   InactiveActive, //TOP167
   InactiveActive, //TOP168
   Celsius, //TOP169
+  DisabledEnabled, //TOP170
+  Celsius, //TOP171
+  Minutes, //TOP172
+  Minutes, //TOP173
+  Minutes, //TOP174
+  Minutes, //TOP175
+  Minutes, //TOP176
+  Kelvin, //TOP177
+  Kelvin, //TOP178
+  DisabledEnabled, //TOP179
 };

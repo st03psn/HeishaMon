@@ -215,10 +215,20 @@ TOP166 | main/Z1_Active | Actual zone 1 activity (0=inactive, 1=active)
 TOP167 | main/Backup_Heater_Enable | Backup heater custom-menu setting (0=inactive, 1=active)
 TOP168 | main/Cooling_Enable | Cooling custom-menu setting (0=inactive, 1=active)
 TOP169 | main/Heat_Request_Temp_With_Buffer | Heating water shift/direct target including buffer delta (°C)
+TOP170 | main/Static_Pressure | Static pressure option (0=disabled, 1=enabled; installer menu "Statischer Druck", byte 31 bits 5-4)
+TOP171 | main/Heating_On_Outdoor_Temp | Outdoor temperature for heating ON (°C; installer menu, byte 108)
+TOP172 | main/Heating_On_Delay | Heating ON delay time (minutes, multiples of 30; byte 109)
+TOP173 | main/DHW_Booster_Delay | Switch-on delay of the external DHW booster heater (minutes; byte 60, only meaningful with DHW tank and external heater)
+TOP174 | main/Efficiency_Stage1_Time | Heating control "efficiency" stage 1 duration (minutes, multiples of 5; byte 33 low nibble)
+TOP175 | main/Efficiency_Stage2_Time | Heating control "efficiency" stage 2 duration (minutes, multiples of 5; byte 33 high nibble)
+TOP176 | main/Efficiency_Stage3_Time | Heating control "efficiency" stage 3 duration (minutes, multiples of 5; byte 34 low nibble)
+TOP177 | main/Sensor_Offset_Remote_Th1 | Sensor calibration offset Th1 (remote), K in steps of 0.5 (byte 35 high nibble)
+TOP178 | main/Sensor_Offset_Outdoor | Sensor calibration offset outdoor sensor, K in steps of 0.5 (byte 35 low nibble)
+TOP179 | main/Anti_Stick_Mode | Anti-stick mode, actuator exercise (0=disabled, 1=enabled; byte 34 bits 7-6). Read-only: the heat pump ignores writes to it, it can only be changed at the remote controller custom menu
 
 The relay states are published on change and after each MQTT (re)connect. Commands go to `gpio/relay/one` and `gpio/relay/two` (without `/state`). The extra GPIOs use the same layout: commands to `gpio/extra/N`, states (retained) on `gpio/extra/N/state`. After a reboot the outputs are restored once from their retained `/state` topics; see the README section *GPIO states and restore at boot*.
 
-The topics above are relative to the configured MQTT base topic. New topics TOP144–TOP169 use the documented normal data block (0x10); availability depends on the heat pump model and configuration. Two-bit status fields use -1 for an unset encoding (00). Z1_Active and Z2_Active are individual activity bits, distinct from Zones_State. Quiet/Powerful actual states are distinct from the configured level/time topics.
+The topics above are relative to the configured MQTT base topic. New topics TOP144–TOP179 use the documented normal data block (0x10); availability depends on the heat pump model and configuration. Two-bit status fields use -1 for an unset encoding (00). Z1_Active and Z2_Active are individual activity bits, distinct from Zones_State. Quiet/Powerful actual states are distinct from the configured level/time topics.
 
 
 
@@ -318,10 +328,34 @@ SET52 | SetCoolToHeatTemp | Outdoor temperature for automatic cool-to-heat switc
 SET53 | SetRoomOperationMaxTime | Maximum room heating operation time when alternating with DHW; readback TOP158 | 30..7620 minutes, multiples of 30 (wire range)
 SET54 | SetDHWHeatupMaxTime | Maximum DHW heat-up time; readback TOP159 | integer 1..254 minutes (wire range)
 SET55 | SetQuietModeSchedule | Enable/disable the existing quiet-mode schedule; readback TOP3 | 0=off, 1=on
+SET56 | SetAntiFreezeMode | Anti freezing option; readback TOP109 | 0=off, 1=on
+SET57 | SetLiquidType | Circulation liquid; readback TOP107 | 0=water, 1=glycol
+SET58 | SetZoneType | Zone 1 type room/pool; readback TOP146. **Single-zone installations only** (writes byte 21 as 21=room or 25=pool). See the warning below | 0=room, 1=pool
+SET59 | SetPoolDelta | Pool delta T; readback TOP153 | integer -127..127 K (wire range)
+SET60 | SetDemandControlEnable | Demand control option in the installer menu (not the optional PCB value of SetDemandControl); readback TOP150 | 0=disabled, 1=enabled
+SET61 | SetHeatingWaterMode | Water temperature setpoint for heating: compensation curve or direct; readback TOP76. See the warning below | 0=compensation curve, 1=direct
+SET62 | SetDHWDefrost | Use tank water for defrost; readback TOP151 | 0=no, 1=yes
+SET63 | SetStaticPressure | Static pressure option; readback TOP170 | 0=disabled, 1=enabled
+SET64 | SetHeatingOnOutdoorTemp | Outdoor temperature for heating ON; readback TOP171 | integer -127..127 °C (wire range)
+SET65 | SetHeatingOnDelay | Heating ON delay time; readback TOP172 | 30..7620 minutes, multiples of 30 (wire range)
+SET66 | SetDHWBoosterDelay | Switch-on delay of the external DHW booster heater; readback TOP173 | integer 1..254 minutes (wire range)
+SET67 | SetEfficiencyStage1Time | Efficiency stage 1 duration; readback TOP174. Nibble field, see below | 0..70 minutes, multiples of 5
+SET68 | SetEfficiencyStage2Time | Efficiency stage 2 duration; readback TOP175. Nibble field, see below | 0..70 minutes, multiples of 5
+SET69 | SetEfficiencyStage3Time | Efficiency stage 3 duration; readback TOP176. Nibble field, see below | 0..30 minutes, multiples of 5
+SET70 | SetSensorOffsetRemoteTh1 | Sensor offset Th1 (remote); readback TOP177. Nibble field, see below | -3 to 3 K in steps of 0.5, e.g. `-1.5`
+SET71 | SetSensorOffsetOutdoor | Sensor offset outdoor sensor; readback TOP178. Nibble field, see below | -3 to 3 K in steps of 0.5, e.g. `-1.5`
 
 SET51–SET55 require complete integer payloads; empty, malformed, out-of-range or invalid-step values are rejected without sending a telegram. The ranges above describe the nonzero protocol encoding, not verified installer-menu limits. Use settings supported by your model; the heat pump may reject values outside its own menu range. These writes follow the documented telegram examples but have not been hardware-tested here. SetQuietModeSchedule toggles the existing schedule and does not configure its times or change the quiet level.
 
 Example: publish `21` to `panasonic_heat_pump/commands/SetHeatToCoolTemp`, `90` to `panasonic_heat_pump/commands/SetRoomOperationMaxTime`, or `1` to `panasonic_heat_pump/commands/SetQuietModeSchedule` (replace the base topic as configured).
+
+SET56–SET71 are drafted from Service Cloud / CZ-TAW1 captures and raw `SendRawValue` tests on one WH-SDC0316M9E8 (M series) with the heat pump off; they are not tested on other models and none of them has been tested through these commands on hardware. They require complete payloads (`SetSensorOffset*` also accept one decimal `.0` or `.5`); empty, malformed, out-of-range or invalid-step values are rejected without sending a telegram. Bit-pair commands (SET56–SET58, SET60–SET63) send `0` as b01 and `1` as b10 in their bit pair and leave all other bits at 0, like SetQuietModeSchedule. Ranges describe the nonzero wire encoding, not verified installer-menu limits; the heat pump may reject values outside its own menu range.
+
+**Warning, SetHeatingWaterMode and SetZoneType:** the heat pump resets dependent values when these settings change (also when changed with the Panasonic cloud). Switching the heating water mode between curve and direct was seen to reset the zone 1 curve points to their factory defaults; changing the zone type changed the zone 1 request temperatures (bytes 38/39) and curve points. Read and note the curve points (`SetCurves` / TOP27..TOP34, TOP72..TOP75, TOP82..TOP85) and request temperatures before the change and restore them afterwards. SetZoneType writes the single-zone codes only (21 and 25) and must not be used on installations with two zones (codes 22/38, TOP146). SetHeatingWaterMode changes the heating bit pair of byte 28 only (TOP76); the cooling pair (TOP81) has no command.
+
+**Nibble commands (SET67–SET71):** the efficiency stage times and sensor offsets share a byte with another value (bytes 33, 34, 35). It is not verified that a zero nibble in a command means "no change", so these commands never send a zero nibble: they take the other nibble from the last data block received from the heat pump and send the whole byte, as was done in the raw write tests. Until the first data block has arrived they are rejected. For byte 34 this includes the anti-stick bits, which the heat pump keeps unchanged.
+
+Note: "Tank heater type" (byte 25, TOP148) deliberately has no command: in tests the heat pump reverted a written value 0x25 after one frame.
 
 
 *If you operate your heatpump in water mode with direct temperature setup: topics ending xxxRequestTemperature will set the absolute target temperature.*

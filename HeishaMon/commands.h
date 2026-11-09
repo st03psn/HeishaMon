@@ -82,6 +82,22 @@ unsigned int set_cool_to_heat_temp(char *msg, unsigned char *cmd, char *log_msg)
 unsigned int set_room_operation_max_time(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_dhw_heatup_max_time(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_quiet_mode_schedule(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_anti_freeze_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_liquid_type(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_zone_type(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_pool_delta(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_demand_control_enable(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_heating_water_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_dhw_defrost(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_static_pressure(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_heating_on_outdoor_temp(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_heating_on_delay(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_dhw_booster_delay(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_efficiency_stage1_time(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_efficiency_stage2_time(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_efficiency_stage3_time(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sensor_offset_remote_th1(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sensor_offset_outdoor(char *msg, unsigned char *cmd, char *log_msg);
 
 //optional pcb commands
 unsigned int set_heat_cool_mode(char *msg, char *log_msg);
@@ -188,6 +204,22 @@ const cmdStruct commands[] PROGMEM = {
   { "SetRoomOperationMaxTime", set_room_operation_max_time },
   { "SetDHWHeatupMaxTime", set_dhw_heatup_max_time },
   { "SetQuietModeSchedule", set_quiet_mode_schedule },
+  { "SetAntiFreezeMode", set_anti_freeze_mode },
+  { "SetLiquidType", set_liquid_type },
+  { "SetZoneType", set_zone_type },
+  { "SetPoolDelta", set_pool_delta },
+  { "SetDemandControlEnable", set_demand_control_enable },
+  { "SetHeatingWaterMode", set_heating_water_mode },
+  { "SetDHWDefrost", set_dhw_defrost },
+  { "SetStaticPressure", set_static_pressure },
+  { "SetHeatingOnOutdoorTemp", set_heating_on_outdoor_temp },
+  { "SetHeatingOnDelay", set_heating_on_delay },
+  { "SetDHWBoosterDelay", set_dhw_booster_delay },
+  { "SetEfficiencyStage1Time", set_efficiency_stage1_time },
+  { "SetEfficiencyStage2Time", set_efficiency_stage2_time },
+  { "SetEfficiencyStage3Time", set_efficiency_stage3_time },
+  { "SetSensorOffsetRemoteTh1", set_sensor_offset_remote_th1 },
+  { "SetSensorOffsetOutdoor", set_sensor_offset_outdoor },
 };
 
 struct optCmdStruct{

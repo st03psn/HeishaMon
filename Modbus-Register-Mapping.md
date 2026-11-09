@@ -142,7 +142,7 @@ commands: SetZ1HeatRequestTemperature, SetZ1CoolRequestTemperature,
 SetZ2HeatRequestTemperature, SetZ2CoolRequestTemperature, SetDHWTemp, SetFloorHeatDelta,
 SetFloorCoolDelta, SetDHWHeatDelta, SetHeaterStartDelta, SetHeaterStopDelta, SetBufferDelta,
 SetHeatingOffOutdoorTemp, SetBivalentStartTemp, SetBivalentAPStartTemp,
-SetBivalentAPStopTemp, SetHeaterOnOutdoorTemp, SetSterilizationTemp, SetHeatToCoolTemp and SetCoolToHeatTemp. All other commands (modes, states, times,
+SetBivalentAPStopTemp, SetHeaterOnOutdoorTemp, SetSterilizationTemp, SetHeatToCoolTemp, SetCoolToHeatTemp, SetPoolDelta, SetHeatingOnOutdoorTemp, SetSensorOffsetRemoteTh1 and SetSensorOffsetOutdoor (the sensor offsets therefore accept whole degrees only through Modbus; use MQTT for half degrees). All other commands (modes, states, times,
 duty) are unscaled signed int16. Allowed values are those of the regular HeishaMon command
 handlers. SetCurves needs JSON and must use MQTT/HTTP.
 
@@ -256,6 +256,22 @@ is `MAIN_COMMANDS` in `HeishaMon/ModbusRegisterMap.h`. IDs 1-1000 map to
 | 5051 | `SetRoomOperationMaxTime` |
 | 5052 | `SetDHWHeatupMaxTime` |
 | 5053 | `SetQuietModeSchedule` |
+| 5054 | `SetAntiFreezeMode` |
+| 5055 | `SetLiquidType` |
+| 5056 | `SetZoneType` |
+| 5057 | `SetPoolDelta` |
+| 5058 | `SetDemandControlEnable` |
+| 5059 | `SetHeatingWaterMode` |
+| 5060 | `SetDHWDefrost` |
+| 5061 | `SetStaticPressure` |
+| 5062 | `SetHeatingOnOutdoorTemp` |
+| 5063 | `SetHeatingOnDelay` |
+| 5064 | `SetDHWBoosterDelay` |
+| 5065 | `SetEfficiencyStage1Time` |
+| 5066 | `SetEfficiencyStage2Time` |
+| 5067 | `SetEfficiencyStage3Time` |
+| 5068 | `SetSensorOffsetRemoteTh1` |
+| 5069 | `SetSensorOffsetOutdoor` |
 
 ## Optional PCB commands
 
