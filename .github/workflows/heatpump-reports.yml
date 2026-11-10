@@ -15,8 +15,8 @@ permissions:
   issues: write
   pull-requests: write
 
-concurrency:
-  group: heatpump-reports
+# No concurrency group: GitHub keeps only one pending run per group and would drop
+# reports that arrive at the same time. The script retries instead.
 
 jobs:
   handle:
