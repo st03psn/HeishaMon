@@ -64,8 +64,10 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 - **Defrost signal and bivalent control share one terminal.** Setting bivalent control to yes sets byte 28 bits 7-6 to "no"; setting the defrost signal to yes sets bivalent control to "no". Switching bivalent off does not restore the defrost signal.
 - **Buffer tank = yes without a buffer sensor raises H43** (zone 1 sensor fault) within 5 s. The zone 1 water temperature then reads -78 °C. The fault stays latched after the buffer is set back to "no" and has to be reset. Shown twice: with all parent switches set, and with only byte 24 bits 3-2 set.
+- **Solar mode on without a solar sensor raises H28** (solar sensor fault) within 5 s **while the heat pump is running**, and the heat pump switches off. The fault stays after the solar mode is set back and has to be reset (`SetReset`); the first `SetHeatpump 1` after the reset was not kept, a second one 90 s later was. With the heat pump switched off the same setting (buffer and DHW, about 30 s and 60 s) raised no fault.
+- **Faults of this kind can depend on the operating state.** The tests of DHW tank, SG ready and bivalent control were made with the heat pump off and showed no fault; that says nothing about the running heat pump.
+- Sensor bytes without a connected sensor on this unit: buffer, solar, pool and both zone water temperatures (bytes 149, 150, 151, 145, 146) read 0x32 (-78 °C), with the solar mode off and on. The DHW temperature (byte 141) reads 0x00 (-128 °C) with DHW tank = no and 0x6C (-20 °C) with DHW tank = yes. What these bytes show on a unit that has the sensor while the function is switched off is not known.
 - Byte 22 = 0x14 and byte 28 = 0x96 / 0x99 (water temperature mode) move the heat and cool curve bytes 75 to 79 and 86 to 90; some values return by themselves, others have to be written back.
-- Byte 141 of the data block switches 0x00 / 0x6C with the DHW tank flag. Meaning unknown.
 
 ### 3.5 Parent and child settings
 
@@ -99,10 +101,11 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 |---|---|---|
 | 1 | Test on other series (H, J, K, L) and on the ESP8266 board, see [AquareaParity-Testing.md](AquareaParity-Testing.md) | owners of such units |
 | 2 | Back-up heater capacity on units with a 3 kW or 6 kW heater: which values the remote controller offers, and what the heat pump does with a higher value | owners of such units |
-| 3 | Decide on dependency guards: refuse or only warn when a child command is sent while its parent is off (table in 3.5) | decision, then code and tests |
-| 4 | The commands on shared bytes do not check the other bits they write back (for example `SetStaticPressure` with an unknown extra-pump nibble) | code and tests |
-| 5 | Test child values with optional PCB = no (byte 20 = 0x69) | heat pump off |
-| 6 | Not tested on purpose: dry concrete, two zones, pool, actuator test, pump down, reset of energy history | a suitable unit |
+| 3 | Refuse commands that switch on a function whose sensor is missing (`SetSolarMode`, `SetBuffer`, `SetZoneType 1`, `SetDHWInstalled`, `SetZ1SensorSettings 3`). Needs the sensor bytes of units that have these sensors, see 3.4 | data from such units, then code and tests |
+| 4 | Decide on dependency guards: refuse or only warn when a child command is sent while its parent is off (table in 3.5) | decision, then code and tests |
+| 5 | The commands on shared bytes do not check the other bits they write back (for example `SetStaticPressure` with an unknown extra-pump nibble) | code and tests |
+| 6 | Test child values with optional PCB = no (byte 20 = 0x69) | heat pump off |
+| 7 | Not tested on purpose: dry concrete, two zones, pool, actuator test, pump down, reset of energy history | a suitable unit |
 
 ## 6. Hardware test (2026-11-10, M series, HeishaMon large / ESP32-S3)
 
@@ -119,7 +122,7 @@ Heat pump off, commands sent by MQTT, data block read back after each group, eve
 | Back-up heater 6 kW and 9 kW, zone 1 sensor type 1 and 2, liquid type glycol with anti-freeze kept | arrived, restored |
 | SG ready: mode 1 and 2, both cooling offsets, all seven power limits (8 commands in one burst), demand control | arrived, restored; power limit refused while the mode was 1 |
 | DHW tank yes, tank heater external, booster delay, extra pump DHW / comfort / efficiency | arrived, restored; removing the tank refused while the extra pump was on DHW |
-| Solar mode buffer and DHW | arrived, restored, no fault |
+| Solar mode buffer and DHW | arrived, restored, no fault with the heat pump off (with the heat pump running: H28, see 3.4) |
 | Bivalent: control, heating, both delays, operating mode 1 and 2, mode alternative, external pump | arrived, restored; refusals as designed; the defrost signal stayed "no" |
 | Water temperature mode heating and cooling | arrived. As known from raw writes, the heat pump moved the curve bytes 75 to 78 (heating) and 86 to 88 (cooling) and did not move them back; they were restored with a raw write |
 

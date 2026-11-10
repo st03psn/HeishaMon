@@ -124,6 +124,7 @@ Regeln für den Schreibtest:
 Diese Befehle **nicht** senden, außer man weiß, was sie an der eigenen Anlage bewirken:
 
 - `SetBuffer 1` ohne Pufferfühler (Fehler H43 an der M-Serie, bleibt bis zum Zurücksetzen).
+- `SetSolarMode 1` oder `2` ohne Solarfühler (Fehler H28 an der M-Serie bei laufender Wärmepumpe; sie schaltet ab und bleibt bis zum Zurücksetzen aus).
 - `SetAntiFreezeMode 0`.
 - `SetInternalHeaterCapacity` mit einem Wert über dem verbauten Heizstab (nicht getestet, Ergebnis unbekannt).
 - Schalter für Hardware, die es an der Anlage nicht gibt: `SetDHWInstalled`, `SetSolarMode`, `SetSGReadyMode`, `SetBivalentControl`, `SetZoneType`, `SetZ1SensorSettings`.
