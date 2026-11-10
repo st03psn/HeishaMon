@@ -686,6 +686,7 @@ struct String {
   long toInt() const { return v; }
 };
 void rmw_note_command_sent(const unsigned char *cmd, int length);
+void rmw_set_resending(bool resending);
 std::vector<byte> sent;
 int send_count;
 // Models the hand-over in the two real send_command() versions (HeishaMon.ino): a command that is not
@@ -751,11 +752,11 @@ static bool run_direct(const char *name, const char *payloadText) {
   return send_count == 1;
 }
 // a main data block arrives (readSerial(): decode_heatpump_data() replaces actData, then the hook)
-static void deliver_block(unsigned long after_ms, int a0 = -1, int v0 = 0, int a1 = -1, int v1 = 0) {
+static void deliver_block(unsigned long after_ms, int a0 = -1, int v0 = 0, int a1 = -1, int v1 = 0, bool commands_waiting = false) {
   fake_millis += after_ms;
   if (a0 >= 0) actData[a0] = (char)v0;
   if (a1 >= 0) actData[a1] = (char)v1;
-  rmw_data_block_received();
+  rmw_data_block_received(commands_waiting);
 }
 """
 GENERIC_REJECTED = ["", "abc", "1x", "1.0", " 1", "+1", "1 ", "-", "999999999999999"]
@@ -1324,8 +1325,10 @@ def main():
     fake_millis = 1000;
     assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
     { byte command[256]; char log[256]; char payload[] = "35";
-      fake_millis = 1000 + LIFE + 5; // expired; a dry run (Modbus) looks at the byte and marks the entry invalid
+      fake_millis = 1000 + LIFE + 5; // expired; a dry run (Modbus) looks at the byte and does not use the entry
       assert(set_efficiency_stage2_time(payload, command, log) > 0 && command[33] == 0x85);
+      // the dry run is read-only (it runs in another task): the entry is cleared by the next data block
+      deliver_block(0);
       fake_millis = 1000 + 5000; // the clock is back in the old window, as it is after 2^32 ms
       assert(set_efficiency_stage2_time(payload, command, log) > 0 && command[33] == 0x85); }
     // a command shortly before the wrap of millis(): pending across the wrap, expired after it
@@ -1389,9 +1392,40 @@ def main():
     assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
     assert(run_command("SetSensorOffsetOutdoor", "-1.5") && sent[35] == 0x85); // byte 35 ended too: actData (0x86) is used
   }
+  { // review 4, Major 1: a block that arrives while commands are still waiting for transmission ends nothing
+    reset_act_data(); actData[28] = (char)0x55;
+    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x59); // queued behind other commands
+    deliver_block(SETTLE, 28, 0x55, -1, 0, true);     // answer to an earlier command, this frame has not left yet
+    deliver_block(SETTLE, 28, 0x55, -1, 0, true);
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x5A); // built from the pending 0x59, not 0x55
+    deliver_block(LIFE + 1000, 28, 0x55, -1, 0, true); // waiting restarts the life time as well
+    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x9A);
+    deliver_block(SETTLE - 1, 28, 0x55);               // queue empty now, but the block is too early to be trusted
+    assert(run_command("SetDefrostSignal", "0") && sent[28] == 0x5A);
+    deliver_block(SETTLE, 28, 0x5A);                   // read-back with an empty queue ends the pending state
+    actData[28] = (char)0x55;
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);
+  }
+  { // review 4, Major 2: a buffered frame that is handed over again (ESP8266 popCommandBuffer) keeps the newer value
+    reset_act_data(); actData[28] = (char)0x55;
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);
+    std::vector<byte> first = sent;
+    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x5A);
+    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x9A);
+    rmw_set_resending(true);                           // the first frame leaves the buffer
+    send_command(first.data(), (int)first.size());
+    rmw_set_resending(false);
+    assert(run_command("SetCoolingWaterMode", "0") && sent[28] == 0x96); // defrost signal and heating mode kept
+    // an entry that has expired is noted again, also on a resend
+    reset_act_data(); actData[28] = (char)0x55;
+    rmw_set_resending(true);
+    send_command(first.data(), (int)first.size());
+    rmw_set_resending(false);
+    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x5A);
+  }
 """
     checks.append(shadow_tests)
-    cases += 14
+    cases += 16
 
     # structure of the production code that the host harness cannot compile (HeishaMon.ino, rules.cpp)
     ino = (ROOT / "HeishaMon/HeishaMon.ino").read_text()
@@ -1400,8 +1434,11 @@ def main():
     assert re.search(r"if \(xQueueSend\(cmdQueue, &cmd, 0\) != pdTRUE\) return false;[^\n]*\n\s*rmw_note_command_sent\(command, length\);", ino)
     assert re.search(r"if \(cmdnrel \+ 1 <= MAXCOMMANDSINBUFFER\) rmw_note_command_sent\(command, length\);[^\n]*\n\s*pushCommandBuffer", ino)
     assert re.search(r"sendCommandReadTime = millis\(\);[^\n]*\n\s*rmw_note_command_sent\(command, length\);", ino)
-    assert re.search(r"decode_heatpump_data\(data, actData[^\n]*\n\s*rmw_data_block_received\(\);", ino)
-    assert ino.count("rmw_data_block_received()") == 1
+    assert re.search(r"decode_heatpump_data\(data, actData[^\n]*\n#ifdef ESP32\n\s*rmw_data_block_received\(cmdQueue != NULL && uxQueueMessagesWaiting\(cmdQueue\) > 0\);[^\n]*\n#else\n\s*rmw_data_block_received\(cmdnrel > 0\);", ino)
+    assert ino.count("rmw_data_block_received(") == 2
+    assert re.search(r"rmw_set_resending\(true\);[^\n]*\n\s*send_command\(cmdbuffer\[cmdstart\]\.data, cmdbuffer\[cmdstart\]\.length\);\n\s*rmw_set_resending\(false\);", ino)
+    assert "rmwPendingBytes[i].valid = false" not in source.split("static byte effective_byte")[1].split("static byte merge_sent_byte")[0], "effective_byte is read-only"
+
     settle = int(re.search(r"#define RMW_SETTLE_MS (\d+)UL", source)[1])
     assert settle == int(re.search(r"#define SERIALTIMEOUT (\d+)", ino)[1]), "settle time is tied to SERIALTIMEOUT"
     assert int(re.search(r"#define RMW_SHADOW_MS (\d+)UL", source)[1]) == 12000
@@ -1411,7 +1448,7 @@ def main():
     assert re.search(r"tmp\.func\(payload, cmd, log_msg\);.*?send_command\(cmd, len\);", rules, re.S)
     assert "send_heatpump_command(topicName, payload, send_command" in (ROOT / "HeishaMon/HeishaModbusServer.cpp").read_text()
     assert "remember_rmw_command" not in source and "rmwCommands" not in source
-    cases += 11
+    cases += 13
 
     program = (
         SHIM

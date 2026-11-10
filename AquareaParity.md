@@ -87,6 +87,8 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 ## 4. What the commands of this branch do with these findings
 
 - Commands on shared bytes send the whole byte, built from the new field and the last received value of the other bits, and are refused until a data block has been received. A short memory of sent bytes covers commands that follow each other faster than the read cycle.
+- The memory is kept while commands are still waiting for transmission and is not rewound when a buffered command is sent (findings of the fourth review, fixed).
+- Not covered: changes the heat pump makes by itself in another byte (bivalent control and defrost signal). After one of these two commands wait for the next data block before sending a command on byte 26 or 28.
 - Value ranges follow the installer menu of the service manual.
 - Some guards mirror the installer menu (for example `SetExtraPump 2` needs a DHW tank). They are not complete, see section 5.
 
@@ -95,7 +97,7 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 | No. | Task | Needs |
 |---|---|---|
 | 1 | Run this firmware on hardware and test each new command once (send, read back topic, compare with remote controller or cloud) | flashing an ESP32 HeishaMon |
-| 2 | Independent review of the commits after the third review (c4e3320, 7c212a8, 302e2f3) | none |
+| 2 | Fourth review done (no blocker; two major findings in the pending-byte memory fixed, one minor fixed, one documented). Open from it: the pair setters do not check the foreign bits they write back (for example SetStaticPressure with an unknown extra-pump nibble) | code and tests |
 | 3 | Decide on dependency guards: refuse or only warn when a child command is sent while its parent is off (table in 3.5) | decision, then code and tests |
 | 4 | Warn before `SetBuffer 1` (H43 without a buffer sensor) | documentation is done in MQTT-Topics.md; a guard is not possible because the sensor state is not known |
 | 5 | Test child values with optional PCB = no (byte 20 = 0x69) | heat pump off |
@@ -109,9 +111,9 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 | Test | Result |
 |---|---|
-| `Tools/test_commands.py` | 1542 cases pass |
+| `Tools/test_commands.py` | 1546 cases pass |
 | `Tools/test_decode.py` | 89 cases pass |
 | `tests/modbus/run_tests.py` | pass |
 | `Examples/Rules/run_tests.sh` | 34 pass |
-| CI "Build binary" (ESP8266 and ESP32) | success for commit 302e2f3 |
+| CI "Build binary" (ESP8266 and ESP32) | success; a build with `--warnings=all` shows no warning in lines of this branch |
 | Hardware | not run |

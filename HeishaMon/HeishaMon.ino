@@ -835,7 +835,11 @@ bool readSerial()
       if (data_length == DATASIZE)  {  //receive a full data block
         if  (data[3] == 0x10) { //decode the normal data block
           decode_heatpump_data(data, actData, mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
-          rmw_data_block_received(); // actData is the truth again for bytes set a while ago, see commands.cpp
+#ifdef ESP32
+          rmw_data_block_received(cmdQueue != NULL && uxQueueMessagesWaiting(cmdQueue) > 0); // pending bytes of shared-byte settings, see commands.cpp
+#else
+          rmw_data_block_received(cmdnrel > 0); // pending bytes of shared-byte settings, see commands.cpp
+#endif
           if ( (!extraDataBlockAvailable) && ((actData[0] == 0x71) && (actData[0xc7] >= 3)) ) { //do we have valid header and byte 0xc7 is more or equal 3 then assume K&L and more series
             log_message(_F("Extra data available on this heatpump"));
             extraDataBlockAvailable = true; //request for extra data next run
@@ -896,7 +900,9 @@ bool readSerial()
 void popCommandBuffer() {
   // to make sure we can pop a command from the buffer
   if ((!sending) && cmdnrel > 0) {
+    rmw_set_resending(true); // this frame was noted when it was buffered, see commands.cpp
     send_command(cmdbuffer[cmdstart].data, cmdbuffer[cmdstart].length);
+    rmw_set_resending(false);
     cmdstart = (cmdstart + 1) % (MAXCOMMANDSINBUFFER);
     cmdnrel--;
   }

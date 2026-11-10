@@ -314,6 +314,7 @@ void send_heatpump_command(char* topic, char *msg, bool (*send_command)(byte*, i
 // Pending bytes of shared-byte settings, see commands.cpp. send_command() calls the first function when a
 // command frame was accepted for sending, the data block receive code calls the second after each main data block.
 void rmw_note_command_sent(const unsigned char *cmd, int length);
-void rmw_data_block_received();
+void rmw_data_block_received(bool commands_waiting);
+void rmw_set_resending(bool resending);
 bool saveOptionalPCB(byte* command, int length);
 bool loadOptionalPCB(byte* command, int length);

@@ -389,6 +389,10 @@ unsigned int set_quiet_mode_schedule(char *msg, unsigned char *cmd, char *log_ms
 //  - at the first data block that is received RMW_SETTLE_MS or more after the command was handed over,
 //    whether that block confirms the value or not (then actData is the truth again), or
 //  - RMW_SHADOW_MS after the command (unsigned difference, so it also holds when millis() wraps).
+// While commands are still waiting to be transmitted (ESP32 cmdQueue, ESP8266 command buffer) a data
+// block does not end anything: it may be the answer to an earlier command, and the frame that carries the
+// pending value may not have left yet. Such a block restarts both times instead, so they count from the
+// last block that was received while something was waiting (review 4, Major 1).
 // RMW_SHADOW_MS: the minimum poll interval (waitTime) is 5 s, so 12 s is two polls plus a margin.
 // RMW_SETTLE_MS: a data block that was already on its way when the command was handed over still carries
 // the old value, and so may the pump's answer to the command itself. A block (203 bytes, ~0.25 s at 9600
@@ -414,7 +418,7 @@ static const rmwTracked rmwTrackedBytes[] PROGMEM = {
 };
 #define RMW_TRACKED (sizeof(rmwTrackedBytes) / sizeof(rmwTrackedBytes[0]))
 
-// RAM: 15 slots x 6 bytes (value, valid, 32-bit time) = 90 bytes on ESP8266; the address/unit table is in flash.
+// RAM: 15 slots x 8 bytes (32-bit time, value, valid, padding) = 120 bytes on ESP8266; the address/unit table is in flash.
 struct rmwPending {
   unsigned long since;
   byte value;
@@ -423,15 +427,15 @@ struct rmwPending {
 
 static rmwPending rmwPendingBytes[RMW_TRACKED];
 
-// The pending value of a tracked byte or actData. Does not clear anything that is still young; an expired
-// entry is marked invalid (also protects against a wrap of millis() after 49.7 days).
+// The pending value of a tracked byte or actData. Read-only: the Modbus task runs the setters as a dry
+// run, so nothing may be written here (review 4, Minor 2). An expired entry is skipped; it is cleared or
+// overwritten by rmw_data_block_received() / rmw_note_command_sent() in the main task.
 static byte effective_byte(byte address) {
   for (unsigned int i = 0; i < RMW_TRACKED; i++) {
     rmwTracked t;
     memcpy_P(&t, &rmwTrackedBytes[i], sizeof(t));
     if (t.address != address || !rmwPendingBytes[i].valid) continue;
     if ((unsigned long)(millis() - rmwPendingBytes[i].since) < RMW_SHADOW_MS) return rmwPendingBytes[i].value;
-    rmwPendingBytes[i].valid = false;
   }
   return (byte)actData[address];
 }
@@ -451,6 +455,15 @@ static byte merge_sent_byte(byte unit, byte sent, byte base) {
 // Called from send_command() when a command frame was accepted for sending (written, queued or buffered;
 // not in listen-only mode, not when the queue is full). It runs in the main task only (the Modbus task
 // only runs the setters as a dry run and never gets here).
+// ESP8266: popCommandBuffer() hands a buffered frame to send_command() a second time. That frame was
+// already noted when it was buffered, and newer frames on the same byte may have been noted since, so a
+// second note must not put the older value back (review 4, Major 2). Between rmw_set_resending(true)
+// and (false) a note only restarts the time of an entry that is still valid.
+static bool rmwResending = false;
+void rmw_set_resending(bool resending) {
+  rmwResending = resending;
+}
+
 void rmw_note_command_sent(const unsigned char *cmd, int length) {
   if (length < (int)sizeof(panasonicSendQuery) || cmd[0] != 0xF1 || cmd[3] != 0x10) return; // a write frame for the main data block
   if (!(actData[0] == 0x71 && actData[1] == (char)0xc8 && actData[2] == 0x01)) return; // nothing to complete partial bytes from; the setters refuse without a block too
@@ -458,6 +471,10 @@ void rmw_note_command_sent(const unsigned char *cmd, int length) {
     rmwTracked t;
     memcpy_P(&t, &rmwTrackedBytes[i], sizeof(t));
     if (cmd[t.address] == 0) continue;
+    if (rmwResending && rmwPendingBytes[i].valid && (unsigned long)(millis() - rmwPendingBytes[i].since) < RMW_SHADOW_MS) {
+      rmwPendingBytes[i].since = millis();
+      continue;
+    }
     const byte value = merge_sent_byte(t.unit, cmd[t.address], effective_byte(t.address));
     rmwPendingBytes[i].value = value;
     rmwPendingBytes[i].since = millis();
@@ -465,10 +482,14 @@ void rmw_note_command_sent(const unsigned char *cmd, int length) {
   }
 }
 
-// Called after every received main data block (actData has just been replaced).
-void rmw_data_block_received() {
+// Called after every received main data block (actData has just been replaced). commands_waiting: a
+// command is still queued or buffered for transmission.
+void rmw_data_block_received(bool commands_waiting) {
   for (unsigned int i = 0; i < RMW_TRACKED; i++) {
-    if (rmwPendingBytes[i].valid && (unsigned long)(millis() - rmwPendingBytes[i].since) >= RMW_SETTLE_MS) {
+    if (!rmwPendingBytes[i].valid) continue;
+    if (commands_waiting) {
+      rmwPendingBytes[i].since = millis();
+    } else if ((unsigned long)(millis() - rmwPendingBytes[i].since) >= RMW_SETTLE_MS) {
       rmwPendingBytes[i].valid = false;
     }
   }
