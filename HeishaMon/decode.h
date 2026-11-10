@@ -32,6 +32,7 @@ String getIntMinus1(byte input);
 String getIntMinus128(byte input);
 String getIntMinus1Div5(byte input);
 String getIntMinus1Div50(byte input);
+String getIntMinus1Div10(byte input);
 String getIntMinus1Times10(byte input);
 String getIntMinus1Times50(byte input);
 String getLowNibbleMinus1Times5(byte input);
@@ -51,7 +52,7 @@ static const char _unknown[] PROGMEM = "unknown";
 
 
 
-#define NUMBER_OF_TOPICS 184 //last topic number + 1
+#define NUMBER_OF_TOPICS 196 //last topic number + 1
 #define NUMBER_OF_TOPICS_EXTRA 6 //last topic number + 1
 #define NUMBER_OF_OPT_TOPICS 7 //last topic number + 1
 #define MAX_TOPIC_LEN 42 // max length + 1
@@ -269,6 +270,18 @@ static const char topics[][MAX_TOPIC_LEN] PROGMEM = {
   "Bivalent_External_Pump", //TOP181
   "Extra_Pump_Use", //TOP182
   "Extra_Pump_Mode", //TOP183
+  "SG_Ready_1_DHW_Power", //TOP184
+  "SG_Ready_1_Heat_Power", //TOP185
+  "SG_Ready_1_Cool_Power", //TOP186
+  "SG_Ready_2_DHW_Power", //TOP187
+  "SG_Ready_2_Heat_Power", //TOP188
+  "SG_Ready_2_Cool_Power", //TOP189
+  "SG_Ready_Stop_Power", //TOP190
+  "SG_Ready_1_Cool_Capacity", //TOP191
+  "SG_Ready_2_Cool_Capacity", //TOP192
+  "Sensor_Offset_Return", //TOP193
+  "Sensor_Offset_Byte36_Low", //TOP194
+  "Sensor_Offset_Byte37_Low", //TOP195
 };
 
 static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit unsigned humber) as there aren't more then 255 bytes (actually only 203 bytes) to decode
@@ -456,6 +469,18 @@ static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit 
   27, //TOP181
   31, //TOP182
   31, //TOP183
+  51, //TOP184
+  52, //TOP185
+  53, //TOP186
+  54, //TOP187
+  55, //TOP188
+  56, //TOP189
+  57, //TOP190
+  102, //TOP191
+  103, //TOP192
+  36, //TOP193
+  36, //TOP194
+  37, //TOP195
 };
 
 
@@ -655,6 +680,18 @@ static const topicFP topicFunctions[] PROGMEM = {
   getBit1and2, //TOP181
   getBit7and8, //TOP182
   getBit5and6, //TOP183
+  getIntMinus1Div10, //TOP184
+  getIntMinus1Div10, //TOP185
+  getIntMinus1Div10, //TOP186
+  getIntMinus1Div10, //TOP187
+  getIntMinus1Div10, //TOP188
+  getIntMinus1Div10, //TOP189
+  getIntMinus1Div10, //TOP190
+  getIntMinus128, //TOP191
+  getIntMinus128, //TOP192
+  getHighNibbleOffset, //TOP193
+  getLowNibbleOffset, //TOP194
+  getLowNibbleOffset, //TOP195
 };
 
 static const char *DisabledEnabled[] PROGMEM = {"2", "Disabled", "Enabled"};
@@ -910,4 +947,16 @@ static const char **topicDescription[] PROGMEM = {
   OffOn, //TOP181
   ExtraPumpUse, //TOP182
   HeatingControl, //TOP183
+  Kilowatt, //TOP184
+  Kilowatt, //TOP185
+  Kilowatt, //TOP186
+  Kilowatt, //TOP187
+  Kilowatt, //TOP188
+  Kilowatt, //TOP189
+  Kilowatt, //TOP190
+  Celsius, //TOP191
+  Celsius, //TOP192
+  Kelvin, //TOP193
+  Kelvin, //TOP194
+  Kelvin, //TOP195
 };

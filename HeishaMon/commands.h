@@ -107,6 +107,26 @@ unsigned int set_solar_on_delta(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_solar_off_delta(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_solar_frost_protection(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_room_holiday_shift_temp(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_zone_type(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_heating_water_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_cooling_water_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_liquid_type(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_dhw_heater_type(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_dhw_installed(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_solar_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_solar_high_limit(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_dhw_power_1(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_heat_power_1(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_cool_power_1(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_dhw_power_2(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_heat_power_2(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_cool_power_2(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_stop_power(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_cool_capacity_1(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sg_ready_cool_capacity_2(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sensor_offset_return(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_z1_sensor_settings(char *msg, unsigned char *cmd, char *log_msg);
 
 //optional pcb commands
 unsigned int set_heat_cool_mode(char *msg, char *log_msg);
@@ -238,6 +258,26 @@ const cmdStruct commands[] PROGMEM = {
   { "SetSolarOffDelta", set_solar_off_delta },
   { "SetSolarFrostProtection", set_solar_frost_protection },
   { "SetRoomHolidayShiftTemp", set_room_holiday_shift_temp },
+  { "SetZoneType", set_zone_type },
+  { "SetHeatingWaterMode", set_heating_water_mode },
+  { "SetCoolingWaterMode", set_cooling_water_mode },
+  { "SetLiquidType", set_liquid_type },
+  { "SetDHWHeaterType", set_dhw_heater_type },
+  { "SetDHWInstalled", set_dhw_installed },
+  { "SetSolarMode", set_solar_mode },
+  { "SetSolarHighLimit", set_solar_high_limit },
+  { "SetSGReadyMode", set_sg_ready_mode },
+  { "SetSGReadyDHWPower1", set_sg_ready_dhw_power_1 },
+  { "SetSGReadyHeatPower1", set_sg_ready_heat_power_1 },
+  { "SetSGReadyCoolPower1", set_sg_ready_cool_power_1 },
+  { "SetSGReadyDHWPower2", set_sg_ready_dhw_power_2 },
+  { "SetSGReadyHeatPower2", set_sg_ready_heat_power_2 },
+  { "SetSGReadyCoolPower2", set_sg_ready_cool_power_2 },
+  { "SetSGReadyStopPower", set_sg_ready_stop_power },
+  { "SetSGReadyCoolCapacity1", set_sg_ready_cool_capacity_1 },
+  { "SetSGReadyCoolCapacity2", set_sg_ready_cool_capacity_2 },
+  { "SetSensorOffsetReturn", set_sensor_offset_return },
+  { "SetZ1SensorSettings", set_z1_sensor_settings },
 };
 
 struct optCmdStruct{

@@ -122,6 +122,27 @@ CASES = [
     (183, 31, 0x5B, "1"),
     (183, 31, 0x57, "0"),
     (183, 31, 0x55, "0"),
+    (184, 51, 0x2B, "4.2"),
+    (184, 51, 0x06, "0.5"),
+    (185, 52, 0x65, "10.0"),
+    (186, 53, 0x29, "4.0"),
+    (187, 54, 0x2A, "4.1"),
+    (188, 55, 0x2B, "4.2"),
+    (189, 56, 0x29, "4.0"),
+    (190, 57, 0x2C, "4.3"),
+    (191, 102, 0x7D, "-3"),
+    (191, 102, 0x80, "0"),
+    (192, 103, 0x7A, "-6"),
+    (192, 103, 0x71, "-15"),
+    (193, 36, 0x48, "-2.0"),
+    (193, 36, 0xA8, "1.0"),
+    (194, 36, 0x89, "0.5"),
+    (194, 36, 0x48, "0.0"),
+    (195, 37, 0x89, "0.5"),
+    (195, 37, 0x88, "0.0"),
+    (147, 25, 0x2D, "9"),
+    (147, 25, 0x29, "6"),
+    (147, 25, 0x25, "3"),
 ]
 
 
@@ -172,6 +193,9 @@ def main():
   assert(getHeaterCapacity(0).toInt() == -1);
   assert(getHeaterCapacity(4).toInt() == 3);
   assert(getHeaterCapacity(8).toInt() == 6);
+  assert(getHeaterCapacity(12).toInt() == 9); // 9 kW = b11, as in the upstream decode table
+  assert(std::string(getIntMinus1Div10(0).c_str()) == "-0.1");
+  assert(std::string(getIntMinus1Div10(101).c_str()) == "10.0");
   assert(getIntMinus1Times30(0).toInt() == -30);
   assert(getIntMinus1Times30(255).toInt() == 7620);
   for (int n = 0; n < 4; ++n) {

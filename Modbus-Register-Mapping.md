@@ -142,8 +142,8 @@ commands: SetZ1HeatRequestTemperature, SetZ1CoolRequestTemperature,
 SetZ2HeatRequestTemperature, SetZ2CoolRequestTemperature, SetDHWTemp, SetFloorHeatDelta,
 SetFloorCoolDelta, SetDHWHeatDelta, SetHeaterStartDelta, SetHeaterStopDelta, SetBufferDelta,
 SetHeatingOffOutdoorTemp, SetBivalentStartTemp, SetBivalentAPStartTemp,
-SetBivalentAPStopTemp, SetHeaterOnOutdoorTemp, SetSterilizationTemp, SetHeatToCoolTemp, SetCoolToHeatTemp, SetPoolDelta, SetHeatingOnOutdoorTemp, SetSensorOffsetRemoteTh1, SetSensorOffsetOutdoor, SetSolarOnDelta, SetSolarOffDelta, SetSolarFrostProtection and SetRoomHolidayShiftTemp (the sensor offsets therefore accept whole degrees only through Modbus; use MQTT for half degrees). All other commands (modes, states, times,
-duty) are unscaled signed int16. Allowed values are those of the regular HeishaMon command
+SetBivalentAPStopTemp, SetHeaterOnOutdoorTemp, SetSterilizationTemp, SetHeatToCoolTemp, SetCoolToHeatTemp, SetPoolDelta, SetHeatingOnOutdoorTemp, SetSensorOffsetRemoteTh1, SetSensorOffsetOutdoor, SetSensorOffsetReturn, SetSolarOnDelta, SetSolarOffDelta, SetSolarFrostProtection, SetSolarHighLimit, SetSGReadyCoolCapacity1, SetSGReadyCoolCapacity2 and SetRoomHolidayShiftTemp (the sensor offsets therefore accept whole degrees only through Modbus; use MQTT for half degrees). All other commands (modes, states, times,
+duty) are unscaled signed int16; this includes the SG ready power limits (SetSGReadyDHWPower1 to SetSGReadyStopPower), which take whole kW only through Modbus (write 4 for 4.0 kW; use MQTT for tenths). Allowed values are those of the regular HeishaMon command
 handlers. SetCurves needs JSON and must use MQTT/HTTP.
 
 **Optional PCB temperature commands are x100, like the temperature readings**:
@@ -281,6 +281,26 @@ is `MAIN_COMMANDS` in `HeishaMon/ModbusRegisterMap.h`. IDs 1-1000 map to
 | 5076 | `SetSolarOffDelta` |
 | 5077 | `SetSolarFrostProtection` |
 | 5078 | `SetRoomHolidayShiftTemp` |
+| 5079 | `SetZoneType` |
+| 5080 | `SetHeatingWaterMode` |
+| 5081 | `SetCoolingWaterMode` |
+| 5082 | `SetLiquidType` |
+| 5083 | `SetDHWHeaterType` |
+| 5084 | `SetDHWInstalled` |
+| 5085 | `SetSolarMode` |
+| 5086 | `SetSolarHighLimit` |
+| 5087 | `SetSGReadyMode` |
+| 5088 | `SetSGReadyDHWPower1` |
+| 5089 | `SetSGReadyHeatPower1` |
+| 5090 | `SetSGReadyCoolPower1` |
+| 5091 | `SetSGReadyDHWPower2` |
+| 5092 | `SetSGReadyHeatPower2` |
+| 5093 | `SetSGReadyCoolPower2` |
+| 5094 | `SetSGReadyStopPower` |
+| 5095 | `SetSGReadyCoolCapacity1` |
+| 5096 | `SetSGReadyCoolCapacity2` |
+| 5097 | `SetSensorOffsetReturn` |
+| 5098 | `SetZ1SensorSettings` |
 
 ## Optional PCB commands
 

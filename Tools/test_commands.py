@@ -79,6 +79,12 @@ SETTERS = {
         [("-10", 118), ("-9", 119), ("-127", 1), ("127", 255), ("0", 128)],
         ["-128", "128"],
     ),
+    # solar high limit, 70..90 degC (SM p.182)
+    "SetSolarHighLimit": (
+        64,
+        [("80", 208), ("79", 207), ("70", 198), ("90", 218)],
+        ["69", "91", "0", "-1", "127", "-127", "128", "-128", "255"],
+    ),
 }
 # Read-modify-write setters for bytes with several fields (and commands that need a state of the data
 # block). Each accepted case is (actData overrides, payload, expected value of the byte); the rest of
@@ -228,7 +234,8 @@ RMW_SETTERS = {
         ],
         ["2", "-1"],
     ),
-    # byte 27 bits 5-4 (b01 auto, b10 SG ready, b11 intelligent); bits 1-0, 3-2 and 7-6 stay as read; needs bivalent = yes
+    # byte 27 bits 5-4 (b01 auto, b10 SG ready, b11 intelligent); bits 1-0, 3-2 and 7-6 stay as read; needs bivalent = yes and,
+    # for SG ready / intelligent, SG ready (bits 3-2) off
     "SetBivalentOperatingMode": (
         27,
         [
@@ -236,11 +243,16 @@ RMW_SETTERS = {
             ({26: 0x5E, 27: 0x55}, "2", 0x75),
             ({26: 0x5E, 27: 0x75}, "0", 0x55),
             ({26: 0x5E, 27: 0x95}, "1", 0xA5),
-            ({26: 0x5E, 27: 0x59}, "2", 0x79),
+            ({26: 0x5E, 27: 0x59}, "0", 0x59),
+            ({26: 0x5E, 27: 0x51}, "1", 0x61),  # SG ready not set (b00) is no conflict
             ({26: 0x5E, 27: 0x76}, "0", 0x56),
             ({26: 0x56, 27: 0x55}, "1", 0x65),
         ],
-        [({26: 0x5D, 27: 0x55}, "1"), ({26: 0x5C, 27: 0x55}, "1"), ({26: 0x5F, 27: 0x55}, "1")],
+        [
+            ({26: 0x5D, 27: 0x55}, "1"), ({26: 0x5C, 27: 0x55}, "1"), ({26: 0x5F, 27: 0x55}, "1"),
+            # SG ready (menu 16) and the bivalent SG ready / intelligent pattern exclude each other (manual): only "auto" is possible
+            ({26: 0x5E, 27: 0x59}, "1"), ({26: 0x5E, 27: 0x59}, "2"), ({26: 0x5E, 27: 0x5D}, "1"), ({26: 0x5E, 27: 0x5D}, "2"),
+        ],
         ["3", "-1"],
     ),
     # byte 27 bits 7-6 (b01 off, b10 on); needs byte 26 bits 3-2 = b01 (alternative) and bivalent = yes
@@ -349,7 +361,7 @@ RMW_SETTERS = {
         ],
         ["2", "-1"],
     ),
-    # byte 25 bits 3-2 (b01 3 kW, b10 6 kW); bits 1-0 (tank heater type) and 7-4 stay as read; 9 kW is not accepted
+    # byte 25 bits 3-2 (b01 3 kW, b10 6 kW, b11 9 kW from the upstream decode table); bits 1-0 (tank heater type) and 7-4 stay as read
     "SetInternalHeaterCapacity": (
         25,
         [
@@ -357,13 +369,223 @@ RMW_SETTERS = {
             ({25: 0x29}, "3", 0x25),
             ({25: 0x26}, "6", 0x2A),
             ({25: 0x5E}, "3", 0x56),
+            ({25: 0x25}, "9", 0x2D),
+            ({25: 0x2D}, "3", 0x25),
+            ({25: 0x29}, "9", 0x2D),
+            ({25: 0x5E}, "9", 0x5E),
+            ({25: 0xAA}, "9", 0xAE),
         ],
         [],
-        ["0", "4", "5", "7", "9", "12", "-3"],
+        ["0", "4", "5", "7", "8", "10", "12", "15", "-3", "-9"],
+    ),
+    # byte 21 zone configuration code: only 0x15 (one zone, Z1 room) <-> 0x19 (one zone, Z1 pool), nothing else is touched
+    "SetZoneType": (
+        21,
+        [
+            ({21: 0x15}, "1", 0x19),
+            ({21: 0x19}, "0", 0x15),
+            ({21: 0x15}, "0", 0x15),
+            ({21: 0x19}, "1", 0x19),
+        ],
+        [
+            ({21: 0x16}, "0"), ({21: 0x16}, "1"),  # two zones, Z2 room
+            ({21: 0x26}, "0"), ({21: 0x26}, "1"),  # two zones, Z2 pool
+            ({21: 0x11}, "1"), ({21: 0x55}, "0"), ({21: 0xFF}, "1"), ({21: 0x25}, "0"),
+            ({21: 0x14}, "0"), ({21: 0x1A}, "1"), ({21: 0x01}, "1"), ({21: 0x95}, "0"),
+        ],
+        ["2", "-1", "15", "25", "21"],
+    ),
+    # byte 28 bits 1-0 (heating) / 3-2 (cooling): b01 compensation curve, b10 direct; bits 7-4 and the other pair stay as read,
+    # in particular bits 7-6 (meaning unknown); the pair must read b01 or b10
+    "SetHeatingWaterMode": (
+        28,
+        [
+            ({28: 0x95}, "1", 0x96),
+            ({28: 0x96}, "0", 0x95),
+            ({28: 0x95}, "0", 0x95),
+            ({28: 0x99}, "1", 0x9A),
+            ({28: 0x55}, "1", 0x56),
+            ({28: 0xD5}, "1", 0xD6),
+            ({28: 0x15}, "1", 0x16),
+            ({28: 0x35}, "0", 0x35),
+        ],
+        [({28: 0x94}, "1"), ({28: 0x97}, "0"), ({28: 0x90}, "1"), ({28: 0xFF}, "0")],
+        ["2", "-1"],
+    ),
+    "SetCoolingWaterMode": (
+        28,
+        [
+            ({28: 0x95}, "1", 0x99),
+            ({28: 0x99}, "0", 0x95),
+            ({28: 0x95}, "0", 0x95),
+            ({28: 0x96}, "1", 0x9A),
+            ({28: 0x55}, "1", 0x59),
+            ({28: 0xD6}, "1", 0xDA),
+            ({28: 0x25}, "1", 0x29),
+        ],
+        [({28: 0x91}, "1"), ({28: 0x9D}, "0"), ({28: 0x93}, "1"), ({28: 0xFF}, "0")],
+        ["2", "-1"],
+    ),
+    # byte 20 bits 7-6: b01 water, b10 glycol (inferred); bits 5-0 stay as read
+    "SetLiquidType": (
+        20,
+        [
+            ({20: 0x6A}, "1", 0xAA),
+            ({20: 0xAA}, "0", 0x6A),
+            ({20: 0x6A}, "0", 0x6A),
+            ({20: 0x7B}, "1", 0xBB),
+            ({20: 0xEA}, "1", 0xAA),
+            ({20: 0xEA}, "0", 0x6A),
+        ],
+        [],
+        ["2", "-1"],
+    ),
+    # byte 25 bits 1-0 (b01 internal, b10 external); needs a connected tank (byte 24 bits 1-0 = b10)
+    "SetDHWHeaterType": (
+        25,
+        [
+            ({24: 0x56, 25: 0x25}, "1", 0x26),
+            ({24: 0x56, 25: 0x26}, "0", 0x25),
+            ({24: 0x96, 25: 0x29}, "1", 0x2A),
+            ({24: 0x56, 25: 0x5E}, "0", 0x5D),
+            ({24: 0x56, 25: 0x5D}, "1", 0x5E),
+            ({24: 0x76, 25: 0x2D}, "1", 0x2E),
+        ],
+        [
+            ({24: 0x55, 25: 0x25}, "1"), ({24: 0x55, 25: 0x26}, "0"),  # the pump discards the value without a tank
+            ({24: 0x00, 25: 0x25}, "1"), ({24: 0x57, 25: 0x25}, "1"), ({24: 0x54, 25: 0x25}, "1"),
+        ],
+        ["2", "-1"],
+        {"gate": 25},
+    ),
+    # byte 24 bits 1-0 (b01 no tank, b10 tank); bits 7-2 stay as read (capacity, solar, buffer); "no" is refused while the extra pump is on DHW
+    "SetDHWInstalled": (
+        24,
+        [
+            ({24: 0x55}, "1", 0x56),
+            ({24: 0x56}, "0", 0x55),
+            ({24: 0x96}, "0", 0x95),
+            ({24: 0x95}, "1", 0x96),
+            ({24: 0x75}, "1", 0x76),
+            ({24: 0x56, 31: 0x55}, "0", 0x55),
+            ({24: 0x56, 31: 0x5A}, "0", 0x55),
+            ({24: 0x56, 31: 0x5B}, "1", 0x56),
+            ({24: 0x56, 31: 0x57}, "1", 0x56),
+        ],
+        [
+            ({24: 0x56, 31: 0x5B}, "0"), ({24: 0x56, 31: 0x57}, "0"),  # extra pump on DHW needs the tank
+            ({24: 0x57}, "1"), ({24: 0x54}, "0"), ({24: 0xFC}, "1"),
+        ],
+        ["2", "-1"],
+    ),
+    # byte 24 bits 5-4 (b01 disabled, b10 buffer, b11 DHW); bits 7-6 and 3-0 stay as read
+    "SetSolarMode": (
+        24,
+        [
+            ({24: 0x55}, "2", 0x75),
+            ({24: 0x55}, "1", 0x65),
+            ({24: 0x75}, "0", 0x55),
+            ({24: 0x65}, "0", 0x55),
+            ({24: 0x96}, "2", 0xB6),
+            ({24: 0x56}, "1", 0x66),
+        ],
+        [],
+        ["3", "-1"],
+    ),
+    # byte 27 bits 3-2 (b01 off, b10 capacity, b11 power consumption); bits 7-4 and 1-0 stay as read; switching it on is refused
+    # while the bivalent operating mode (bits 5-4) is SG ready or intelligent (b10 / b11)
+    "SetSGReadyMode": (
+        27,
+        [
+            ({27: 0x55}, "1", 0x59),
+            ({27: 0x55}, "2", 0x5D),
+            ({27: 0x5D}, "0", 0x55),
+            ({27: 0x59}, "2", 0x5D),
+            ({27: 0x59}, "0", 0x55),
+            ({27: 0x96}, "1", 0x9A),
+            ({27: 0x56}, "2", 0x5E),
+            ({27: 0x69}, "0", 0x65),  # switching off is always possible
+            ({27: 0x45}, "1", 0x49),  # bivalent operating mode not set (b00) is no conflict
+            ({27: 0x55}, "0", 0x55),
+        ],
+        [({27: 0x65}, "1"), ({27: 0x65}, "2"), ({27: 0x75}, "1"), ({27: 0x75}, "2"), ({27: 0xA5}, "1")],
+        ["3", "-1"],
+    ),
+    # byte 36 nibbles (like byte 35): high nibble = offset of the return sensor, K / 0.5 + 8; the other nibble must be 2..14
+    "SetSensorOffsetReturn": (
+        36,
+        [
+            ({}, "1", 0xA8),
+            ({}, "0.5", 0x98),
+            ({}, "0", 0x88),
+            ({}, "-3", 0x28),
+            ({}, "3.0", 0xE8),
+            ({}, "-0.5", 0x78),
+            ({}, "-2", 0x48),
+            ({36: 0x8E}, "1", 0xAE),
+            ({36: 0x82}, "-3", 0x22),
+        ],
+        [({36: 0x80}, "1"), ({36: 0x81}, "1"), ({36: 0x8F}, "1")],
+        ["-3.5", "3.5", "4", "-4", "0.25", "1.", ".5", "1.55", "10"],
+        {"skip": {"1.0"}},
+    ),
+    # byte 22 low nibble = zone 1 sensor type, payload 0..3 -> nibble 1..4; the zone 2 nibble must be 1..4
+    "SetZ1SensorSettings": (
+        22,
+        [
+            ({22: 0x11}, "2", 0x13),
+            ({22: 0x13}, "0", 0x11),
+            ({22: 0x11}, "1", 0x12),
+            ({22: 0x11}, "3", 0x14),
+            ({22: 0x21}, "2", 0x23),
+            ({22: 0x41}, "0", 0x41),
+        ],
+        [({22: 0x01}, "1"), ({22: 0x0F}, "1"), ({22: 0x51}, "1"), ({22: 0xF1}, "1")],
+        ["4", "-1"],
     ),
 }
-# commands that existed in earlier drafts and must stay out: unverified side effects or value mapping
-REMOVED_COMMANDS = ("SetZoneType", "SetHeatingWaterMode", "SetLiquidType")
+# SG ready limits: bytes 51..57 are (kW * 10 + 1) and need SG ready = power consumption (byte 27 bits 3-2 = b11);
+# bytes 102 / 103 are degC + 128 and need SG ready on (b10 or b11)
+for _name, _byte in (
+    ("SetSGReadyDHWPower1", 51), ("SetSGReadyHeatPower1", 52), ("SetSGReadyCoolPower1", 53),
+    ("SetSGReadyDHWPower2", 54), ("SetSGReadyHeatPower2", 55), ("SetSGReadyCoolPower2", 56),
+    ("SetSGReadyStopPower", 57),
+):
+    RMW_SETTERS[_name] = (
+        _byte,
+        [
+            ({27: 0x5D}, "4.2", 43),
+            ({27: 0x5D}, "4", 41),
+            ({27: 0x5D}, "0.5", 6),
+            ({27: 0x5D}, "0.6", 7),
+            ({27: 0x5D}, "9.9", 100),
+            ({27: 0x5D}, "10", 101),
+            ({27: 0x5D}, "10.0", 101),
+            ({27: 0x5D}, "1.0", 11),
+            ({27: 0x9D}, "3.6", 37),
+        ],
+        [
+            ({27: 0x55}, "4.2"), ({27: 0x59}, "4.2"), ({27: 0x51}, "4"), ({27: 0xD5}, "4.2"), ({27: 0x00}, "4.2"),
+        ],
+        ["0", "0.4", "0.0", "10.1", "11", "100", "0.55", "4.", ".5", "-1", "-0.5", "4,2", "4.2.1", "1e1", "4.25", "010.5"],
+        {"gate": 27, "skip": {"1.0"}},
+    )
+for _name, _byte in (("SetSGReadyCoolCapacity1", 102), ("SetSGReadyCoolCapacity2", 103)):
+    RMW_SETTERS[_name] = (
+        _byte,
+        [
+            ({27: 0x5D}, "-3", 125),
+            ({27: 0x59}, "-6", 122),
+            ({27: 0x5D}, "0", 128),
+            ({27: 0x5D}, "-15", 113),
+            ({27: 0x59}, "-1", 127),
+        ],
+        [({27: 0x55}, "-3"), ({27: 0x51}, "-3"), ({27: 0x45}, "0")],
+        ["-16", "1", "15", "10", "128", "-128", "255"],
+        {"gate": 27},
+    )
+# commands that must not exist: the pump ignores an anti-stick write, bytes above 109 cannot be written, concrete drying
+REMOVED_COMMANDS = ("SetAntiStickMode", "SetAntiStick", "SetDryConcrete", "SetConcreteDrying", "SetBackupHeaterEnable", "SetCoolModeEnable")
 
 SHIM = r"""
 #include <cassert>
@@ -412,6 +634,7 @@ void reset_act_data() {
   actData[20] = 0x6A; actData[30] = 0x5A; actData[83] = 0x98;
   actData[24] = 0x55; actData[25] = 0x25; actData[26] = 0x5D; actData[27] = 0x55; actData[31] = 0x5A;
   actData[33] = 0x75; actData[34] = (char)0xA7; actData[35] = (char)0x86;
+  actData[21] = 0x15; actData[22] = 0x11; actData[28] = (char)0x95; actData[36] = (char)0x88; actData[37] = (char)0x88;
 }
 struct ActDataInit {
   ActDataInit() { reset_act_data(); }
@@ -642,7 +865,7 @@ def main():
     for i, name in new_ids:
         assert f"SET{i + 1} | {name} |" in docs, f"SET{i + 1} row missing or misnumbered for {name}"
         assert f"| {4999 + i} | `{name}` |" in modbus_doc, f"register row missing for {name}"
-    assert len(re.findall(r"^SET(?:5[6-9]|[6-9]\d) \|", docs, re.M)) == len(new_ids)
+    assert len(re.findall(r"^SET(?:5[6-9]|[6-9]\d|\d{3}) \|", docs, re.M)) == len(new_ids)
     assert f"| {4999 + 55 + len(new_ids)} |" not in modbus_doc, "no register row without a command"
     cases += 3 + len(new_ids)
 
@@ -722,6 +945,104 @@ def main():
     assert(!run_command("SetHeatingOnOutdoorTemp", "35") && !run_command("SetHeatingOnOutdoorTemp", "127"));
     assert(!run_command("SetHeatingOnOutdoorTemp", "4"));
   }
+  { // zone type: only the two one-zone values, two commands in a row, a rejected or foreign state sends nothing
+    reset_act_data();
+    assert(run_command("SetZoneType", "1") && sent[21] == 0x19);
+    assert(run_command("SetZoneType", "0") && sent[21] == 0x15);
+    assert(actData[21] == 0x15);
+    reset_act_data(); actData[21] = (char)0x16;
+    assert(!run_command("SetZoneType", "0") && !run_command("SetZoneType", "1"));
+    actData[21] = (char)0x26;
+    assert(!run_command("SetZoneType", "0") && !run_command("SetZoneType", "1"));
+    reset_act_data(); actData[0] = 0;
+    assert(!run_command("SetZoneType", "1") && !run_command("SetZoneType", "0"));
+    reset_act_data(); actData[21] = 0;
+    assert(!run_command("SetZoneType", "1"));
+    // a raw/cloud frame that sets two zones (0x16) is remembered: the command refuses even before the read-back
+    reset_act_data();
+    { byte frame[sizeof(panasonicSendQuery)]; memcpy(frame, panasonicSendQuery, sizeof(frame)); frame[21] = 0x16;
+      send_command(frame, sizeof(frame)); }
+    assert(!run_command("SetZoneType", "1"));
+    reset_act_data();
+  }
+  { // byte 28: bits 7-6 (and 5-4, and the other pair) are never changed, for every byte value the commands accept
+    for (int value = 1; value < 256; ++value) {
+      for (int cooling = 0; cooling < 2; ++cooling) {
+        for (int payload = 0; payload < 2; ++payload) {
+          reset_act_data(); actData[28] = (char)value;
+          const int shift = cooling ? 2 : 0;
+          const int pair = (value >> shift) & 3;
+          char text[2] = { (char)('0' + payload), 0 };
+          const bool ok = run_command(cooling ? "SetCoolingWaterMode" : "SetHeatingWaterMode", text);
+          assert(ok == (pair == 1 || pair == 2));
+          if (ok) {
+            assert(sent[28] != 0);
+            assert((sent[28] & ~(3 << shift)) == (value & ~(3 << shift)));
+            assert(((sent[28] >> shift) & 3) == payload + 1);
+            assert((sent[28] & 0xC0) == (value & 0xC0));
+            for (unsigned int i = 0; i < sent.size(); ++i) if (i != 28) assert(sent[i] == panasonicSendQuery[i]);
+          }
+        }
+      }
+    }
+    reset_act_data();
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x96);
+    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x9A);
+    assert(run_command("SetHeatingWaterMode", "0") && sent[28] == 0x99);
+    reset_act_data();
+  }
+  { // tank connection, then the tank heater type that needs it; a rejected tank command leaves the heater type blocked
+    reset_act_data();
+    assert(!run_command("SetDHWHeaterType", "1"));
+    assert(run_command("SetDHWInstalled", "1") && sent[24] == 0x56);
+    assert(run_command("SetDHWHeaterType", "1") && sent[25] == 0x26);
+    assert(run_command("SetDHWInstalled", "0") && sent[24] == 0x55);
+    assert(!run_command("SetDHWHeaterType", "0"));
+    reset_act_data();
+    assert(run_command("SetDHWInstalled", "1") && sent[24] == 0x56);
+    deliver_block(2000, 24, 0x55); // the pump did not apply it: the data block is the truth again
+    assert(!run_command("SetDHWHeaterType", "1"));
+    // capacity bits 7-6 stay when the tank flag changes, also through a pending byte
+    reset_act_data(); actData[24] = (char)0x96;
+    assert(run_command("SetDHWInstalled", "0") && sent[24] == 0x95);
+    assert(run_command("SetDHWInstalled", "1") && sent[24] == 0x96);
+    assert(run_command("SetSolarMode", "2") && sent[24] == 0xB6);
+    // the tank cannot be removed while the extra pump is on DHW, also when the extra pump command is still pending
+    reset_act_data(); actData[24] = (char)0x56; actData[31] = (char)0x5A;
+    assert(run_command("SetExtraPump", "2") && sent[31] == 0x1B);
+    assert(!run_command("SetDHWInstalled", "0"));
+    assert(run_command("SetExtraPump", "1") && sent[31] == 0x1A);
+    assert(run_command("SetDHWInstalled", "0") && sent[24] == 0x55);
+    reset_act_data();
+  }
+  { // SG ready: the limits need the mode; SG ready and the bivalent operating mode exclude each other
+    reset_act_data();
+    assert(!run_command("SetSGReadyHeatPower1", "4.2") && !run_command("SetSGReadyCoolCapacity1", "-3"));
+    assert(run_command("SetSGReadyMode", "2") && sent[27] == 0x5D);
+    assert(run_command("SetSGReadyHeatPower1", "4.2") && sent[52] == 43); // uses the pending byte 27, not the data block
+    assert(run_command("SetSGReadyCoolCapacity1", "-3") && sent[102] == 125);
+    assert(run_command("SetSGReadyMode", "1") && sent[27] == 0x59);
+    assert(!run_command("SetSGReadyHeatPower1", "4.2")); // capacity mode: no power limits
+    assert(run_command("SetSGReadyCoolCapacity2", "-6") && sent[103] == 122);
+    assert(run_command("SetSGReadyMode", "0") && sent[27] == 0x55);
+    assert(!run_command("SetSGReadyCoolCapacity2", "-6"));
+    reset_act_data(); actData[26] = (char)0x5E;
+    assert(run_command("SetBivalentOperatingMode", "1") && sent[27] == 0x65);
+    assert(!run_command("SetSGReadyMode", "1") && !run_command("SetSGReadyMode", "2"));
+    assert(run_command("SetBivalentOperatingMode", "0") && sent[27] == 0x55);
+    assert(run_command("SetSGReadyMode", "2") && sent[27] == 0x5D);
+    assert(!run_command("SetBivalentOperatingMode", "1") && !run_command("SetBivalentOperatingMode", "2"));
+    assert(run_command("SetBivalentOperatingMode", "0") && sent[27] == 0x5D);
+    reset_act_data();
+  }
+  { // sensor offset of the return sensor and zone 1 sensor type: pending nibbles
+    reset_act_data();
+    assert(run_command("SetSensorOffsetReturn", "-2") && sent[36] == 0x48);
+    assert(run_command("SetSensorOffsetReturn", "1") && sent[36] == 0xA8);
+    assert(run_command("SetZ1SensorSettings", "2") && sent[22] == 0x13);
+    assert(run_command("SetZ1SensorSettings", "0") && sent[22] == 0x11);
+    assert(actData[36] == (char)0x88 && actData[22] == 0x11);
+  }
   { // shared-byte commands never send a byte they could not complete: no data block, byte 0
     reset_act_data(); actData[0] = 0;
     assert(!run_command("SetEfficiencyStage3Time", "15") && !run_command("SetBivalentAPStartDelay", "35"));
@@ -733,7 +1054,7 @@ def main():
   }
 """
     checks.append(sequences)
-    cases += 10
+    cases += 15
 
     shadow_tests = r"""
   const unsigned long SETTLE = 2000, LIFE = 12000;

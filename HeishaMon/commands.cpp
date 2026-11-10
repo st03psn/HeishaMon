@@ -366,7 +366,7 @@ unsigned int set_quiet_mode_schedule(char *msg, unsigned char *cmd, char *log_ms
 }
 
 // ---- Settings that share a byte with other fields -------------------------------------------------
-// Bytes 20, 25, 26, 27, 30, 31, 33 and 35 hold more than one setting. It is not verified that a zero
+// Bytes 20, 21, 22, 24, 25, 26, 27, 28, 30, 31, 33, 35 and 36 hold more than one setting. It is not verified that a zero
 // pair or nibble for a foreign field means "no change" (the raw tests always wrote whole bytes), so these
 // commands never rely on it: the new byte is built from the validated field and the unchanged remaining
 // bits and sent whole. Nothing is sent while no data block has been received or while the byte reads 0
@@ -409,11 +409,12 @@ struct rmwTracked {
 };
 
 static const rmwTracked rmwTrackedBytes[] PROGMEM = {
-  { 20, 2 }, { 24, 2 }, { 25, 2 }, { 26, 2 }, { 27, 2 }, { 30, 2 }, { 31, 2 }, { 33, 4 }, { 34, 4 }, { 35, 4 },
+  { 20, 2 }, { 21, 2 }, { 22, 4 }, { 24, 2 }, { 25, 2 }, { 26, 2 }, { 27, 2 }, { 28, 2 }, { 30, 2 }, { 31, 2 },
+  { 33, 4 }, { 34, 4 }, { 35, 4 }, { 36, 4 },
 };
 #define RMW_TRACKED (sizeof(rmwTrackedBytes) / sizeof(rmwTrackedBytes[0]))
 
-// RAM: 10 slots x 6 bytes (value, valid, 32-bit time) = 60 bytes on ESP8266; the address/unit table is in flash.
+// RAM: 14 slots x 6 bytes (value, valid, 32-bit time) = 84 bytes on ESP8266; the address/unit table is in flash.
 struct rmwPending {
   unsigned long since;
   byte value;
@@ -664,9 +665,18 @@ unsigned int set_bivalent_ap_heat(char *msg, unsigned char *cmd, char *log_msg) 
 }
 
 // byte 27 bits 5-4: b01 auto, b10 SG ready, b11 intelligent (TOP180). Bits 1-0 (demand control) and 3-2
-// (SG ready) of the same byte are kept as read.
+// (SG ready) of the same byte are kept as read. The manuals state that this bivalent pattern and the SG ready
+// setting (menu 16, SetSGReadyMode) exclude each other and that the unit resets the other one when one is set
+// (SM p.103, p.105): SG ready or intelligent are therefore refused while SG ready is on (bits 3-2 = b10 or b11).
 unsigned int set_bivalent_operating_mode(char *msg, unsigned char *cmd, char *log_msg) {
-  return set_pair_field(msg, cmd, log_msg, 27, 4, 2, true);
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_pair_field(msg, tmp, log_msg, 27, 4, 2, true) == 0) return 0;
+  if ((tmp[27] & 0x30) != 0x10 && (tmp[27] & 0x08) != 0) {
+    snprintf_P(log_msg, 256, PSTR("Cannot set this bivalent operating mode while SG ready is on: switch SG ready off first (SetSGReadyMode 0)"));
+    return 0;
+  }
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
 }
 
 // byte 27 bits 7-6: external pump b01 off / b10 on (TOP181), only seen with bivalent mode alternative (b01 in bits 3-2 of byte 26)
@@ -741,11 +751,12 @@ unsigned int set_extra_pump_mode(char *msg, unsigned char *cmd, char *log_msg) {
   return send_extra_pump_nibble(cmd, log_msg, current, tmp[31] == 0 ? 0x7 : 0xB);
 }
 
-// Back-up heater capacity, byte 25 bits 3-2 (TOP147): 3 kW = b01, 6 kW = b10. 9 kW (b11) is only
-// assumed from the read side and is not accepted. Bits 1-0 (tank heater type) and 7-4 are sent as read.
+// Back-up heater capacity, byte 25 bits 3-2 (TOP147): 3 kW = b01, 6 kW = b10 (both seen on the wire),
+// 9 kW = b11 (not seen on the wire: the encoding comes from the upstream decode table, getHeaterCapacity(), and
+// from the 3 / 6 / 9 kW option list of the cloud and the manuals). Bits 1-0 (tank heater type) and 7-4 are sent as read.
 unsigned int set_internal_heater_capacity(char *msg, unsigned char *cmd, char *log_msg) {
   unsigned char tmp[sizeof(panasonicSendQuery)];
-  if (set_integer_field(msg, tmp, log_msg, 25, 3, 6, 3, 3, 0, 4) == 0) return 0;
+  if (set_integer_field(msg, tmp, log_msg, 25, 3, 9, 3, 3, 0, 4) == 0) return 0;
   byte current = 0;
   if (!current_data_byte(log_msg, 25, current)) return 0;
   tmp[25] = (unsigned char)((current & ~0x0C) | tmp[25]);
@@ -768,6 +779,200 @@ unsigned int set_solar_frost_protection(char *msg, unsigned char *cmd, char *log
 
 unsigned int set_room_holiday_shift_temp(char *msg, unsigned char *cmd, char *log_msg) { // byte 43, TOP45
   return set_integer_field(msg, cmd, log_msg, 43, -127, 127, 1, 1, 128, 1);
+}
+
+// ---- Settings added on request of the device owner, with thinner evidence --------------------------
+// Each of these is documented with its evidence class in MQTT-Topics.md. Common rules: the new byte is built from the
+// validated field and the unchanged other bits of the data block (or of the pending byte), nothing is sent without a
+// data block or while the byte reads 0, and a value 0x00 is never sent.
+
+// Zone type, byte 21 (TOP146 shows the whole configuration code). Only the two one-zone values that were written on the
+// unit are handled: 0x15 (one zone, zone 1 room) and 0x19 (one zone, zone 1 pool), 0x15 <-> 0x19. With any other current
+// value (two zones 0x16 / 0x26, unknown, byte 0, no data block) nothing is sent, so a two-zone installation is never
+// reconfigured. Observed side effect on the unit: see MQTT-Topics.md.
+unsigned int set_zone_type(char *msg, unsigned char *cmd, char *log_msg) {
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 21, 0, 1, 1, 1, 0, 1) == 0) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, 21, current)) return 0;
+  if (current != 0x15 && current != 0x19) {
+    snprintf_P(log_msg, 256, PSTR("Cannot set the zone type: byte 21 reads 0x%02X, only the one-zone values 0x15 (room) and 0x19 (pool) are handled"), (unsigned int)current);
+    return 0;
+  }
+  tmp[21] = tmp[21] == 0 ? 0x15 : 0x19;
+  memcpy(cmd, tmp, sizeof(tmp));
+  snprintf_P(log_msg, 256, PSTR("set zone 1 type to %s"), tmp[21] == 0x15 ? "room" : "pool");
+  return sizeof(panasonicSendQuery);
+}
+
+// Heating (bits 1-0, TOP76) and cooling (bits 3-2, TOP81) water temperature mode of byte 28: payload 0 = compensation
+// curve (b01), 1 = direct (b10). Bits 7-6 (meaning unknown) and 5-4 are never changed: they are sent as read. The pair
+// that is set must currently read b01 or b10 (b00 = not used by this unit). The heat pump moves curve points when the
+// mode is changed (see MQTT-Topics.md).
+static unsigned int set_water_mode(char *msg, unsigned char *cmd, char *log_msg, byte shift) {
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 28, 0, 1, 1, 1, 1, 1 << shift) == 0) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, 28, current)) return 0;
+  const byte pair = (current >> shift) & 0x03;
+  if (pair != 1 && pair != 2) {
+    snprintf_P(log_msg, 256, PSTR("Cannot set the water temperature mode: bits %u-%u of byte 28 read b%u%u, expected b01 or b10"),
+               (unsigned int)shift + 1, (unsigned int)shift, (unsigned int)(pair >> 1), (unsigned int)(pair & 1));
+    return 0;
+  }
+  tmp[28] = (unsigned char)((current & ~(0x03 << shift)) | tmp[28]);
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
+}
+
+unsigned int set_heating_water_mode(char *msg, unsigned char *cmd, char *log_msg) { // byte 28 bits 1-0, TOP76
+  return set_water_mode(msg, cmd, log_msg, 0);
+}
+
+unsigned int set_cooling_water_mode(char *msg, unsigned char *cmd, char *log_msg) { // byte 28 bits 3-2, TOP81
+  return set_water_mode(msg, cmd, log_msg, 2);
+}
+
+// Circulation liquid, byte 20 bits 7-6 (TOP107): 0 = water (b01), 1 = glycol (b10). b01 was written and read back; b10 was
+// only read back after a write of b11 (the unit normalised b11 to b10), and the label "glycol" for b10 comes from the
+// upstream decode table: inferred. Bits 5-0 (alternative sensor, anti freeze, optional PCB) are sent as read.
+unsigned int set_liquid_type(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_pair_field(msg, cmd, log_msg, 20, 6, 1);
+}
+
+// Tank heater type, byte 25 bits 1-0 (TOP148): 0 = internal (b01), 1 = external (b10). The heat pump discarded a written
+// value while no DHW tank was connected and kept it with tank connection = yes, so the command needs byte 24 bits 1-0 = b10.
+unsigned int set_dhw_heater_type(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_pair_field(msg, cmd, log_msg, 25, 0, 1, false, 24, 0x03, 0x02, "a connected DHW tank");
+}
+
+// DHW tank connection, byte 24 bits 1-0 (TOP100): 0 = no (b01), 1 = yes (b10). Bits 7-6 (DHW capacity), 5-4 (solar) and
+// 3-2 (buffer) are sent as read: the unit keeps a capacity that was set while the tank was connected, also with
+// tank connection = no, and does not return to "variable" by itself. The cloud additionally writes byte 30; this command
+// does not (a raw write of byte 24 alone was accepted). Not accepted: removing the tank while the extra pump is set to DHW.
+unsigned int set_dhw_installed(char *msg, unsigned char *cmd, char *log_msg) {
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 24, 0, 1, 1, 1, 1, 1) == 0) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, 24, current)) return 0;
+  const byte pair = current & 0x03;
+  if (pair != 1 && pair != 2) {
+    snprintf_P(log_msg, 256, PSTR("Cannot set the DHW tank connection: bits 1-0 of byte 24 read b%u%u, expected b01 or b10"),
+               (unsigned int)(pair >> 1), (unsigned int)(pair & 1));
+    return 0;
+  }
+  if (tmp[24] == 1 && (effective_byte(31) & 0x03) == 0x03) {
+    snprintf_P(log_msg, 256, PSTR("Cannot disconnect the DHW tank while the extra pump is set to DHW (SetExtraPump 2)"));
+    return 0;
+  }
+  tmp[24] = (unsigned char)((current & ~0x03) | tmp[24]);
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
+}
+
+// Solar mode, byte 24 bits 5-4 (TOP101): 0 = disabled (b01), 1 = buffer (b10), 2 = DHW (b11). b01 and b11 were seen in the
+// cloud, b10 and b11 were raw-written; "buffer" for b10 comes from the upstream decode table. Bits 7-6 and 3-0 are sent as read.
+unsigned int set_solar_mode(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_pair_field(msg, cmd, log_msg, 24, 4, 2);
+}
+
+// Solar high limit, byte 64 (TOP105), degC + 128, 70..90 degC (SM p.182). The heat pump reverted a raw write after about 5 s.
+unsigned int set_solar_high_limit(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_integer_field(msg, cmd, log_msg, 64, 70, 90, 1, 1, 128, 1);
+}
+
+// SG ready, byte 27 bits 3-2 (TOP149): 0 = off (b01), 1 = on, mode capacity (b10), 2 = on, mode power consumption (b11).
+// The manuals state that SG ready and the bivalent operating mode exclude each other, so switching it on is refused
+// while the bivalent operating mode (bits 5-4) is SG ready or intelligent (b10 or b11). Bits 7-6 and 1-0 are sent as read.
+unsigned int set_sg_ready_mode(char *msg, unsigned char *cmd, char *log_msg) {
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 27, 0, 2, 1, 1, 1, 4) == 0) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, 27, current)) return 0;
+  if (tmp[27] != 0x04 && (current & 0x20) != 0) {
+    snprintf_P(log_msg, 256, PSTR("Cannot switch SG ready on while the bivalent operating mode is SG ready or intelligent (SetBivalentOperatingMode 0)"));
+    return 0;
+  }
+  tmp[27] = (unsigned char)((current & ~0x0C) | tmp[27]);
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
+}
+
+// kW value with at most one decimal ("4", "4.2", "10.0"), returned in tenths
+static bool parse_tenths(const char *msg, int &tenths) {
+  const size_t length = msg == NULL ? 0 : strlen(msg);
+  size_t index = 0;
+  int whole = 0;
+  while (index < length && index < 3 && msg[index] >= '0' && msg[index] <= '9') {
+    whole = whole * 10 + msg[index] - '0';
+    index++;
+  }
+  if (index == 0) return false;
+  int tenth = 0;
+  if (index < length) {
+    if (msg[index] != '.' || index + 2 != length || msg[index + 1] < '0' || msg[index + 1] > '9') return false;
+    tenth = msg[index + 1] - '0';
+  }
+  tenths = whole * 10 + tenth;
+  return true;
+}
+
+// SG ready power consumption limits, bytes 51..57, byte = kW * 10 + 1 (kW = (x - 1) / 10), 0.5..10.0 kW (SM p.190).
+// Raw writes of bytes 51, 56 and 57 were accepted while byte 27 was b11 (power consumption); the cloud fields exist in that
+// mode only, so the commands need byte 27 bits 3-2 = b11.
+static unsigned int set_sg_ready_power(char *msg, unsigned char *cmd, char *log_msg, byte address) {
+  int tenths = 0;
+  if (!parse_tenths(msg, tenths) || tenths < 5 || tenths > 100) {
+    snprintf_P(log_msg, 256, PSTR("Invalid SG ready power for byte %u: expected 0.5 to 10.0 kW in steps of 0.1"), address);
+    return 0;
+  }
+  if (!require_state(log_msg, 27, 0x0C, 0x0C, "SG ready set to power consumption (SetSGReadyMode 2)")) return 0;
+  memcpy_P(cmd, panasonicSendQuery, sizeof(panasonicSendQuery));
+  cmd[address] = (unsigned char)(tenths + 1);
+  snprintf_P(log_msg, 256, PSTR("set byte %u to %d tenths of a kW"), address, tenths);
+  return sizeof(panasonicSendQuery);
+}
+
+unsigned int set_sg_ready_dhw_power_1(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_power(msg, cmd, log_msg, 51); }
+unsigned int set_sg_ready_heat_power_1(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_power(msg, cmd, log_msg, 52); }
+unsigned int set_sg_ready_cool_power_1(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_power(msg, cmd, log_msg, 53); }
+unsigned int set_sg_ready_dhw_power_2(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_power(msg, cmd, log_msg, 54); }
+unsigned int set_sg_ready_heat_power_2(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_power(msg, cmd, log_msg, 55); }
+unsigned int set_sg_ready_cool_power_2(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_power(msg, cmd, log_msg, 56); } // label by elimination
+unsigned int set_sg_ready_stop_power(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_power(msg, cmd, log_msg, 57); }
+
+// SG ready cooling capacity 1 / 2, bytes 102 / 103, degC + 128, -15..0 degC (SM p.190). Raw-written while byte 27 was b11; the
+// manual lists the field for the capacity mode, so SG ready must be on (b10 or b11).
+static unsigned int set_sg_ready_cool_capacity(char *msg, unsigned char *cmd, char *log_msg, byte address) {
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, address, -15, 0, 1, 1, 128, 1) == 0) return 0;
+  if (!have_data_block(log_msg, 27)) return 0;
+  if ((effective_byte(27) & 0x0C) < 0x08) {
+    snprintf_P(log_msg, 256, PSTR("Cannot set this field now: it needs SG ready switched on (SetSGReadyMode 1 or 2, byte 27)"));
+    return 0;
+  }
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
+}
+
+unsigned int set_sg_ready_cool_capacity_1(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_cool_capacity(msg, cmd, log_msg, 102); }
+unsigned int set_sg_ready_cool_capacity_2(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_cool_capacity(msg, cmd, log_msg, 103); }
+
+// Return sensor offset, byte 36 high nibble (TOP193), same encoding and limits as the offsets of byte 35. The other nibble
+// of byte 36 must be a valid offset nibble (2..14). The low nibbles of bytes 36 and 37 are not assigned to a sensor
+// and have no command.
+unsigned int set_sensor_offset_return(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_sensor_offset(msg, cmd, log_msg, 36, true);
+}
+
+// Zone 1 sensor type, byte 22 low nibble (TOP111): payload 0..3 = nibble 1..4 (water temperature, external thermostat,
+// internal thermostat, thermistor). The high nibble (zone 2) is sent as read and must be 1..4. Zone 2 has no command.
+unsigned int set_z1_sensor_settings(char *msg, unsigned char *cmd, char *log_msg) {
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 22, 0, 3, 1, 1, 1, 1) == 0) return 0;
+  if (!merge_other_nibble(tmp, log_msg, 22, false, 1, 4)) return 0;
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
 }
 
 unsigned int set_sterilization_temp(char *msg, unsigned char *cmd, char *log_msg) {
