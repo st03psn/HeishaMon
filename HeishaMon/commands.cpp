@@ -544,15 +544,17 @@ unsigned int set_static_pressure(char *msg, unsigned char *cmd, char *log_msg) {
   return set_pair_field(msg, cmd, log_msg, 31, 4, 1);
 }
 
-// Whole-number settings in a byte of their own (same style as SetHeatToCoolTemp). The limits are the nonzero wire range.
-unsigned int set_pool_delta(char *msg, unsigned char *cmd, char *log_msg) { // byte 58, K + 128, TOP153
-  return set_integer_field(msg, cmd, log_msg, 58, -127, 127, 1, 1, 128, 1);
+// Whole-number settings in a byte of their own (same style as SetHeatToCoolTemp). The limits are the installer
+// menu limits where the manuals give them, otherwise the nonzero wire range.
+unsigned int set_pool_delta(char *msg, unsigned char *cmd, char *log_msg) { // byte 58, K + 128, TOP153, menu: 0..10 K
+  return set_integer_field(msg, cmd, log_msg, 58, 0, 10, 1, 1, 128, 1);
 }
 
-// byte 108, degC + 128, TOP171. The installer menu allows 5 up to (heating OFF temperature - 1, byte 83).
+// byte 108, degC + 128, TOP171. The installer menu allows 5 up to (heating OFF temperature - 1, byte 83); the
+// heating OFF temperature itself goes up to 35, so 34 is the highest value the menu can ever offer.
 unsigned int set_heating_on_outdoor_temp(char *msg, unsigned char *cmd, char *log_msg) {
   unsigned char tmp[sizeof(panasonicSendQuery)];
-  if (set_integer_field(msg, tmp, log_msg, 108, 5, 127, 1, 1, 128, 1) == 0) return 0;
+  if (set_integer_field(msg, tmp, log_msg, 108, 5, 34, 1, 1, 128, 1) == 0) return 0;
   if (actData[0] == 0x71 && actData[1] == (char)0xc8 && actData[2] == 0x01 && actData[83] != 0 && tmp[108] >= (byte)actData[83]) {
     snprintf_P(log_msg, 256, PSTR("Invalid heating ON temperature: it must be below the heating OFF temperature (%d)"), (int)(byte)actData[83] - 128);
     return 0;
@@ -561,11 +563,11 @@ unsigned int set_heating_on_outdoor_temp(char *msg, unsigned char *cmd, char *lo
   return sizeof(panasonicSendQuery);
 }
 
-unsigned int set_heating_on_delay(char *msg, unsigned char *cmd, char *log_msg) { // byte 109, minutes / 30 + 1, TOP172
-  return set_integer_field(msg, cmd, log_msg, 109, 30, 7620, 30, 30, 1, 1);
+unsigned int set_heating_on_delay(char *msg, unsigned char *cmd, char *log_msg) { // byte 109, minutes / 30 + 1, TOP172, menu: 0:30 to 24:00
+  return set_integer_field(msg, cmd, log_msg, 109, 30, 1440, 30, 30, 1, 1);
 }
 
-unsigned int set_dhw_booster_delay(char *msg, unsigned char *cmd, char *log_msg) { // byte 60, minutes + 1, TOP173, 20 min to 3 h in 5 min steps
+unsigned int set_dhw_booster_delay(char *msg, unsigned char *cmd, char *log_msg) { // byte 60, minutes + 1, TOP173, menu: 0:20 to 3:00 in 5 min steps
   return set_integer_field(msg, cmd, log_msg, 60, 20, 180, 5, 1, 1, 1);
 }
 
@@ -752,16 +754,16 @@ unsigned int set_internal_heater_capacity(char *msg, unsigned char *cmd, char *l
 }
 
 // Single-byte temperature settings (degC or K + 128), same style as SetPoolDelta
-unsigned int set_solar_on_delta(char *msg, unsigned char *cmd, char *log_msg) { // byte 61, TOP102
-  return set_integer_field(msg, cmd, log_msg, 61, -127, 127, 1, 1, 128, 1);
+unsigned int set_solar_on_delta(char *msg, unsigned char *cmd, char *log_msg) { // byte 61, TOP102, menu: 5..15 K
+  return set_integer_field(msg, cmd, log_msg, 61, 5, 15, 1, 1, 128, 1);
 }
 
-unsigned int set_solar_off_delta(char *msg, unsigned char *cmd, char *log_msg) { // byte 62, TOP103
-  return set_integer_field(msg, cmd, log_msg, 62, -127, 127, 1, 1, 128, 1);
+unsigned int set_solar_off_delta(char *msg, unsigned char *cmd, char *log_msg) { // byte 62, TOP103, menu: 2..10 K
+  return set_integer_field(msg, cmd, log_msg, 62, 2, 10, 1, 1, 128, 1);
 }
 
-unsigned int set_solar_frost_protection(char *msg, unsigned char *cmd, char *log_msg) { // byte 63, TOP104
-  return set_integer_field(msg, cmd, log_msg, 63, -127, 127, 1, 1, 128, 1);
+unsigned int set_solar_frost_protection(char *msg, unsigned char *cmd, char *log_msg) { // byte 63, TOP104, menu: -20..10 degC
+  return set_integer_field(msg, cmd, log_msg, 63, -20, 10, 1, 1, 128, 1);
 }
 
 unsigned int set_room_holiday_shift_temp(char *msg, unsigned char *cmd, char *log_msg) { // byte 43, TOP45

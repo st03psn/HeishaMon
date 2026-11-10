@@ -32,43 +32,47 @@ SETTERS = {
     ),
     "SetQuietModeSchedule": (7, [("0", 64), ("1", 128)], ["2", "-1"]),
     # settings in a byte of their own (no data block needed)
+    # installer menu: 0..10 K
     "SetPoolDelta": (
         58,
-        [("0", 128), ("7", 135), ("-127", 1), ("127", 255)],
-        ["-128", "128"],
+        [("0", 128), ("7", 135), ("10", 138)],
+        ["-1", "11", "-127", "127", "-128", "128"],
     ),
-    # 5..127 degC, and below the heating OFF temperature (actData[83] = 0x98 = 24 degC) while a data block exists
+    # 5..34 degC (menu: up to heating OFF - 1, OFF is at most 35), and below the heating OFF temperature
+    # (actData[83] = 0x98 = 24 degC) while a data block exists
     "SetHeatingOnOutdoorTemp": (
         108,
         [("15", 143), ("14", 142), ("5", 133), ("23", 151)],
-        ["4", "24", "25", "127", "-127", "0", "-128", "128"],
+        ["4", "24", "25", "34", "35", "127", "-127", "0", "-128", "128"],
     ),
+    # installer menu: 0:30 to 24:00 in 30 min steps
     "SetHeatingOnDelay": (
         109,
-        [("30", 2), ("60", 3), ("7620", 255)],
-        ["0", "29", "31", "45", "7650"],
+        [("30", 2), ("60", 3), ("1440", 49)],
+        ["0", "29", "31", "45", "1415", "1441", "1470", "7620", "7650"],
     ),
-    # 20 min to 3 h in 5 min steps
+    # installer menu: 0:20 to 3:00 in 5 min steps
     "SetDHWBoosterDelay": (
         60,
         [("90", 91), ("95", 96), ("20", 21), ("180", 181)],
         ["0", "1", "15", "19", "21", "92", "185", "254", "255", "-1"],
     ),
     # single-byte temperatures: no other field in the byte
+    # installer menu limits: on delta 5..15 K, off delta 2..10 K, anti-freeze temperature -20..10 degC
     "SetSolarOnDelta": (
         61,
-        [("10", 138), ("11", 139), ("-127", 1), ("127", 255), ("0", 128)],
-        ["-128", "128"],
+        [("10", 138), ("11", 139), ("5", 133), ("15", 143)],
+        ["4", "16", "0", "-5", "-127", "127", "-128", "128"],
     ),
     "SetSolarOffDelta": (
         62,
-        [("5", 133), ("6", 134), ("-127", 1), ("127", 255), ("0", 128)],
-        ["-128", "128"],
+        [("5", 133), ("6", 134), ("2", 130), ("10", 138)],
+        ["1", "11", "0", "-2", "-127", "127", "-128", "128"],
     ),
     "SetSolarFrostProtection": (
         63,
-        [("5", 133), ("6", 134), ("-127", 1), ("127", 255), ("0", 128)],
-        ["-128", "128"],
+        [("5", 133), ("6", 134), ("10", 138), ("0", 128), ("-20", 108)],
+        ["-21", "11", "-127", "127", "-128", "128"],
     ),
     "SetRoomHolidayShiftTemp": (
         43,
@@ -710,8 +714,12 @@ def main():
     assert(!run_command("SetHeatingOnOutdoorTemp", "24"));
     actData[83] = 0; // not reported
     assert(run_command("SetHeatingOnOutdoorTemp", "30") && sent[108] == 158);
+    assert(run_command("SetHeatingOnOutdoorTemp", "34") && sent[108] == 162); // highest value the menu can offer (OFF max 35 - 1)
+    assert(!run_command("SetHeatingOnOutdoorTemp", "35"));
     reset_act_data(); actData[0] = 0; // no data block
     assert(run_command("SetHeatingOnOutdoorTemp", "30") && sent[108] == 158);
+    assert(run_command("SetHeatingOnOutdoorTemp", "34") && sent[108] == 162);
+    assert(!run_command("SetHeatingOnOutdoorTemp", "35") && !run_command("SetHeatingOnOutdoorTemp", "127"));
     assert(!run_command("SetHeatingOnOutdoorTemp", "4"));
   }
   { // shared-byte commands never send a byte they could not complete: no data block, byte 0

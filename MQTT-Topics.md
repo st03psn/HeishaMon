@@ -333,13 +333,13 @@ SET53 | SetRoomOperationMaxTime | Maximum room heating operation time when alter
 SET54 | SetDHWHeatupMaxTime | Maximum DHW heat-up time; readback TOP159 | integer 1..254 minutes (wire range)
 SET55 | SetQuietModeSchedule | Enable/disable the existing quiet-mode schedule; readback TOP3 | 0=off, 1=on
 SET56 | SetAntiFreezeMode | Anti freezing option; readback TOP109. Shared byte, see below | 0=off, 1=on
-SET57 | SetPoolDelta | Pool delta T; readback TOP153 | integer -127..127 K (wire range)
+SET57 | SetPoolDelta | Pool delta T; readback TOP153 | integer 0..10 K (installer menu range)
 SET58 | SetDemandControlEnable | Demand control option in the installer menu (not the optional PCB value of SetDemandControl); readback TOP150. Shared byte, see below | 0=disabled, 1=enabled
 SET59 | SetDHWDefrost | Use tank water for defrost; readback TOP151. Shared byte, see below | 0=no, 1=yes
 SET60 | SetStaticPressure | Static pressure option; readback TOP170. Shared byte, see below | 0=disabled, 1=enabled
-SET61 | SetHeatingOnOutdoorTemp | Outdoor temperature for heating ON; readback TOP171. Must be below the heating OFF temperature (SetHeatingOffOutdoorTemp) as soon as the heat pump has reported it | integer 5..127 °C
-SET62 | SetHeatingOnDelay | Heating ON delay time; readback TOP172 | 30..7620 minutes, multiples of 30 (wire range)
-SET63 | SetDHWBoosterDelay | Switch-on delay of the external DHW booster heater; readback TOP173 | 20..180 minutes, multiples of 5
+SET61 | SetHeatingOnOutdoorTemp | Outdoor temperature for heating ON; readback TOP171. Must be below the heating OFF temperature (SetHeatingOffOutdoorTemp) as soon as the heat pump has reported it | integer 5..34 °C (menu minimum 5; the heating OFF temperature goes up to 35)
+SET62 | SetHeatingOnDelay | Heating ON delay time; readback TOP172 | 30..1440 minutes (0:30 to 24:00 in the installer menu), multiples of 30
+SET63 | SetDHWBoosterDelay | Switch-on delay of the external DHW booster heater; readback TOP173 | 20..180 minutes (0:20 to 3:00 in the installer menu), multiples of 5
 SET64 | SetEfficiencyStage1Time | Efficiency stage 1 duration; readback TOP174. Nibble field, see below | 0..60 minutes, multiples of 5
 SET65 | SetEfficiencyStage2Time | Efficiency stage 2 duration; readback TOP175. Nibble field, see below | 0..60 minutes, multiples of 5
 SET66 | SetEfficiencyStage3Time | Efficiency stage 3 duration; readback TOP176. Nibble field, see below | 0..30 minutes, multiples of 5
@@ -353,16 +353,16 @@ SET73 | SetBivalentAPStopDelay | Delay for the bivalent heat source stop in adva
 SET74 | SetExtraPump | Extra pump use; readback TOP182. `2` (DHW) needs a connected DHW tank (TOP100 = 1), `0` and `1` do not. Shared byte, see below | 0=not used, 1=heating, 2=DHW
 SET75 | SetExtraPumpMode | Extra pump mode; readback TOP183. Only with the extra pump on DHW (TOP182 = 2) and a connected DHW tank. Shared byte, see below | 0=comfort, 1=efficiency
 SET76 | SetInternalHeaterCapacity | Back-up heater capacity; readback TOP147. Shared byte, see below | 3 or 6 (kW)
-SET77 | SetSolarOnDelta | Solar connection: delta T for tank ON; readback TOP102 | integer -127..127 K (wire range)
-SET78 | SetSolarOffDelta | Solar connection: delta T for tank OFF; readback TOP103 | integer -127..127 K (wire range)
-SET79 | SetSolarFrostProtection | Solar connection: anti-freeze temperature; readback TOP104 (the solar high limit, TOP105, has no command: the heat pump reverted a written value) | integer -127..127 °C (wire range)
+SET77 | SetSolarOnDelta | Solar connection: delta T for tank ON; readback TOP102 | integer 5..15 K (installer menu range)
+SET78 | SetSolarOffDelta | Solar connection: delta T for tank OFF; readback TOP103 | integer 2..10 K (installer menu range)
+SET79 | SetSolarFrostProtection | Solar connection: anti-freeze temperature; readback TOP104 (the solar high limit, TOP105, has no command: the heat pump reverted a written value) | integer -20..10 °C (installer menu range)
 SET80 | SetRoomHolidayShiftTemp | Room heating shift in holiday mode; readback TOP45 | integer -127..127 K (wire range)
 
 SET51–SET55 require complete integer payloads; empty, malformed, out-of-range or invalid-step values are rejected without sending a telegram. The ranges above describe the nonzero protocol encoding, not verified installer-menu limits. Use settings supported by your model; the heat pump may reject values outside its own menu range. These writes follow the documented telegram examples but have not been hardware-tested here. SetQuietModeSchedule toggles the existing schedule and does not configure its times or change the quiet level.
 
 Example: publish `21` to `panasonic_heat_pump/commands/SetHeatToCoolTemp`, `90` to `panasonic_heat_pump/commands/SetRoomOperationMaxTime`, or `1` to `panasonic_heat_pump/commands/SetQuietModeSchedule` (replace the base topic as configured).
 
-SET56–SET80 are based on observations on one M-series unit (heat pump off) and on raw `SendRawValue` writes; they have not been tested on other models, and none of them has been tested through these commands on hardware. They require complete payloads (`SetSensorOffset*` also accept one decimal `.0` or `.5`); empty, malformed, out-of-range or invalid-step values are rejected without sending a telegram. Ranges describe the nonzero wire encoding where no installer-menu limit is given; the heat pump may reject values outside its own menu range.
+SET56–SET80 are based on observations on one M-series unit (heat pump off) and on raw `SendRawValue` writes; they have not been tested on other models, and none of them has been tested through these commands on hardware. They require complete payloads (`SetSensorOffset*` also accept one decimal `.0` or `.5`); empty, malformed, out-of-range or invalid-step values are rejected without sending a telegram. Where the Panasonic manuals give an installer-menu limit (SetPoolDelta, SetHeatingOnOutdoorTemp, SetHeatingOnDelay, SetDHWBoosterDelay, SetEfficiencyStage1Time, the three SetSolar* commands, the sensor offsets), the range above is that menu range. Elsewhere (SetEfficiencyStage2Time, SetEfficiencyStage3Time, the bivalent delays, SetRoomHolidayShiftTemp) the manuals give no limit and the range is the one seen on the unit or the nonzero wire encoding; the heat pump may reject values outside its own menu range. The sensor offset step of 0.5 K is not stated in the manuals (it comes from the observed encoding). The back-up heater capacity is limited to 3 and 6 kW because the 9 kW value that the manuals list for some models has not been seen on the wire.
 
 **Shared-byte commands (SET56, SET58–SET60, SET64–SET71, SET74–SET76):** these settings live in bytes 20, 25, 26, 27, 30, 31, 33 and 35, which hold several fields. It is not verified that a zero pair or nibble for the other fields means "no change", so the commands do not rely on it: they build the new byte from the validated field and the unchanged remaining bits of the last data block received from the heat pump and send the whole byte. They are rejected until a data block has arrived and while the byte reads 0 (a setting the unit does not have). A bit pair is sent as b01/b10 (b11 for the three-way bivalent operating mode). The efficiency stage and sensor offset commands also refuse when the other nibble of the byte is not a valid value for its own field (stage time nibble 1..15, offset nibble 2..14). Byte 31 (static pressure, extra pump) is always sent with bits 7-6 cleared, other bits as read.
 
