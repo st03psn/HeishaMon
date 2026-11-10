@@ -317,7 +317,7 @@ SET24 | SetMainSchedule | Set weekly schedule | 0=off, 1=on
 SET25 | SetAltExternalSensor | Set the alternative external outdoor sensor | 0=disabled, 1=enabled
 SET26 | SetExternalPadHeater | Set the external pad heater | 0=disabled, 1=type-A, 2=type-B
 SET27 | SetBufferDelta | Set buffer tank delta | 0 - 10
-SET28 | SetBuffer | Set buffer installed | 0=not installed, 1=installed
+SET28 | SetBuffer | Set buffer installed. On an M-series test unit, setting 1 without a connected buffer sensor raised error H43 within 5 s; the error stayed until it was reset, also after setting 0 again (see AquareaParity.md) | 0=not installed, 1=installed
 SET29 | SetHeatingOffOutdoorTemp | Set Outdoor Temperature to stop heating | 5 to 35
 SET30 | SetExternalControl | Set external control switch | 0=disabled, 1=enabled
 SET31 | SetExternalError | Set external error signal| 0=disabled, 1=enabled
