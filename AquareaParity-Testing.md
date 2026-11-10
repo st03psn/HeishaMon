@@ -140,6 +140,7 @@ Do **not** send these unless you know what they do on your installation:
 
 - `SetBuffer 1` without a buffer sensor (error H43 on the M series, stays until reset).
 - `SetAntiFreezeMode 0`.
+- `SetInternalHeaterCapacity` with a value above the back-up heater that is installed (not tested, result unknown).
 - Switches for hardware you do not have: `SetDHWInstalled`, `SetSolarMode`, `SetSGReadyMode`, `SetBivalentControl`, `SetZoneType`, `SetZ1SensorSettings`.
 - `SetHeatingWaterMode` / `SetCoolingWaterMode` (they move the heating and cooling curves).
 - `SetDefrostSignal` together with bivalent control (the heat pump switches one of them off).
@@ -152,7 +153,8 @@ Please report as an issue in the fork (<https://github.com/st03psn/HeishaMon/iss
 2. Result of step 3 (runs like before: yes / no, what differed).
 3. The table of step 4 with matches / differs / not present.
 4. For step 5: command, value sent, what the topic and the remote controller showed, and the Console log lines.
-5. Your `/json` output before and after, if you are willing to share it.
+5. Which back-up heater capacities the installer menu of your remote controller offers (for example only 3 kW, or 3 / 6 / 9 kW), and what Internal_Heater_Capacity shows. Reading is enough; do not write a higher value.
+6. Your `/json` output before and after, if you are willing to share it.
 
 ## Going back
 

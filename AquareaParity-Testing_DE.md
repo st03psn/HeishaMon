@@ -125,6 +125,7 @@ Diese Befehle **nicht** senden, außer man weiß, was sie an der eigenen Anlage 
 
 - `SetBuffer 1` ohne Pufferfühler (Fehler H43 an der M-Serie, bleibt bis zum Zurücksetzen).
 - `SetAntiFreezeMode 0`.
+- `SetInternalHeaterCapacity` mit einem Wert über dem verbauten Heizstab (nicht getestet, Ergebnis unbekannt).
 - Schalter für Hardware, die es an der Anlage nicht gibt: `SetDHWInstalled`, `SetSolarMode`, `SetSGReadyMode`, `SetBivalentControl`, `SetZoneType`, `SetZ1SensorSettings`.
 - `SetHeatingWaterMode` / `SetCoolingWaterMode` (sie verstellen die Heiz- und Kühlkurven).
 - `SetDefrostSignal` zusammen mit der bivalenten Heizung (die Wärmepumpe schaltet eines von beiden ab).
@@ -137,7 +138,8 @@ Bitte als Issue im Fork melden (<https://github.com/st03psn/HeishaMon/issues>), 
 2. Ergebnis von Schritt 3 (läuft wie vorher: ja / nein, was abwich).
 3. Die Tabelle aus Schritt 4 mit stimmt / weicht ab / nicht vorhanden.
 4. Zu Schritt 5: Befehl, gesendeter Wert, was Topic und Bedienteil zeigten, und die Logzeilen der Console.
-5. Die Ausgabe von `/json` vorher und nachher, wer sie teilen möchte.
+5. Welche Heizstab-Leistungen das Installateurmenü des Bedienteils anbietet (zum Beispiel nur 3 kW oder 3 / 6 / 9 kW) und was Internal_Heater_Capacity anzeigt. Lesen genügt; keinen höheren Wert schreiben.
+6. Die Ausgabe von `/json` vorher und nachher, wer sie teilen möchte.
 
 ## Zurück zur alten Firmware
 

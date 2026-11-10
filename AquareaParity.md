@@ -1,12 +1,12 @@
 # Aquarea parity: findings, evidence and open tasks
 
-This file documents the research behind the additional topics (TOP170 to TOP196) and commands (SET56 to SET104) of this branch. The goal is feature parity between the Panasonic wired remote controller, the Aquarea Service Cloud and HeishaMon. Topic and command reference: [MQTT-Topics.md](MQTT-Topics.md); byte positions: [ProtocolByteDecrypt.md](ProtocolByteDecrypt.md); Modbus: [Modbus-Register-Mapping.md](Modbus-Register-Mapping.md).
+This file documents the research behind the additional topics (TOP170 to TOP196) and commands (SET56 to SET104). The goal is feature parity between the Panasonic wired remote controller, the Aquarea Service Cloud and HeishaMon. Topic and command reference: [MQTT-Topics.md](MQTT-Topics.md); byte positions: [ProtocolByteDecrypt.md](ProtocolByteDecrypt.md); Modbus: [Modbus-Register-Mapping.md](Modbus-Register-Mapping.md).
 
 ## 1. Scope and limits of the evidence
 
-- One unit only: M series, WH-SDC0316M9E8 with WH-WXG09ME8, one heating circuit, no DHW tank, no buffer, no solar, optional PCB setting "yes". HeishaMon large (ESP32), firmware 4.3.0, CZ-TAW1 on the proxy port.
+- One unit only: M series, WH-SDC0316M9E8 with WH-WXG09ME8, one heating circuit, no DHW tank, no buffer, no solar, optional PCB setting "yes". HeishaMon large (ESP32), firmware 4.3.1, CZ-TAW1 on the proxy port.
 - All write tests were made with the heat pump switched off.
-- The firmware of this branch has run on one HeishaMon large (ESP32-S3) on that unit; see section 6. The ESP8266 build has not run on hardware.
+- The new firmware has run on one HeishaMon large (ESP32-S3) on that unit; see section 6. The ESP8266 build has not run on hardware.
 - Other series (H, J, K, L) were not tested. Byte positions that come only from the existing decode tables are marked as such in MQTT-Topics.md.
 
 ## 2. How findings were made
@@ -84,10 +84,10 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 - Cloud pitfall: setting the DHW tank back to "no" does not write the capacity bits; a hidden "standard" stays in the unit (byte 24 = 0x95 instead of 0x55).
 
-## 4. What the commands of this branch do with these findings
+## 4. What the new commands do with these findings
 
 - Commands on shared bytes send the whole byte, built from the new field and the last received value of the other bits, and are refused until a data block has been received. A short memory of sent bytes covers commands that follow each other faster than the read cycle.
-- The memory of a byte is kept while a frame that carries it still waits for transmission (ESP32 command queue, ESP8266 command buffer) and ends after that frame has been sent and a later data block has arrived; a buffered frame that is sent later does not put its older value back (findings of the fourth review, fixed).
+- The memory of a byte is kept while a frame that carries it still waits for transmission (ESP32 command queue, ESP8266 command buffer) and ends after that frame has been sent and a later data block has arrived; a buffered frame that is sent later does not put its older value back.
 - Known limit on ESP8266 (existing behaviour of the send path): a command sent while older commands are still buffered can overtake them, so the order on the wire can differ from the order of the commands.
 - Not covered: changes the heat pump makes by itself in another byte (bivalent control and defrost signal). After one of these two commands wait for the next data block before sending a command on byte 26 or 28.
 - Value ranges follow the installer menu of the service manual.
@@ -97,18 +97,14 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 | No. | Task | Needs |
 |---|---|---|
-| 1 | Hardware test on an M-series unit: done (section 6). Open: ESP8266 board, other series (see AquareaParity-Testing.md) | testers |
-| 2 | Fourth review done (no blocker; three major findings in the pending-byte memory fixed, one minor fixed, two documented). Open from it: the pair setters do not check the foreign bits they write back (for example SetStaticPressure with an unknown extra-pump nibble) | code and tests |
+| 1 | Test on other series (H, J, K, L) and on the ESP8266 board, see [AquareaParity-Testing.md](AquareaParity-Testing.md) | owners of such units |
+| 2 | Back-up heater capacity on units with a 3 kW or 6 kW heater: which values the remote controller offers, and what the heat pump does with a higher value | owners of such units |
 | 3 | Decide on dependency guards: refuse or only warn when a child command is sent while its parent is off (table in 3.5) | decision, then code and tests |
-| 4 | Warn before `SetBuffer 1` (H43 without a buffer sensor) | documentation is done in MQTT-Topics.md; a guard is not possible because the sensor state is not known |
+| 4 | The commands on shared bytes do not check the other bits they write back (for example `SetStaticPressure` with an unknown extra-pump nibble) | code and tests |
 | 5 | Test child values with optional PCB = no (byte 20 = 0x69) | heat pump off |
-| 6 | Test the parent switches one at a time for faults (DHW tank, solar, SG ready, bivalent without buffer) | heat pump off |
-| 7 | Verify the results of the later test windows against the capture by a second person or tool | capture data |
-| 8 | Evaluate compiler warnings of the CI build | none |
-| 9 | Reports from other series (H, J, K, L) for the byte positions in 3.3 | owners of such units |
-| 10 | Not tested on purpose: dry concrete, two zones, pool, actuator test, pump down, reset of energy history | separate approval on a suitable unit |
+| 6 | Not tested on purpose: dry concrete, two zones, pool, actuator test, pump down, reset of energy history | a suitable unit |
 
-## 6. Hardware test (2026-11-10, M series, HeishaMon large / ESP32-S3, build Alpha-531e0fd)
+## 6. Hardware test (2026-11-10, M series, HeishaMon large / ESP32-S3)
 
 Heat pump off, commands sent by MQTT, data block read back after each group, everything restored at the end (bytes 20 to 109 equal to the state before the test).
 
@@ -129,15 +125,4 @@ Heat pump off, commands sent by MQTT, data block read back after each group, eve
 
 New observation: `SetZ1SensorSettings 2` (internal thermostat) moved bytes 38 and 39 (0x80 to 0x94 / 0x9C); they returned when the type was set back.
 
-Not checked: the refusal texts in the log (only that nothing was sent), the Service Cloud display for each value, long-term operation, the ESP8266 build.
-
-## 7. Test state of this branch
-
-| Test | Result |
-|---|---|
-| `Tools/test_commands.py` | 1547 cases pass |
-| `Tools/test_decode.py` | 89 cases pass |
-| `tests/modbus/run_tests.py` | pass |
-| `Examples/Rules/run_tests.sh` | 34 pass |
-| CI "Build binary" (ESP8266 and ESP32) | success; a build with `--warnings=all` shows no warning in lines of this branch |
-| Hardware | ESP32-S3 on one M-series unit, see section 6 |
+Not checked: the refusal texts in the log (only that nothing was sent; one text was seen in the web console), the Service Cloud display for each value, long-term operation, the ESP8266 build.
