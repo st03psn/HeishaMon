@@ -1229,22 +1229,35 @@ async function refreshTable(){
 }
 // Opens the heat pump report form of the HeishaMon repository with the current values filled in.
 // Nothing is sent by HeishaMon: the browser opens GitHub, the user checks the form and submits it.
+// The browser also reads HeatPumpType.md from GitHub to mark model bytes that are not listed yet.
 var hmReportRepo='st03psn/HeishaMon'; // test build: reports go to the fork
 function reportHeatpump(){
-  fetch('/json').then(function(r){return r.json();}).then(function(d){
-    var model='',lines=[];
-    ['heatpump','heatpump extra','heatpump optional'].forEach(function(k){
-      if(d&&Array.isArray(d[k]))d[k].forEach(function(i){
-        if(i.Topic==='TOP92')model=String(i.Value);
-        lines.push(i.Topic+'='+i.Value);
-      });
-    });
-    var q={template:'heatpump-report.yml',title:'Heat pump report: '+model,
-      version:hmVersion,board:hmBoard,model_bytes:model,values:lines.join('\n')};
-    var u='https://github.com/'+hmReportRepo+'/issues/new?'+Object.keys(q).map(function(k){
+  var model='',lines=[];
+  document.querySelectorAll('#heishavalues td[id$="-Topic"]').forEach(function(c){
+    var t=c.textContent,v=document.getElementById(t+'-Value');
+    v=v?v.textContent:'';
+    if(t==='TOP92')model=v;
+    lines.push(t+'='+v);
+  });
+  if(!model||/^(00 ?)+$/.test(model)){alert('No data from the heat pump yet.');return;}
+  // Open the tab inside the click, so pop-up blockers allow it; it gets its address below.
+  var w=window.open('','_blank');
+  if(!w){alert('Your browser blocked the new tab. Please allow pop-ups for this page and try again.');return;}
+  w.opener=null;
+  var ver=document.getElementById('sideVersion'),done=false;
+  function go(known){
+    if(done)return;done=true;
+    var q={template:'heatpump-report.yml',title:(known===false?'New model: ':'Heat pump report: ')+model,
+      version:ver?ver.textContent:'',board:hmBoard,model_bytes:model,values:lines.join('\n')};
+    w.location='https://github.com/'+hmReportRepo+'/issues/new?'+Object.keys(q).map(function(k){
       return k+'='+encodeURIComponent(q[k]);}).join('&');
-    window.open(u,'_blank','noopener');
-  }).catch(function(e){console.error(e);});
+  }
+  setTimeout(function(){go(null);},4000);
+  fetch('https://raw.githubusercontent.com/'+hmReportRepo+'/main/HeatPumpType.md').then(function(r){
+    if(!r.ok)throw new Error(r.status);return r.text();
+  }).then(function(t){
+    go(t.replace(/\s/g,'').toUpperCase().indexOf(model.replace(/\s/g,'').toUpperCase())>=0);
+  }).catch(function(){go(null);});
 }
 function buildRow(item,idKey){
   var row=document.createElement('tr');
@@ -1445,7 +1458,7 @@ static const char webBodyRootHeatpumpValues[] FLASHPROG = R"====(
     <tr><td colspan='4' style='color:var(--text-muted);padding:24px;text-align:center'>Loading…</td></tr>
   </tbody></table>
 </div></div>
-<script>var hmVersion=')====" HEISHAMON_VERSION R"====(';var hmBoard=')===="
+<script>var hmBoard=')===="
 #ifdef ESP32
 "ESP32-S3 (large)"
 #else
