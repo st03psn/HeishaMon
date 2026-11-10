@@ -426,7 +426,7 @@ struct rmwPending {
 
 static rmwPending rmwPendingBytes[RMW_TRACKED];
 
-// Frames that wait for transmission (review 4). A frame that was handed over but is still in the ESP32
+// Frames that wait for transmission. A frame that was handed over but is still in the ESP32
 // cmdQueue or the ESP8266 command buffer has not reached the heat pump, so a data block cannot confirm or
 // refute its bytes yet: an entry with unsent > 0 is kept, whatever arrives. When the frame leaves the
 // queue the entry gets the time of that moment and from then on ends as described above. Only the bytes

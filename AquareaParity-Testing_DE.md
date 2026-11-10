@@ -50,7 +50,7 @@ Diese Anleitung richtet sich an HeishaMon-Besitzer, die mithelfen wollen herausz
 | TOP151 | DHW_Defrost | SetDHWDefrost |
 | TOP153 | Pool_Delta | SetPoolDelta |
 
-**Weboberfläche.** Die Seite „Console“ hat eine neue Zeile, mit der sich jeder Befehl senden lässt (Liste der Befehlsnamen, Wert, „Send“). Die neuen Topics erscheinen in der Tabelle „Heatpump Values“ und in `/json`.
+**Weboberfläche.** Die neuen Topics erscheinen in der Tabelle „Heatpump Values“ und in `/json`.
 
 **Unverändert.** Alle bisherigen Topics behalten Nummer und Namen; bisherige Befehle senden dieselben Bytes wie vorher. Befehle auf Bytes, die mehrere Einstellungen enthalten, senden jetzt das ganze Byte, zusammengesetzt aus den zuletzt gelesenen Werten, damit zwei Befehle nacheinander sich nicht gegenseitig rückgängig machen.
 
@@ -69,7 +69,7 @@ Diese Anleitung richtet sich an HeishaMon-Besitzer, die mithelfen wollen herausz
 
 ## Schritt 2: Flashen
 
-1. Die Testfassung von der Release-Seite des Forks herunterladen: <https://github.com/st03psn/HeishaMon/releases> (Vorab-Release „aquarea-parity-test“).
+1. Eine Testfassung dieser Änderung herunterladen. Wo sie zu finden ist, steht im Pull Request, der diese Topics hinzufügt (in den Pull Requests von HeishaMon nach „aquarea parity“ suchen).
 2. Die Datei für das eigene Board wählen: `HeishaMon_ESP32-…bin` für das große, `HeishaMon_ESP8266-…bin` für das kleine Board.
 3. Auf der HeishaMon-Webseite **Firmware** öffnen, die Datei auswählen und prüfen, dass das MD5-Feld gefüllt ist (es wird aus dem Dateinamen übernommen; ist es leer, die Zeichenfolge vor `.bin` aus dem Dateinamen eintragen).
 4. Das Update starten und die Erfolgsmeldung und den Neustart abwarten (etwa 20 Sekunden ohne Werte).
@@ -102,7 +102,7 @@ Wer kann, ändert eine dieser Einstellungen **am Bedienteil** und prüft, ob das
 
 Nur für Einstellungen, bei denen Schritt 4 gestimmt hat. Vorher die Wärmepumpe ausschalten (warten, bis der Verdichter von selbst steht oder mindestens 20 Minuten gelaufen ist).
 
-Einen Befehl senden: MQTT-Topic `<basis>/commands/<Name>` mit dem Wert als Payload, oder die neue Zeile auf der Seite **Console** der Weboberfläche (Befehl wählen, Wert eintragen, „Send“). Das Log auf der Console-Seite zeigt, ob der Befehl gesendet oder abgelehnt wurde.
+Einen Befehl senden: MQTT-Topic `<basis>/commands/<Name>` mit dem Wert als Payload, oder `http://<heishamon>/command?<Name>=<Wert>` im Browser. Das Log auf der Seite **Console** zeigt, ob der Befehl gesendet oder abgelehnt wurde.
 
 Für jeden Test: Testwert senden, 40 Sekunden warten, Topic und Bedienteil prüfen, alten Wert wieder senden, 40 Sekunden warten, erneut prüfen.
 
@@ -133,7 +133,7 @@ Diese Befehle **nicht** senden, außer man weiß, was sie an der eigenen Anlage 
 
 ## Schritt 6: Melden
 
-Bitte als Issue im Fork melden (<https://github.com/st03psn/HeishaMon/issues>), auch wenn alles funktioniert:
+Bitte im Pull Request melden oder dort, wo die Testfassung herkommt, auch wenn alles funktioniert:
 
 1. Modell der Wärmepumpe (Innen- und Außengerät) und Baureihe, HeishaMon-Board (klein / groß), Firmware-Version vorher und die getestete Version.
 2. Ergebnis von Schritt 3 (läuft wie vorher: ja / nein, was abwich).

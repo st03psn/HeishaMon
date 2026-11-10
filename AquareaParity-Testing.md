@@ -50,7 +50,7 @@ This guide is for HeishaMon owners who want to help find out whether the new top
 | TOP151 | DHW_Defrost | SetDHWDefrost |
 | TOP153 | Pool_Delta | SetPoolDelta |
 
-**Web interface.** The Console page has a new row to send any command (list of command names, value, Send). The new topics appear in the "Heatpump Values" table and in `/json`.
+**Web interface.** The new topics appear in the "Heatpump Values" table and in `/json`.
 
 **Not changed.** All existing topics keep their numbers and names; existing commands send the same bytes as before. Commands on bytes that hold several settings now send the whole byte, built from the last received values, so that two commands in a row do not undo each other.
 
@@ -69,7 +69,7 @@ This guide is for HeishaMon owners who want to help find out whether the new top
 
 ## Step 2: flash
 
-1. Download the test build from the release page of the fork: <https://github.com/st03psn/HeishaMon/releases> (pre-release "aquarea-parity-test").
+1. Download a test build of this change. Where to find it is written in the pull request that adds these topics (look for "aquarea parity" in the pull requests of HeishaMon).
 2. Pick the file for your board: `HeishaMon_ESP32-…bin` for the large board, `HeishaMon_ESP8266-…bin` for the small one.
 3. On the HeishaMon web page open **Firmware**, choose the file, and check that the MD5 field is filled (it is taken from the file name; if it is empty, copy the character string before `.bin` from the file name).
 4. Start the update and wait for the success message and the restart (about 20 seconds without values).
@@ -117,7 +117,7 @@ If you can, change one of these settings **on the remote controller** and check 
 
 Only do this if step 4 matched for the setting you want to test. Switch the heat pump off first (wait until the compressor has stopped by itself or has run for at least 20 minutes).
 
-How to send a command: MQTT topic `<base>/commands/<Name>` with the value as payload, or the new row on the **Console** page of the web interface (choose the command, enter the value, Send). The log on the Console page shows whether the command was sent or refused.
+How to send a command: MQTT topic `<base>/commands/<Name>` with the value as payload, or `http://<heishamon>/command?<Name>=<value>` in a browser. The log on the **Console** page shows whether the command was sent or refused.
 
 For each test: send the test value, wait 40 seconds, check the topic and the remote controller, send the old value again, wait 40 seconds, check again.
 
@@ -148,7 +148,7 @@ Do **not** send these unless you know what they do on your installation:
 
 ## Step 6: report
 
-Please report as an issue in the fork (<https://github.com/st03psn/HeishaMon/issues>), also when everything works:
+Please report in the pull request, or where you got the test build, also when everything works:
 
 1. Heat pump model (indoor and outdoor unit) and series, HeishaMon board (small / large), firmware version before and the version tested.
 2. Result of step 3 (runs like before: yes / no, what differed).

@@ -5,7 +5,7 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 ## 1. Scope and limits of the evidence
 
 - One unit only: M series, WH-SDC0316M9E8 with WH-WXG09ME8, one heating circuit, no DHW tank, no buffer, no solar, optional PCB setting "yes". HeishaMon large (ESP32), firmware 4.3.1, CZ-TAW1 on the proxy port.
-- All write tests were made with the heat pump switched off.
+- All write tests were made with the heat pump switched off, except the solar mode observation in 3.4.
 - The new firmware has run on one HeishaMon large (ESP32-S3) on that unit; see section 6. The ESP8266 build has not run on hardware.
 - Other series (H, J, K, L) were not tested. Byte positions that come only from the existing decode tables are marked as such in MQTT-Topics.md.
 

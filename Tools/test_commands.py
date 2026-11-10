@@ -252,7 +252,7 @@ RMW_SETTERS = {
             # only the bivalent operating mode "SG ready" (b10) conflicts with SG ready; "intelligent" does not
             ({26: 0x5E, 27: 0x59}, "2", 0x79),
             ({26: 0x5E, 27: 0x5D}, "2", 0x7D),
-            # "auto" is the way out and works with bivalent control off too (hidden SG ready / intelligent pattern, review 3 F2)
+            # "auto" is the way out and works with bivalent control off too (hidden SG ready / intelligent pattern)
             ({26: 0x5D, 27: 0x65}, "0", 0x55),
             ({26: 0x5D, 27: 0x75}, "0", 0x55),
             ({26: 0x5D, 27: 0x69}, "0", 0x59),
@@ -521,7 +521,7 @@ RMW_SETTERS = {
             ({27: 0x45}, "1", 0x49),  # bivalent operating mode not set (b00) is no conflict
             ({27: 0x55}, "0", 0x55),
             # the conflict exists only with bivalent control = yes (byte 26 bits 1-0 = b10) and bivalent operating mode SG ready (b10)
-            ({26: 0x5D, 27: 0x65}, "1", 0x69),  # state of review 3 F2: bivalent control off, hidden b10
+            ({26: 0x5D, 27: 0x65}, "1", 0x69),  # bivalent control off, hidden b10
             ({26: 0x5D, 27: 0x65}, "2", 0x6D),
             ({26: 0x5C, 27: 0xA5}, "1", 0xA9),
             ({26: 0x5F, 27: 0x65}, "1", 0x69),
@@ -1159,7 +1159,7 @@ def main():
     assert(run_command("SetBivalentOperatingMode", "0") && sent[27] == 0x5D);
     reset_act_data();
   }
-  { // review 3 F2: state bivalent control off (26 = 0x5D) with a hidden bivalent SG ready pattern (27 = 0x65); every way out works
+  { // state bivalent control off (26 = 0x5D) with a hidden bivalent SG ready pattern (27 = 0x65); every way out works
     reset_act_data(); actData[26] = (char)0x5D; actData[27] = (char)0x65;
     assert(run_command("SetSGReadyMode", "1") && sent[27] == 0x69);
     assert(run_command("SetSGReadyMode", "0") && sent[27] == 0x65);
@@ -1186,7 +1186,7 @@ def main():
     assert(run_command("SetSGReadyMode", "0") && sent[27] == 0x65);
     reset_act_data();
   }
-  { // review 3 F3: solar high limit and SG ready limits refuse without a data block and while their own byte reads 0
+  { // solar high limit and SG ready limits refuse without a data block and while their own byte reads 0
     reset_act_data(); actData[0] = 0;
     assert(!run_command("SetSolarHighLimit", "80"));
     reset_act_data(); actData[64] = 0;
@@ -1396,7 +1396,7 @@ def main():
     assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
     assert(run_command("SetSensorOffsetOutdoor", "-1.5") && sent[35] == 0x85); // byte 35 ended too: actData (0x86) is used
   }
-  { // review 4, Major 1 (ESP32): a frame that still waits in cmdQueue is not ended by the blocks that arrive meanwhile
+  { // ESP32: a frame that still waits in cmdQueue is not ended by the blocks that arrive meanwhile
     reset_act_data(); actData[28] = (char)0x55;
     queued = true;
     assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);  // frame 1, another byte
@@ -1414,7 +1414,7 @@ def main():
     assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);
     queued = false;
   }
-  { // review 4, Major 3: other traffic in the queue does not keep an entry alive whose own frame has left
+  { // other traffic in the queue does not keep an entry alive whose own frame has left
     reset_act_data(); actData[28] = (char)0x55;
     queued = true;
     assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x95);           // the pump will not take it
@@ -1437,7 +1437,7 @@ def main():
     deliver_block(0, -1, 0, -1, 0, 0);               // the queue drains: ring and entries are consistent again
     queued = false;
   }
-  { // review 4, Major 2 (ESP8266): a buffered frame that is sent later does not put its older value back
+  { // ESP8266: a buffered frame that is sent later does not put its older value back
     reset_act_data(); actData[28] = (char)0x55;
     assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);        // written directly
     buffered = true;
