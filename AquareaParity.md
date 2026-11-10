@@ -46,7 +46,7 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 | 20 | 3-2 | Anti-freeze | cloud frame, raw write; the Service Cloud shows "Frostschutz = Nein" for 0x66 |
 | 20 | 1-0 | Optional PCB | raw write 0x69, the Service Cloud then shows "Nein" and greys the dependent fields |
 | 24 | 7-6 / 5-4 / 3-2 / 1-0 | DHW capacity / solar mode / buffer / DHW tank | cloud frames, raw write |
-| 25 | 3-2 | Back-up heater capacity (3, 6, 9 kW) | raw write |
+| 25 | 3-2 | Back-up heater capacity (b01 3 kW, b10 6 kW, b11 9 kW) | raw write; the Service Cloud shows 6 kW for 0x29 and 9 kW for 0x2D on a unit with a 9 kW heater. Units with a smaller heater not tested |
 | 26 | 1-0 / 3-2 / 5-4 | Bivalent control / switching behaviour / heating | cloud frames, raw write |
 | 27 | 3-2 / 5-4 / 7-6 | SG ready / bivalent operating mode / bivalent external pump | cloud frames, raw write |
 | 28 | 7-6 | Defrost signal (remote controller item 22) | raw write, read on the remote controller for both values |
