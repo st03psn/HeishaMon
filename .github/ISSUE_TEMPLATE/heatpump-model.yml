@@ -1,11 +1,12 @@
 name: Add my heat pump model
 description: Add your heat pump model to HeatPumpType.md. The "Check my model" button on the HeishaMon web page fills in most fields.
 title: "New model: "
+labels: ["heat pump model"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for adding your model. The model bytes (TOP92) identify a heat pump model in HeishaMon; together with the indoor and outdoor unit they go into [HeatPumpType.md](https://github.com/heishamon/HeishaMon/blob/main/HeatPumpType.md).
+        Thanks for adding your model. The model bytes (TOP92) identify a heat pump model in HeishaMon; together with the indoor and outdoor unit they go into [HeatPumpType.md](https://github.com/heishamon/HeishaMon/blob/main/HeatPumpType.md). A workflow checks the model bytes and, if they are new, opens a pull request that adds your model; the issue is closed when it is merged.
 
         The **Check my model** button on the "Heatpump Values" panel of your HeishaMon fills in the model bytes, version and board, and if you choose so all topic values. Please add the indoor and outdoor unit from the type plates and check the fields before you submit; nothing is sent until you submit the form.
   - type: input
