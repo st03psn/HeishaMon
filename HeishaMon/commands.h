@@ -98,6 +98,18 @@ unsigned int set_efficiency_stage2_time(char *msg, unsigned char *cmd, char *log
 unsigned int set_efficiency_stage3_time(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_sensor_offset_remote_th1(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_sensor_offset_outdoor(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_bivalent_ap_heat(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_bivalent_operating_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_bivalent_external_pump(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_bivalent_ap_start_delay(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_bivalent_ap_stop_delay(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_extra_pump(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_extra_pump_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_internal_heater_capacity(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_solar_on_delta(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_solar_off_delta(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_solar_frost_protection(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_room_holiday_shift_temp(char *msg, unsigned char *cmd, char *log_msg);
 
 //optional pcb commands
 unsigned int set_heat_cool_mode(char *msg, char *log_msg);
@@ -220,6 +232,18 @@ const cmdStruct commands[] PROGMEM = {
   { "SetEfficiencyStage3Time", set_efficiency_stage3_time },
   { "SetSensorOffsetRemoteTh1", set_sensor_offset_remote_th1 },
   { "SetSensorOffsetOutdoor", set_sensor_offset_outdoor },
+  { "SetBivalentAPHeat", set_bivalent_ap_heat },
+  { "SetBivalentOperatingMode", set_bivalent_operating_mode },
+  { "SetBivalentExternalPump", set_bivalent_external_pump },
+  { "SetBivalentAPStartDelay", set_bivalent_ap_start_delay },
+  { "SetBivalentAPStopDelay", set_bivalent_ap_stop_delay },
+  { "SetExtraPump", set_extra_pump },
+  { "SetExtraPumpMode", set_extra_pump_mode },
+  { "SetInternalHeaterCapacity", set_internal_heater_capacity },
+  { "SetSolarOnDelta", set_solar_on_delta },
+  { "SetSolarOffDelta", set_solar_off_delta },
+  { "SetSolarFrostProtection", set_solar_frost_protection },
+  { "SetRoomHolidayShiftTemp", set_room_holiday_shift_temp },
 };
 
 struct optCmdStruct{

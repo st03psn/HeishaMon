@@ -225,10 +225,14 @@ TOP176 | main/Efficiency_Stage3_Time | Heating control "efficiency" stage 3 dura
 TOP177 | main/Sensor_Offset_Remote_Th1 | Sensor calibration offset Th1 (remote), K in steps of 0.5 (byte 35 high nibble)
 TOP178 | main/Sensor_Offset_Outdoor | Sensor calibration offset outdoor sensor, K in steps of 0.5 (byte 35 low nibble)
 TOP179 | main/Anti_Stick_Mode | Anti-stick mode, actuator exercise (0=disabled, 1=enabled; byte 34 bits 7-6). Read-only: the heat pump ignores writes to it, it can only be changed at the remote controller custom menu
+TOP180 | main/Bivalent_Operating_Mode | Bivalent operating mode, cloud "Betriebsart" (0=auto, 1=SG ready, 2=intelligent; byte 27 bits 5-4). Not the switching behaviour of TOP130
+TOP181 | main/Bivalent_External_Pump | Bivalent external pump, cloud "Externe Pumpe" (0=off, 1=on; byte 27 bits 7-6)
+TOP182 | main/Extra_Pump_Use | Extra pump ("Zusätzliche Pumpe") use (0=not used, 1=heating, 2=DHW; byte 31 bits 1-0, derived from the values 0x55, 0x5A, 0x5B, 0x57, see below)
+TOP183 | main/Extra_Pump_Mode | Extra pump mode (0=comfort, 1=efficiency; byte 31 bits 3-2, derived like TOP182). Only meaningful when TOP182 is 2 (DHW); 0 is also reported while the pump is not used
 
 The relay states are published on change and after each MQTT (re)connect. Commands go to `gpio/relay/one` and `gpio/relay/two` (without `/state`). The extra GPIOs use the same layout: commands to `gpio/extra/N`, states (retained) on `gpio/extra/N/state`. After a reboot the outputs are restored once from their retained `/state` topics; see the README section *GPIO states and restore at boot*.
 
-The topics above are relative to the configured MQTT base topic. New topics TOP144–TOP179 use the documented normal data block (0x10); availability depends on the heat pump model and configuration. Two-bit status fields use -1 for an unset encoding (00). Z1_Active and Z2_Active are individual activity bits, distinct from Zones_State. Quiet/Powerful actual states are distinct from the configured level/time topics.
+The topics above are relative to the configured MQTT base topic. New topics TOP144–TOP183 use the documented normal data block (0x10); availability depends on the heat pump model and configuration. Two-bit status fields use -1 for an unset encoding (00). Z1_Active and Z2_Active are individual activity bits, distinct from Zones_State. Quiet/Powerful actual states are distinct from the configured level/time topics.
 
 
 
@@ -344,6 +348,18 @@ SET68 | SetEfficiencyStage2Time | Efficiency stage 2 duration; readback TOP175. 
 SET69 | SetEfficiencyStage3Time | Efficiency stage 3 duration; readback TOP176. Nibble field, see below | 0..30 minutes, multiples of 5
 SET70 | SetSensorOffsetRemoteTh1 | Sensor offset Th1 (remote); readback TOP177. Nibble field, see below | -3 to 3 K in steps of 0.5, e.g. `-1.5`
 SET71 | SetSensorOffsetOutdoor | Sensor offset outdoor sensor; readback TOP178. Nibble field, see below | -3 to 3 K in steps of 0.5, e.g. `-1.5`
+SET72 | SetBivalentAPHeat | Bivalent "Heizen" in advanced parallel mode (cloud "Heizen"); readback TOP132. Shared byte, see below | 0=no, 1=yes
+SET73 | SetBivalentOperatingMode | Bivalent operating mode (cloud "Betriebsart"); readback TOP180. Shared byte, see below | 0=auto, 1=SG ready, 2=intelligent
+SET74 | SetBivalentExternalPump | Bivalent external pump (cloud "Externe Pumpe"); readback TOP181. Shared byte, only with SetBivalentMode alternative (TOP130 = 0) | 0=off, 1=on
+SET75 | SetBivalentAPStartDelay | Delay for the bivalent heat source start in advanced parallel mode; readback TOP136 | integer 1..254 minutes (wire range)
+SET76 | SetBivalentAPStopDelay | Delay for the bivalent heat source stop in advanced parallel mode; readback TOP137 | integer 1..254 minutes (wire range)
+SET77 | SetExtraPump | Extra pump ("Zusätzliche Pumpe") use; readback TOP182. Only with a connected DHW tank (TOP100 = 1). Cloud write only, see below | 0=not used, 1=heating, 2=DHW
+SET78 | SetExtraPumpMode | Extra pump mode; readback TOP183. Only with the extra pump on DHW (TOP182 = 2) and a connected DHW tank. Cloud write only, see below | 0=comfort, 1=efficiency
+SET79 | SetInternalHeaterCapacity | Back-up heater capacity; readback TOP147. Shared byte, see below | 3 or 6 (kW)
+SET80 | SetSolarOnDelta | Solar connection: delta T for tank ON; readback TOP102 | integer -127..127 K (wire range)
+SET81 | SetSolarOffDelta | Solar connection: delta T for tank OFF; readback TOP103 | integer -127..127 K (wire range)
+SET82 | SetSolarFrostProtection | Solar connection: anti-freeze temperature; readback TOP104 (the solar high limit, TOP105, has no command: the heat pump reverted a written value) | integer -127..127 °C (wire range)
+SET83 | SetRoomHolidayShiftTemp | Room heating shift in holiday mode; readback TOP45 | integer -127..127 K (wire range)
 
 SET51–SET55 require complete integer payloads; empty, malformed, out-of-range or invalid-step values are rejected without sending a telegram. The ranges above describe the nonzero protocol encoding, not verified installer-menu limits. Use settings supported by your model; the heat pump may reject values outside its own menu range. These writes follow the documented telegram examples but have not been hardware-tested here. SetQuietModeSchedule toggles the existing schedule and does not configure its times or change the quiet level.
 
@@ -356,6 +372,14 @@ SET56–SET71 are drafted from Service Cloud / CZ-TAW1 captures and raw `SendRaw
 **Nibble commands (SET67–SET71):** the efficiency stage times and sensor offsets share a byte with another value (bytes 33, 34, 35). It is not verified that a zero nibble in a command means "no change", so these commands never send a zero nibble: they take the other nibble from the last data block received from the heat pump and send the whole byte, as was done in the raw write tests. Until the first data block has arrived they are rejected. For byte 34 this includes the anti-stick bits, which the heat pump keeps unchanged.
 
 Note: "Tank heater type" (byte 25, TOP148) deliberately has no command: in tests the heat pump reverted a written value 0x25 after one frame.
+
+**Shared-byte commands (SET72–SET74, SET77–SET79):** SET72–SET79 are drafted from the same sources as SET56–SET71 plus the Service Cloud captures of 2026-11-09/10 (bivalent and extra pump pages), again on one WH-SDC0316M9E8 with the heat pump off, and have not been tested through these commands on hardware. SetBivalentAPStartDelay, SetBivalentAPStopDelay, SetSolar* and SetRoomHolidayShiftTemp write a single byte of their own (raw write accepted, no side effects seen). The other commands write into bytes 25, 26, 27 and 31, which hold several settings. They build the new byte from the validated field and the unchanged other bits of the last data block received from the heat pump and send the whole byte; a zero pair is never sent for a foreign field. Until a data block has arrived (or while the byte is still 0) they are rejected. Byte 27 also holds the SG ready and demand control bits (bits 3-2 and 1-0), which are kept as read.
+
+Extra conditions, taken from what the cloud offered during the captures (the heat pump itself was not tested for the other states): SetBivalentAPHeat needs SetBivalentMode = 2 (advanced parallel), SetBivalentExternalPump needs SetBivalentMode = 0 (alternative), SetExtraPump and SetExtraPumpMode need a connected DHW tank (TOP100 = 1), SetExtraPumpMode additionally needs TOP182 = 2. A command that does not meet its condition is rejected without sending a telegram. SetBivalentControl, SetBivalentMode and the bivalent temperatures (SET34–SET38) were not touched; byte 70 (DHW delay, TOP138) has no command because it was not tested.
+
+**Extra pump (byte 31):** only four complete values were observed: read 0x5A = heating/efficiency, 0x5B = DHW/efficiency, 0x57 = DHW/comfort, 0x55 = not used. The cloud wrote 0x1A, 0x1B, 0x17 and 0x15 for them (bits 7-6 sent as 0, bits 5-4 = static pressure unchanged), so the write is only evidenced through the cloud, not through a raw write of these bits. Directly evidenced is the whole value and its meaning. The split into "use" (bits 1-0: b01 not used, b10 heating, b11 DHW) and "mode" (bits 3-2: b01 comfort, b10 efficiency) is derived from these four values and not tested for the other combinations (e.g. heating with comfort). The commands therefore only ever send the four observed nibbles (0x5, 0xA, 0xB, 0x7): SetExtraPump 2 selects efficiency (0xB) unless the pump already is on DHW, in which case the current comfort/efficiency value is kept. Bits 5-4 (static pressure, SetStaticPressure) and bits 7-6 are sent as read. SetStaticPressure itself still sends the low nibble as 0 (no change, like the other bit-pair commands).
+
+**Back-up heater capacity (SET79):** raw write 0x25 -> 0x29 (bits 3-2 b01 -> b10) was accepted and kept without side effects. 9 kW (b11) is assumed on the read side only and is not accepted. Bits 1-0 of byte 25 (tank heater type, no command) and bits 7-4 are sent as read.
 
 
 *If you operate your heatpump in water mode with direct temperature setup: topics ending xxxRequestTemperature will set the absolute target temperature.*

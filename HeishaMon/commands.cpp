@@ -496,6 +496,133 @@ unsigned int set_sensor_offset_outdoor(char *msg, unsigned char *cmd, char *log_
   return set_sensor_offset(msg, cmd, log_msg, 35, false);
 }
 
+// ---- Settings in bytes that carry several fields (read-modify-write) --------------------------------
+// Bytes 25, 26, 27 and 31 hold more than one setting. Data byte 0 means "no change", but only whole
+// bit pairs were verified that way, so these commands never rely on it: the new byte is built from
+// the validated field and the unchanged remaining bits of the last data block from the heat pump, and
+// the whole byte is sent (as in the raw write tests). Nothing is sent while no data block has been
+// received (or the byte is still 0), and some commands additionally need a state in which the cloud
+// offered the field; see MQTT-Topics.md.
+static bool current_data_byte(char *log_msg, byte address, byte &current) {
+  if (!(actData[0] == 0x71 && actData[1] == (char)0xc8 && actData[2] == 0x01) || actData[address] == 0) {
+    snprintf_P(log_msg, 256, PSTR("Cannot set byte %u: no data block from the heat pump yet, the other bits would be unknown"), address);
+    return false;
+  }
+  current = (byte)actData[address];
+  return true;
+}
+
+// the cloud only offered the field in this state: (actData[address] & mask) == value
+static bool require_state(char *log_msg, byte address, byte mask, byte value, const char *requirement) {
+  if (((byte)actData[address] & mask) != value) {
+    snprintf_P(log_msg, 256, PSTR("Cannot set this field now: it needs %s (byte %u)"), requirement, address);
+    return false;
+  }
+  return true;
+}
+
+// bit pair at shift 0, 2, 4 or 6: payload 0..maximum is sent as b01, b10, b11
+static unsigned int set_pair_field(char *msg, unsigned char *cmd, char *log_msg, byte address, byte shift, int maximum,
+                                   byte requireAddress = 0, byte requireMask = 0, byte requireValue = 0, const char *requirement = NULL) {
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, address, 0, maximum, 1, 1, 1, 1 << shift) == 0) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, address, current)) return 0;
+  if (requireMask != 0 && !require_state(log_msg, requireAddress, requireMask, requireValue, requirement)) return 0;
+  tmp[address] = (unsigned char)((current & ~(0x03 << shift)) | tmp[address]);
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
+}
+
+// Bivalent: byte 26 bits 1-0 (SetBivalentControl) and 3-2 (SetBivalentMode) already have commands.
+// "Heating" (bits 5-4, TOP132, b01 no / b10 yes) was only seen in the cloud with advanced parallel (b11 in bits 3-2).
+unsigned int set_bivalent_ap_heat(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_pair_field(msg, cmd, log_msg, 26, 4, 1, 26, 0x0C, 0x0C, "bivalent mode advanced parallel");
+}
+
+// byte 27 bits 5-4: b01 auto, b10 SG ready, b11 intelligent (TOP180). Bits 1-0 (demand control) and 3-2
+// (SG ready) of the same byte are kept as read.
+unsigned int set_bivalent_operating_mode(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_pair_field(msg, cmd, log_msg, 27, 4, 2);
+}
+
+// byte 27 bits 7-6: external pump b01 off / b10 on (TOP181), only seen in the cloud with bivalent mode alternative (b01 in bits 3-2 of byte 26)
+unsigned int set_bivalent_external_pump(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_pair_field(msg, cmd, log_msg, 27, 6, 1, 26, 0x0C, 0x04, "bivalent mode alternative");
+}
+
+unsigned int set_bivalent_ap_start_delay(char *msg, unsigned char *cmd, char *log_msg) { // byte 67, minutes + 1, TOP136
+  return set_integer_field(msg, cmd, log_msg, 67, 1, 254, 1, 1, 1, 1);
+}
+
+unsigned int set_bivalent_ap_stop_delay(char *msg, unsigned char *cmd, char *log_msg) { // byte 69, minutes + 1, TOP137
+  return set_integer_field(msg, cmd, log_msg, 69, 1, 254, 1, 1, 1, 1);
+}
+
+// Extra pump, byte 31 low nibble. Only four complete values were ever read or written by the cloud, so
+// only those are sent: 0x5 not used, 0xA heating (efficiency), 0xB DHW (efficiency), 0x7 DHW (comfort).
+// The split into use (bits 1-0: b01 not used, b10 heating, b11 DHW) and mode (bits 3-2: b01 comfort,
+// b10 efficiency) is derived from these four values. Bits 5-4 (static pressure) and 7-6 are kept as read.
+// The cloud only allowed the setting with a DHW tank connected (bits 1-0 of byte 24 = b10), so that is required here too.
+static unsigned int set_extra_pump_nibble(char *log_msg, unsigned char *cmd, byte nibble) {
+  byte current = 0;
+  if (!current_data_byte(log_msg, 31, current)) return 0;
+  if (!require_state(log_msg, 24, 0x03, 0x02, "a connected DHW tank")) return 0;
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  memcpy_P(tmp, panasonicSendQuery, sizeof(tmp));
+  tmp[31] = (unsigned char)((current & 0xF0) | nibble);
+  memcpy(cmd, tmp, sizeof(tmp));
+  snprintf_P(log_msg, 256, PSTR("set extra pump nibble of byte 31 to %u"), (unsigned int)nibble);
+  return sizeof(panasonicSendQuery);
+}
+
+unsigned int set_extra_pump(char *msg, unsigned char *cmd, char *log_msg) { // 0 = not used, 1 = heating, 2 = DHW; TOP182
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 31, 0, 2, 1, 1, 0, 1) == 0) return 0;
+  byte nibble = 0x5;
+  if (tmp[31] == 1) nibble = 0xA;
+  if (tmp[31] == 2) nibble = ((byte)actData[31] & 0x03) == 0x03 ? ((byte)actData[31] & 0x0F) : 0xB; // keep comfort/efficiency when already DHW
+  return set_extra_pump_nibble(log_msg, cmd, nibble);
+}
+
+unsigned int set_extra_pump_mode(char *msg, unsigned char *cmd, char *log_msg) { // 0 = comfort, 1 = efficiency; TOP183; only with DHW use
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 31, 0, 1, 1, 1, 0, 1) == 0) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, 31, current)) return 0;
+  if (!require_state(log_msg, 31, 0x03, 0x03, "the extra pump set to DHW")) return 0;
+  return set_extra_pump_nibble(log_msg, cmd, tmp[31] == 0 ? 0x7 : 0xB);
+}
+
+// Back-up heater capacity, byte 25 bits 3-2 (TOP147): 3 kW = b01, 6 kW = b10. 9 kW (b11) is only
+// assumed from the read side and is not accepted. Bits 1-0 (tank heater type) and 7-4 are sent as read.
+unsigned int set_internal_heater_capacity(char *msg, unsigned char *cmd, char *log_msg) {
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 25, 3, 6, 3, 3, 0, 4) == 0) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, 25, current)) return 0;
+  tmp[25] = (unsigned char)((current & ~0x0C) | tmp[25]);
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
+}
+
+// Single-byte temperature settings (degC or K + 128), same style as SetPoolDelta
+unsigned int set_solar_on_delta(char *msg, unsigned char *cmd, char *log_msg) { // byte 61, TOP102
+  return set_integer_field(msg, cmd, log_msg, 61, -127, 127, 1, 1, 128, 1);
+}
+
+unsigned int set_solar_off_delta(char *msg, unsigned char *cmd, char *log_msg) { // byte 62, TOP103
+  return set_integer_field(msg, cmd, log_msg, 62, -127, 127, 1, 1, 128, 1);
+}
+
+unsigned int set_solar_frost_protection(char *msg, unsigned char *cmd, char *log_msg) { // byte 63, TOP104
+  return set_integer_field(msg, cmd, log_msg, 63, -127, 127, 1, 1, 128, 1);
+}
+
+unsigned int set_room_holiday_shift_temp(char *msg, unsigned char *cmd, char *log_msg) { // byte 43, TOP45
+  return set_integer_field(msg, cmd, log_msg, 43, -127, 127, 1, 1, 128, 1);
+}
+
 unsigned int set_sterilization_temp(char *msg, unsigned char *cmd, char *log_msg) {
   if (msg == NULL || strlen(msg) != 2 || msg[0] < '0' || msg[0] > '9' || msg[1] < '0' || msg[1] > '9') {
     snprintf_P(log_msg, 256, PSTR("Invalid sterilization temperature: expected integer 55-75 C"));

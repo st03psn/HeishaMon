@@ -142,7 +142,7 @@ commands: SetZ1HeatRequestTemperature, SetZ1CoolRequestTemperature,
 SetZ2HeatRequestTemperature, SetZ2CoolRequestTemperature, SetDHWTemp, SetFloorHeatDelta,
 SetFloorCoolDelta, SetDHWHeatDelta, SetHeaterStartDelta, SetHeaterStopDelta, SetBufferDelta,
 SetHeatingOffOutdoorTemp, SetBivalentStartTemp, SetBivalentAPStartTemp,
-SetBivalentAPStopTemp, SetHeaterOnOutdoorTemp, SetSterilizationTemp, SetHeatToCoolTemp, SetCoolToHeatTemp, SetPoolDelta, SetHeatingOnOutdoorTemp, SetSensorOffsetRemoteTh1 and SetSensorOffsetOutdoor (the sensor offsets therefore accept whole degrees only through Modbus; use MQTT for half degrees). All other commands (modes, states, times,
+SetBivalentAPStopTemp, SetHeaterOnOutdoorTemp, SetSterilizationTemp, SetHeatToCoolTemp, SetCoolToHeatTemp, SetPoolDelta, SetHeatingOnOutdoorTemp, SetSensorOffsetRemoteTh1, SetSensorOffsetOutdoor, SetSolarOnDelta, SetSolarOffDelta, SetSolarFrostProtection and SetRoomHolidayShiftTemp (the sensor offsets therefore accept whole degrees only through Modbus; use MQTT for half degrees). All other commands (modes, states, times,
 duty) are unscaled signed int16. Allowed values are those of the regular HeishaMon command
 handlers. SetCurves needs JSON and must use MQTT/HTTP.
 
@@ -272,6 +272,18 @@ is `MAIN_COMMANDS` in `HeishaMon/ModbusRegisterMap.h`. IDs 1-1000 map to
 | 5067 | `SetEfficiencyStage3Time` |
 | 5068 | `SetSensorOffsetRemoteTh1` |
 | 5069 | `SetSensorOffsetOutdoor` |
+| 5070 | `SetBivalentAPHeat` |
+| 5071 | `SetBivalentOperatingMode` |
+| 5072 | `SetBivalentExternalPump` |
+| 5073 | `SetBivalentAPStartDelay` |
+| 5074 | `SetBivalentAPStopDelay` |
+| 5075 | `SetExtraPump` |
+| 5076 | `SetExtraPumpMode` |
+| 5077 | `SetInternalHeaterCapacity` |
+| 5078 | `SetSolarOnDelta` |
+| 5079 | `SetSolarOffDelta` |
+| 5080 | `SetSolarFrostProtection` |
+| 5081 | `SetRoomHolidayShiftTemp` |
 
 ## Optional PCB commands
 

@@ -51,7 +51,7 @@ static const char _unknown[] PROGMEM = "unknown";
 
 
 
-#define NUMBER_OF_TOPICS 180 //last topic number + 1
+#define NUMBER_OF_TOPICS 184 //last topic number + 1
 #define NUMBER_OF_TOPICS_EXTRA 6 //last topic number + 1
 #define NUMBER_OF_OPT_TOPICS 7 //last topic number + 1
 #define MAX_TOPIC_LEN 42 // max length + 1
@@ -265,6 +265,10 @@ static const char topics[][MAX_TOPIC_LEN] PROGMEM = {
   "Sensor_Offset_Remote_Th1", //TOP177
   "Sensor_Offset_Outdoor", //TOP178
   "Anti_Stick_Mode", //TOP179
+  "Bivalent_Operating_Mode", //TOP180
+  "Bivalent_External_Pump", //TOP181
+  "Extra_Pump_Use", //TOP182
+  "Extra_Pump_Mode", //TOP183
 };
 
 static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit unsigned humber) as there aren't more then 255 bytes (actually only 203 bytes) to decode
@@ -448,6 +452,10 @@ static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit 
   35, //TOP177
   35, //TOP178
   34, //TOP179
+  27, //TOP180
+  27, //TOP181
+  31, //TOP182
+  31, //TOP183
 };
 
 
@@ -643,6 +651,10 @@ static const topicFP topicFunctions[] PROGMEM = {
   getHighNibbleOffset, //TOP177
   getLowNibbleOffset, //TOP178
   getBit1and2, //TOP179
+  getBit3and4, //TOP180
+  getBit1and2, //TOP181
+  getBit7and8, //TOP182
+  getBit5and6, //TOP183
 };
 
 static const char *DisabledEnabled[] PROGMEM = {"2", "Disabled", "Enabled"};
@@ -691,6 +703,8 @@ static const char *HeatCoolSwitch[] PROGMEM = {"2", "Heat", "Cool"};
 static const char *ClosedOpen[] PROGMEM = {"2", "Closed", "Open"};
 static const char *ZoneConfiguration[] PROGMEM = {"0", "Configuration code"};
 static const char *Steps[] PROGMEM = {"0", "Steps"};
+static const char *BivalentOperatingMode[] PROGMEM = {"3", "Auto", "SG ready", "Intelligent"};
+static const char *ExtraPumpUse[] PROGMEM = {"3", "Not used", "Heating", "DHW"};
 
 static const char **opttopicDescription[] PROGMEM = {
   OffOn,          //OPT0
@@ -892,4 +906,8 @@ static const char **topicDescription[] PROGMEM = {
   Kelvin, //TOP177
   Kelvin, //TOP178
   DisabledEnabled, //TOP179
+  BivalentOperatingMode, //TOP180
+  OffOn, //TOP181
+  ExtraPumpUse, //TOP182
+  HeatingControl, //TOP183
 };

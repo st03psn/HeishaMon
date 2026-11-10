@@ -87,6 +87,129 @@ SETTERS = {
         ["-3.5", "3.5", "4", "-4", "0.25", "1.", ".5", "1.55", "10"],
         {"1.0"},
     ),
+    # delays and single-byte temperatures: no other field in the byte
+    "SetBivalentAPStartDelay": (
+        67,
+        [("30", 31), ("35", 36), ("1", 2), ("254", 255)],
+        ["0", "255", "-1"],
+    ),
+    "SetBivalentAPStopDelay": (
+        69,
+        [("30", 31), ("35", 36), ("1", 2), ("254", 255)],
+        ["0", "255", "-1"],
+    ),
+    "SetSolarOnDelta": (
+        61,
+        [("10", 138), ("11", 139), ("-127", 1), ("127", 255), ("0", 128)],
+        ["-128", "128"],
+    ),
+    "SetSolarOffDelta": (
+        62,
+        [("5", 133), ("6", 134), ("-127", 1), ("127", 255), ("0", 128)],
+        ["-128", "128"],
+    ),
+    "SetSolarFrostProtection": (
+        63,
+        [("5", 133), ("6", 134), ("-127", 1), ("127", 255), ("0", 128)],
+        ["-128", "128"],
+    ),
+    "SetRoomHolidayShiftTemp": (
+        43,
+        [("-10", 118), ("-9", 119), ("-127", 1), ("127", 255), ("0", 128)],
+        ["-128", "128"],
+    ),
+}
+# Read-modify-write setters for bytes with several fields. Each accepted case is
+# (actData overrides, payload, expected value of the byte); the rest of the command must stay the
+# empty template. Blocked cases are valid payloads in a state where the cloud did not offer the field.
+RMW_SETTERS = {
+    # byte 26 bits 5-4 (b01 no, b10 yes); needs bits 3-2 = b11 (advanced parallel)
+    "SetBivalentAPHeat": (
+        26,
+        [
+            ({26: 0x5D}, "1", 0x6D),
+            ({26: 0x5E}, "1", 0x6E),
+            ({26: 0x6E}, "0", 0x5E),
+            ({26: 0xDD}, "1", 0xED),
+        ],
+        [({26: 0x5A}, "1"), ({26: 0x56}, "1"), ({26: 0x51}, "0")],
+        ["2", "-1"],
+    ),
+    # byte 27 bits 5-4 (b01 auto, b10 SG ready, b11 intelligent); bits 1-0, 3-2 and 7-6 stay as read
+    "SetBivalentOperatingMode": (
+        27,
+        [
+            ({27: 0x55}, "1", 0x65),
+            ({27: 0x55}, "2", 0x75),
+            ({27: 0x75}, "0", 0x55),
+            ({27: 0x95}, "1", 0xA5),
+            ({27: 0x59}, "2", 0x79),
+            ({27: 0x76}, "0", 0x56),
+        ],
+        [],
+        ["3", "-1"],
+    ),
+    # byte 27 bits 7-6 (b01 off, b10 on); needs byte 26 bits 3-2 = b01 (alternative)
+    "SetBivalentExternalPump": (
+        27,
+        [
+            ({26: 0x56, 27: 0x55}, "1", 0x95),
+            ({26: 0x56, 27: 0x95}, "0", 0x55),
+            ({26: 0x56, 27: 0x5D}, "1", 0x9D),
+            ({26: 0x56, 27: 0x65}, "1", 0xA5),
+        ],
+        [({26: 0x5E, 27: 0x55}, "1"), ({26: 0x5A, 27: 0x55}, "1"), ({26: 0x52, 27: 0x55}, "0")],
+        ["2", "-1"],
+    ),
+    # byte 31 low nibble: 0 -> 5 (not used), 1 -> A (heating), 2 -> B (DHW efficiency) or the current DHW value;
+    # bits 7-4 stay as read; needs a connected tank (byte 24 bits 1-0 = b10)
+    "SetExtraPump": (
+        31,
+        [
+            ({24: 0x56, 31: 0x5A}, "2", 0x5B),
+            ({24: 0x56, 31: 0x5B}, "0", 0x55),
+            ({24: 0x56, 31: 0x57}, "0", 0x55),
+            ({24: 0x56, 31: 0x55}, "1", 0x5A),
+            ({24: 0x56, 31: 0x5B}, "1", 0x5A),
+            ({24: 0x56, 31: 0x55}, "2", 0x5B),
+            ({24: 0x56, 31: 0x57}, "2", 0x57),
+            ({24: 0x56, 31: 0x5B}, "2", 0x5B),
+            ({24: 0x96, 31: 0x6A}, "0", 0x65),
+            ({24: 0x56, 31: 0x6B}, "1", 0x6A),
+            ({24: 0x56, 31: 0xDA}, "2", 0xDB),
+        ],
+        [({24: 0x55, 31: 0x5A}, "2"), ({24: 0x55, 31: 0x5A}, "0"), ({24: 0x57, 31: 0x5A}, "1")],
+        ["3", "-1"],
+    ),
+    # byte 31 bits 3-2 (0 comfort -> 7, 1 efficiency -> B); needs the extra pump on DHW (bits 1-0 = b11) and a tank
+    "SetExtraPumpMode": (
+        31,
+        [
+            ({24: 0x56, 31: 0x5B}, "0", 0x57),
+            ({24: 0x56, 31: 0x57}, "1", 0x5B),
+            ({24: 0x56, 31: 0x5B}, "1", 0x5B),
+            ({24: 0x56, 31: 0x6B}, "0", 0x67),
+            ({24: 0x56, 31: 0xDB}, "0", 0xD7),
+        ],
+        [
+            ({24: 0x56, 31: 0x5A}, "0"),
+            ({24: 0x56, 31: 0x55}, "1"),
+            ({24: 0x55, 31: 0x5B}, "0"),
+        ],
+        ["2", "-1"],
+    ),
+    # byte 25 bits 3-2 (b01 3 kW, b10 6 kW); bits 1-0 (tank heater type) and 7-4 stay as read; 9 kW is not accepted
+    "SetInternalHeaterCapacity": (
+        25,
+        [
+            ({25: 0x25}, "6", 0x29),
+            ({25: 0x29}, "3", 0x25),
+            ({25: 0x26}, "6", 0x2A),
+            ({25: 0x5E}, "3", 0x56),
+        ],
+        [],
+        ["0", "4", "5", "7", "9", "12", "-3"],
+    ),
 }
 NEEDS_DATA = {
     "SetEfficiencyStage1Time",
@@ -115,11 +238,17 @@ void log_message(char*) {}
 """
 
 
-# last data block from the heat pump, used by the nibble setters for the unchanged other nibble
+# last data block from the heat pump, used by the shared-byte setters for the unchanged other bits
 ACT_DATA = """
 char actData[DATASIZE] = { 0x71, (char)0xc8, 0x01, 0x10 };
+void reset_act_data() {
+  memset(actData + 4, 0, sizeof(actData) - 4);
+  actData[0] = 0x71; actData[1] = (char)0xc8; actData[2] = 0x01; actData[3] = 0x10;
+  actData[24] = 0x55; actData[25] = 0x25; actData[26] = 0x5D; actData[27] = 0x55; actData[31] = 0x5A;
+  actData[33] = 0x75; actData[34] = (char)0xA7; actData[35] = (char)0x86;
+}
 struct ActDataInit {
-  ActDataInit() { actData[33] = 0x75; actData[34] = (char)0xA7; actData[35] = (char)0x86; }
+  ActDataInit() { reset_act_data(); }
 } actDataInit;
 """
 GENERIC_REJECTED = ["", "abc", "1x", "1.0", " 1", "+1", "1 ", "-", "999999999999999"]
@@ -205,6 +334,94 @@ def main():
     assert({function}(payload, command, log) == 0);
     for (byte value : command) assert(value == 0xa5);
     actData[0] = saved;
+  }}
+"""
+            )
+            cases += 1
+    def setup(overrides):
+        return "reset_act_data(); " + " ".join(
+            f"actData[{b}] = (char){v};" for b, v in overrides.items()
+        )
+
+    for topic, (address, accepted, blocked, rejected) in RMW_SETTERS.items():
+        assert f"| {topic} |" in docs
+        function = re.search(r'\{\s*"' + topic + r'",\s*(\w+)\s*\}', header)[1]
+        for overrides, payload, encoded in accepted:
+            checks.append(
+                f"""
+  {{ char topic[] = "{topic}", payload[] = "{payload}";
+    {setup(overrides)}
+    sent.clear(); send_count = 0;
+    send_heatpump_command(topic, payload, send_command, log_message, false);
+    assert(send_count == 1 && sent.size() == sizeof(panasonicSendQuery));
+    for (unsigned int i = 0; i < sent.size(); ++i)
+      assert(sent[i] == (i == {address} ? {encoded} : panasonicSendQuery[i]));
+    reset_act_data();
+  }}
+"""
+            )
+            cases += 1
+        for overrides, payload in blocked:
+            checks.append(
+                f"""
+  {{ char topic[] = "{topic}", payload[] = "{payload}";
+    {setup(overrides)}
+    sent.clear(); send_count = 0;
+    send_heatpump_command(topic, payload, send_command, log_message, false);
+    assert(send_count == 0 && sent.empty());
+    byte command[256]; memset(command, 0xa5, sizeof(command));
+    char log[256];
+    assert({function}(payload, command, log) == 0);
+    for (byte value : command) assert(value == 0xa5);
+    reset_act_data();
+  }}
+"""
+            )
+            cases += 1
+        valid_state = accepted[0][0]
+        for payload in rejected + GENERIC_REJECTED:
+            checks.append(
+                f"""
+  {{ char topic[] = "{topic}", payload[] = "{payload}";
+    {setup(valid_state)}
+    sent.clear(); send_count = 0;
+    send_heatpump_command(topic, payload, send_command, log_message, false);
+    assert(send_count == 0 && sent.empty());
+    byte command[256]; memset(command, 0xa5, sizeof(command));
+    char log[256];
+    assert({function}(payload, command, log) == 0);
+    for (byte value : command) assert(value == 0xa5);
+    reset_act_data();
+  }}
+"""
+            )
+            cases += 1
+        checks.append(
+            f"""
+  {{ byte command[256]; memset(command, 0xa5, sizeof(command)); char log[256];
+    {setup(valid_state)}
+    assert({function}(nullptr, command, log) == 0);
+    for (byte value : command) assert(value == 0xa5);
+    reset_act_data();
+  }}
+"""
+        )
+        cases += 1
+        # no data block yet, or the byte itself still 0: refuse instead of guessing the other bits
+        payload = accepted[0][1]
+        for broken in ("actData[0] = 0;", f"actData[{address}] = 0;"):
+            checks.append(
+                f"""
+  {{ char topic[] = "{topic}", payload[] = "{payload}";
+    {setup(valid_state)} {broken}
+    sent.clear(); send_count = 0;
+    send_heatpump_command(topic, payload, send_command, log_message, false);
+    assert(send_count == 0 && sent.empty());
+    byte command[256]; memset(command, 0xa5, sizeof(command));
+    char log[256];
+    assert({function}(payload, command, log) == 0);
+    for (byte value : command) assert(value == 0xa5);
+    reset_act_data();
   }}
 """
             )

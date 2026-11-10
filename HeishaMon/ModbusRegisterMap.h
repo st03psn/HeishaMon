@@ -145,6 +145,18 @@ constexpr MainCommand MAIN_COMMANDS[] = {
   {68, "SetEfficiencyStage3Time", false},
   {69, "SetSensorOffsetRemoteTh1", true},
   {70, "SetSensorOffsetOutdoor", true},
+  {71, "SetBivalentAPHeat", false},
+  {72, "SetBivalentOperatingMode", false},
+  {73, "SetBivalentExternalPump", false},
+  {74, "SetBivalentAPStartDelay", false},
+  {75, "SetBivalentAPStopDelay", false},
+  {76, "SetExtraPump", false},
+  {77, "SetExtraPumpMode", false},
+  {78, "SetInternalHeaterCapacity", false},
+  {79, "SetSolarOnDelta", true},
+  {80, "SetSolarOffDelta", true},
+  {81, "SetSolarFrostProtection", true},
+  {82, "SetRoomHolidayShiftTemp", true},
   {RESET_COMMAND_ID, "SetReset", false},
 };
 
