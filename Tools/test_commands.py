@@ -286,7 +286,8 @@ RMW_SETTERS = {
     ),
     # byte 31 low nibble: 0 -> 5 (not used), 1 -> A (heating), 2 -> B (DHW efficiency) or 7 if already DHW comfort;
     # bits 5-4 stay as read, bits 7-6 are sent as 0 (cloud frames 0x1A/0x1B/0x17/0x15 for reads 0x5A/0x5B/0x57/0x55);
-    # needs a connected tank (byte 24 bits 1-0 = b10) and one of the four observed low nibbles 5, A, B, 7
+    # payload 2 (DHW) needs a connected tank (byte 24 bits 1-0 = b10); all payloads need one of the four observed
+    # low nibbles 5, A, B, 7
     "SetExtraPump": (
         31,
         [
@@ -302,11 +303,18 @@ RMW_SETTERS = {
             ({24: 0x56, 31: 0x6B}, "1", 0x2A),
             ({24: 0x56, 31: 0xDA}, "2", 0x1B),
             ({24: 0x56, 31: 0x1A}, "0", 0x15),
+            # "not used" and "heating" do not need a tank (the cloud saved them with tank connection = No)
+            ({24: 0x55, 31: 0x5A}, "0", 0x15),
+            ({24: 0x55, 31: 0x5A}, "1", 0x1A),
+            ({24: 0x57, 31: 0x5A}, "1", 0x1A),
+            ({24: 0x55, 31: 0x55}, "1", 0x1A),
+            ({24: 0x00, 31: 0x5B}, "0", 0x15),
         ],
         [
+            # DHW use needs a connected tank
             ({24: 0x55, 31: 0x5A}, "2"),
-            ({24: 0x55, 31: 0x5A}, "0"),
-            ({24: 0x57, 31: 0x5A}, "1"),
+            ({24: 0x57, 31: 0x5A}, "2"),
+            ({24: 0x00, 31: 0x5A}, "2"),
             # low nibble not one of the four observed values: nothing is sent, in particular not the current nibble again
             ({24: 0x56, 31: 0x5F}, "2"),
             ({24: 0x56, 31: 0x53}, "2"),
@@ -357,16 +365,32 @@ SHIM = r"""
 #include <cassert>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
+#include <cstdint>
 #include <vector>
 using byte = unsigned char;
 #define PROGMEM
 #define memcpy_P memcpy
 #define snprintf_P snprintf
 #define PSTR(x) x
+struct String {
+  long v;
+  String(const char *s) : v(s ? atol(s) : 0) {}
+  long toInt() const { return v; }
+};
+void rmw_note_command_sent(const unsigned char *cmd, int length);
 std::vector<byte> sent;
 int send_count;
+// Models the hand-over in the two real send_command() versions (HeishaMon.ino): a command that is not
+// handed over (listen-only, ESP32 queue full) is not reported to the pending-byte memory; a command
+// that is buffered (ESP8266, answer of the previous command still pending) is, and reports false.
+bool listen_only = false, queue_full = false, buffered = false;
 bool send_command(byte* data, int length) {
-  ++send_count; sent.assign(data, data + length); return true;
+  if (length <= 0) return false;
+  if (listen_only || queue_full) return false;
+  ++send_count; sent.assign(data, data + length);
+  rmw_note_command_sent(data, length);
+  return !buffered;
 }
 void log_message(char*) {}
 unsigned long fake_millis = 0;
@@ -397,6 +421,31 @@ static bool run_command(const char *topicName, const char *payloadText) {
   send_heatpump_command(topic, payload, send_command, log_message, false);
   return send_count == 1;
 }
+// the web console (HeishaMon.ino) and the rules engine (rules.cpp) do not use send_heatpump_command():
+// they look the setter up in commands[] and call send_command(cmd, len) themselves
+static bool run_direct(const char *name, const char *payloadText) {
+  char payload[64];
+  strcpy(payload, payloadText);
+  sent.clear(); send_count = 0;
+  for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+    cmdStruct tmp;
+    memcpy_P(&tmp, &commands[i], sizeof(tmp));
+    if (strcmp(name, tmp.name) == 0) {
+      byte cmd[256] = { 0 };
+      char log[256] = { 0 };
+      unsigned int len = tmp.func(payload, cmd, log);
+      send_command(cmd, len);
+    }
+  }
+  return send_count == 1;
+}
+// a main data block arrives (readSerial(): decode_heatpump_data() replaces actData, then the hook)
+static void deliver_block(unsigned long after_ms, int a0 = -1, int v0 = 0, int a1 = -1, int v1 = 0) {
+  fake_millis += after_ms;
+  if (a0 >= 0) actData[a0] = (char)v0;
+  if (a1 >= 0) actData[a1] = (char)v1;
+  rmw_data_block_received();
+}
 """
 GENERIC_REJECTED = ["", "abc", "1x", "1.0", " 1", "+1", "1 ", "-", "999999999999999"]
 
@@ -410,6 +459,22 @@ def main():
             "unsigned int set_sterilization_temp"
         )
     ]
+    def upstream(name):
+        i = source.index("unsigned int " + name + "(char *msg")
+        return source[i : source.index("\n}\n", i) + 3]
+
+    # the existing upstream setters that write the same shared bytes (20, 24, 25, 26, 30)
+    additions += "".join(
+        upstream(n)
+        for n in (
+            "set_bivalent_control",
+            "set_bivalent_mode",
+            "set_alt_external_sensor",
+            "set_external_pad_heater",
+            "set_heatingcontrol",
+            "set_smart_dhw",
+        )
+    )
     real_functions = set(re.findall(r"unsigned int (\w+)\(", additions))
     stubs = []
     for name, args in re.findall(r"unsigned int (set_\w+)\(([^;]+)\);", header):
@@ -586,14 +651,14 @@ def main():
     assert(run_command("SetEfficiencyStage1Time", "30") && sent[33] == 0x87);
     assert(actData[33] == 0x75); // actData itself is never changed
   }
-  { // the memory expires after 30 s: back to the data block
+  { // the memory expires after 12 s: back to the data block
     reset_act_data();
     assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
-    fake_millis += 29999;
+    fake_millis += 11999;
     assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
     reset_act_data();
     assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
-    fake_millis += 30000;
+    fake_millis += 12000;
     assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
   }
   { // bivalent operating mode, then external pump (both byte 27)
@@ -662,6 +727,192 @@ def main():
     checks.append(sequences)
     cases += 10
 
+    shadow_tests = r"""
+  const unsigned long SETTLE = 2000, LIFE = 12000;
+  { // N1: a data block received after the settle time ends the memory, whether it confirms or not
+    reset_act_data();
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    deliver_block(SETTLE, 33, 0x75); // rejected or not applied: actData is the truth
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+    reset_act_data();
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    deliver_block(SETTLE, 33, 0x76); // confirmed
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
+    deliver_block(SETTLE, 33, 0x86);
+    assert(run_command("SetEfficiencyStage1Time", "30") && sent[33] == 0x87);
+  }
+  { // a block that is on its way when the command is handed over still carries the old value and does not end it
+    reset_act_data();
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    deliver_block(SETTLE - 1, 33, 0x75);
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
+    deliver_block(1); // 1 ms after the second command: still pending
+    assert(run_command("SetEfficiencyStage1Time", "30") && sent[33] == 0x87);
+    deliver_block(SETTLE, 33, 0x75); // the later block ends it (age counted from the last command)
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+  }
+  { // N1: the other documented failure: upstream SetHeatingControl after SetDHWDefrost, read-back received
+    reset_act_data(); actData[30] = (char)0x5A;
+    assert(run_command("SetDHWDefrost", "0") && sent[30] == 0x59);
+    assert(run_command("SetHeatingControl", "0") && sent[30] == 0x04); // upstream frame: only its own pair
+    assert(run_command("SetDHWDefrost", "1") && sent[30] == 0x56);     // pending 0x55 (defrost b01, control b01), not 0x59/0x5A
+    deliver_block(SETTLE, 30, 0x55);                                  // read-back
+    assert(run_command("SetDHWDefrost", "1") && sent[30] == 0x56);
+  }
+  { // N1: bivalent mode changed by the upstream setter: AP heat is refused afterwards (needs advanced parallel)
+    reset_act_data(); actData[26] = (char)0x5E;
+    assert(run_command("SetBivalentAPHeat", "1") && sent[26] == 0x6E);
+    assert(run_command("SetBivalentMode", "0") && sent[26] == 0x04);
+    assert(!run_command("SetBivalentAPHeat", "0"));
+    deliver_block(SETTLE, 26, 0x66);
+    assert(!run_command("SetBivalentAPHeat", "0"));
+  }
+  { // N1: the pad heater (upstream, byte 25) is kept by the heater capacity command
+    reset_act_data(); actData[25] = (char)0x25;
+    assert(run_command("SetInternalHeaterCapacity", "6") && sent[25] == 0x29);
+    assert(run_command("SetExternalPadHeater", "2") && sent[25] == 0x30);
+    assert(run_command("SetInternalHeaterCapacity", "3") && sent[25] == 0x35);
+  }
+  { // N1: alternative outside sensor (upstream, byte 20) is kept by the anti freeze command
+    reset_act_data(); actData[20] = (char)0x6A;
+    assert(run_command("SetAntiFreezeMode", "0") && sent[20] == 0x66);
+    assert(run_command("SetAltExternalSensor", "0") && sent[20] == 0x10);
+    assert(run_command("SetAntiFreezeMode", "1") && sent[20] == 0x5A);
+  }
+  { // N1: smart DHW (upstream, byte 24) changes the byte the extra pump gate reads
+    reset_act_data(); actData[24] = (char)0x56; actData[31] = (char)0x5B;
+    assert(run_command("SetSmartDHW", "1") && sent[24] == 0x80);
+    assert(run_command("SetExtraPumpMode", "0") && sent[31] == 0x17); // tank bits unchanged
+    actData[24] = (char)0x55; // user removed the tank in the meantime: read back, pending ends
+    deliver_block(SETTLE);
+    assert(!run_command("SetExtraPumpMode", "0"));
+  }
+  { // N2: web console and rules engine call send_command() directly, without send_heatpump_command()
+    reset_act_data();
+    assert(run_direct("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    assert(run_direct("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
+    assert(run_command("SetEfficiencyStage1Time", "30") && sent[33] == 0x87); // mixed paths
+    assert(actData[33] == 0x75);
+    reset_act_data(); actData[26] = (char)0x56; // bivalent control yes, mode alternative
+    assert(run_direct("SetBivalentOperatingMode", "1") && sent[27] == 0x65);
+    assert(run_direct("SetBivalentExternalPump", "1") && sent[27] == 0xA5);
+    assert(run_command("SetDemandControlEnable", "1") && sent[27] == 0xA6);
+  }
+  { // N2: a raw frame (SendRawValue / proxy) goes through send_command() too and is remembered
+    reset_act_data();
+    byte frame[sizeof(panasonicSendQuery)];
+    memcpy(frame, panasonicSendQuery, sizeof(frame));
+    frame[33] = 0x76;
+    send_command(frame, sizeof(frame));
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
+    // frames that are no write for the main data block are ignored: optional PCB header, short frame, no data block
+    reset_act_data();
+    frame[0] = 0xF1; frame[1] = 0x11; frame[2] = 0x01; frame[3] = 0x50; frame[33] = 0x76;
+    send_command(frame, sizeof(frame));
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+    reset_act_data();
+    memcpy(frame, panasonicSendQuery, sizeof(frame)); frame[33] = 0x76;
+    send_command(frame, sizeof(frame) - 1);
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+    reset_act_data(); actData[0] = 0;
+    send_command(frame, sizeof(frame));
+    actData[0] = 0x71;
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+  }
+  { // N3: expiry is a difference of unsigned 32-bit times and an expired entry is invalidated
+    reset_act_data();
+    fake_millis = 1000;
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    { byte command[256]; char log[256]; char payload[] = "35";
+      fake_millis = 1000 + LIFE + 5; // expired; a dry run (Modbus) looks at the byte and marks the entry invalid
+      assert(set_efficiency_stage2_time(payload, command, log) > 0 && command[33] == 0x85);
+      fake_millis = 1000 + 5000; // the clock is back in the old window, as it is after 2^32 ms
+      assert(set_efficiency_stage2_time(payload, command, log) > 0 && command[33] == 0x85); }
+    // a command shortly before the wrap of millis(): pending across the wrap, expired after it
+    reset_act_data();
+    fake_millis = 0xFFFFFFFFUL - 2000;
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    fake_millis += 5000; // wrapped
+    assert(fake_millis < 5000);
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
+    fake_millis += 13000;
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+    // the block hook invalidates as well, so a pending entry does not wait for a look
+    reset_act_data();
+    fake_millis = 1000;
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    deliver_block(LIFE + 1000);
+    fake_millis = 1000 + 5000;
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+  }
+  { // N4: nothing handed over -> nothing remembered
+    reset_act_data();
+    listen_only = true;
+    assert(!run_command("SetEfficiencyStage1Time", "25"));
+    listen_only = false;
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+    reset_act_data();
+    queue_full = true;
+    assert(!run_command("SetEfficiencyStage1Time", "25"));
+    queue_full = false;
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+    // ESP8266: a buffered command (send_command returns false) is handed over and remembered
+    reset_act_data();
+    buffered = true;
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    buffered = false;
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
+  }
+  { // dry run (Modbus validation) and rejected commands record nothing and never touch actData
+    reset_act_data();
+    { byte command[256]; char log[256]; char payload[] = "25";
+      assert(set_efficiency_stage1_time(payload, command, log) > 0 && command[33] == 0x76);
+      char bad[] = "3";
+      assert(set_efficiency_stage1_time(bad, command, log) == 0); }
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x85);
+    char before[sizeof(actData)]; memcpy(before, actData, sizeof(before));
+    assert(run_command("SetEfficiencyStage1Time", "25"));
+    deliver_block(SETTLE);
+    assert(memcmp(before, actData, sizeof(before)) == 0);
+  }
+  { // a frame byte with value 0 is no information: byte 35 stays with actData when only byte 33 was sent
+    reset_act_data();
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    actData[35] = (char)0x96; // changed at the remote controller; the block is not processed yet
+    assert(run_command("SetSensorOffsetOutdoor", "0") && sent[35] == 0x98);
+  }
+  { // one data block ends every pending byte that is old enough, not only the byte of the last command
+    reset_act_data();
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);
+    assert(run_command("SetSensorOffsetRemoteTh1", "1") && sent[35] == 0xA6);
+    deliver_block(SETTLE, 33, 0x76); // block ends all pending bytes that are old enough, not only the byte of the last command
+    assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
+    assert(run_command("SetSensorOffsetOutdoor", "-1.5") && sent[35] == 0x85); // byte 35 ended too: actData (0x86) is used
+  }
+"""
+    checks.append(shadow_tests)
+    cases += 14
+
+    # structure of the production code that the host harness cannot compile (HeishaMon.ino, rules.cpp)
+    ino = (ROOT / "HeishaMon/HeishaMon.ino").read_text()
+    rules = (ROOT / "HeishaMon/rules.cpp").read_text()
+    assert ino.count("rmw_note_command_sent(command, length)") == 3, "ESP32 send, ESP8266 send and ESP8266 buffer path"
+    assert re.search(r"if \(xQueueSend\(cmdQueue, &cmd, 0\) != pdTRUE\) return false;[^\n]*\n\s*rmw_note_command_sent\(command, length\);", ino)
+    assert re.search(r"if \(cmdnrel \+ 1 <= MAXCOMMANDSINBUFFER\) rmw_note_command_sent\(command, length\);[^\n]*\n\s*pushCommandBuffer", ino)
+    assert re.search(r"sendCommandReadTime = millis\(\);[^\n]*\n\s*rmw_note_command_sent\(command, length\);", ino)
+    assert re.search(r"decode_heatpump_data\(data, actData[^\n]*\n\s*rmw_data_block_received\(\);", ino)
+    assert ino.count("rmw_data_block_received()") == 1
+    settle = int(re.search(r"#define RMW_SETTLE_MS (\d+)UL", source)[1])
+    assert settle == int(re.search(r"#define SERIALTIMEOUT (\d+)", ino)[1]), "settle time is tied to SERIALTIMEOUT"
+    assert int(re.search(r"#define RMW_SHADOW_MS (\d+)UL", source)[1]) == 12000
+    # every writer (MQTT/Modbus via send_heatpump_command, web console, rules) ends in send_command(cmd, len)
+    assert re.search(r"if \(len > 0\) send_command\(cmd, len\);", source)
+    assert re.search(r"len = tmp\.func\(cpy, cmd, log_msg\);.*?send_command\(cmd, len\);", ino, re.S)
+    assert re.search(r"tmp\.func\(payload, cmd, log_msg\);.*?send_command\(cmd, len\);", rules, re.S)
+    assert "send_heatpump_command(topicName, payload, send_command" in (ROOT / "HeishaMon/HeishaModbusServer.cpp").read_text()
+    assert "remember_rmw_command" not in source and "rmwCommands" not in source
+    cases += 11
+
     program = (
         SHIM
         + header
@@ -673,6 +924,8 @@ def main():
         + RUN_HELPER
     )
     program += "\nint main() {\n" + "".join(checks) + "\n}\n"
+    # the firmware runs with a 32-bit unsigned long (ESP8266/ESP32); make the host build do the same
+    program = "#include <cstdint>\n" + program.replace("unsigned long", "uint32_t")
     with tempfile.TemporaryDirectory() as directory:
         cpp = Path(directory) / "test.cpp"
         binary = Path(directory) / "test"

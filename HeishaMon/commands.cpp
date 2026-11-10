@@ -373,32 +373,104 @@ unsigned int set_quiet_mode_schedule(char *msg, unsigned char *cmd, char *log_ms
 // (a setting the unit does not have). Some commands additionally need a state in which the cloud offered
 // the field; see MQTT-Topics.md.
 //
-// actData is replaced only when the next data block arrives, up to several seconds after a command. To
-// keep two commands in a row on the same byte from undoing each other, the byte that the last such
-// command sent is remembered for RMW_SHADOW_MS and used instead of actData. actData itself is not
-// changed (decode_heatpump_data compares against it). Only send_heatpump_command() records a byte, because
-// the setters also run as a pure validity check (Modbus) and must stay free of side effects.
-#define RMW_SHADOW_MS 30000UL
+// actData is replaced only when the next data block arrives, up to several seconds after a command, and
+// not at all if the pump rejects the command. To keep two commands in a row on the same byte from undoing
+// each other, the bytes of a command that was handed over for sending are remembered (a "pending byte")
+// and used instead of actData until the heat pump reports the byte again. actData itself is never changed
+// (decode_heatpump_data compares against it).
+//
+// touches upstream send path: send_command() (HeishaMon.ino, both the ESP32 and the ESP8266 version) calls
+// rmw_note_command_sent() once a command was accepted for sending, so every writer is covered (MQTT, Modbus,
+// rules, web console, raw frames, and the existing upstream setters on the same bytes). The data block
+// receive code calls rmw_data_block_received() after decode_heatpump_data(). The setters themselves stay
+// free of side effects (Modbus uses them as a dry run).
+//
+// A pending byte ends
+//  - at the first data block that is received RMW_SETTLE_MS or more after the command was handed over,
+//    whether that block confirms the value or not (then actData is the truth again), or
+//  - RMW_SHADOW_MS after the command (unsigned difference, so it also holds when millis() wraps).
+// RMW_SHADOW_MS: the minimum poll interval (waitTime) is 5 s, so 12 s is two polls plus a margin.
+// RMW_SETTLE_MS: a data block that was already on its way when the command was handed over still carries
+// the old value, and so may the pump's answer to the command itself. A block (203 bytes, ~0.25 s at 9600
+// baud) is complete well within SERIALTIMEOUT (2000 ms, HeishaMon.ino) after the transmission that was
+// running, on ESP32 the command is only written after that transmission has ended (serialTXTask). Blocks
+// that complete earlier than SERIALTIMEOUT after the hand-over are therefore not trusted. The next regular
+// poll (waitTime >= 5 s later) ends the pending state. Both values were derived from the code timing, they
+// were not measured on hardware.
+#define RMW_SHADOW_MS 12000UL
+#define RMW_SETTLE_MS 2000UL
 
-struct rmwShadow {
+// Tracked bytes: every byte that a setter reads through effective_byte(). unit = size of the sub-fields
+// in bits (2 = bit pairs, 4 = nibbles); a zero sub-field in a sent frame means "no change" (as in the
+// upstream setters, which send only their own pair), so it is completed from the previous value.
+struct rmwTracked {
   byte address;
-  byte value;
+  byte unit;
+};
+
+static const rmwTracked rmwTrackedBytes[] PROGMEM = {
+  { 20, 2 }, { 24, 2 }, { 25, 2 }, { 26, 2 }, { 27, 2 }, { 30, 2 }, { 31, 2 }, { 33, 4 }, { 34, 4 }, { 35, 4 },
+};
+#define RMW_TRACKED (sizeof(rmwTrackedBytes) / sizeof(rmwTrackedBytes[0]))
+
+// RAM: 10 slots x 6 bytes (value, valid, 32-bit time) = 60 bytes on ESP8266; the address/unit table is in flash.
+struct rmwPending {
   unsigned long since;
+  byte value;
   bool valid;
 };
 
-static rmwShadow rmwShadows[] = {
-  { 20, 0, 0, false }, { 25, 0, 0, false }, { 26, 0, 0, false }, { 27, 0, 0, false },
-  { 30, 0, 0, false }, { 31, 0, 0, false }, { 33, 0, 0, false }, { 35, 0, 0, false },
-};
+static rmwPending rmwPendingBytes[RMW_TRACKED];
 
+// The pending value of a tracked byte or actData. Does not clear anything that is still young; an expired
+// entry is marked invalid (also protects against a wrap of millis() after 49.7 days).
 static byte effective_byte(byte address) {
-  for (unsigned int i = 0; i < sizeof(rmwShadows) / sizeof(rmwShadows[0]); i++) {
-    if (rmwShadows[i].address == address && rmwShadows[i].valid && (unsigned long)(millis() - rmwShadows[i].since) < RMW_SHADOW_MS) {
-      return rmwShadows[i].value;
-    }
+  for (unsigned int i = 0; i < RMW_TRACKED; i++) {
+    rmwTracked t;
+    memcpy_P(&t, &rmwTrackedBytes[i], sizeof(t));
+    if (t.address != address || !rmwPendingBytes[i].valid) continue;
+    if ((unsigned long)(millis() - rmwPendingBytes[i].since) < RMW_SHADOW_MS) return rmwPendingBytes[i].value;
+    rmwPendingBytes[i].valid = false;
   }
   return (byte)actData[address];
+}
+
+// sent value with the zero sub-fields replaced by the ones of base
+static byte merge_sent_byte(byte unit, byte sent, byte base) {
+  const byte mask = (byte)((1 << unit) - 1);
+  byte result = 0;
+  for (byte shift = 0; shift < 8; shift += unit) {
+    byte part = (sent >> shift) & mask;
+    if (part == 0) part = (base >> shift) & mask;
+    result |= (byte)(part << shift);
+  }
+  return result;
+}
+
+// Called from send_command() when a command frame was accepted for sending (written, queued or buffered;
+// not in listen-only mode, not when the queue is full). It runs in the main task only (the Modbus task
+// only runs the setters as a dry run and never gets here).
+void rmw_note_command_sent(const unsigned char *cmd, int length) {
+  if (length < (int)sizeof(panasonicSendQuery) || cmd[0] != 0xF1 || cmd[3] != 0x10) return; // a write frame for the main data block
+  if (!(actData[0] == 0x71 && actData[1] == (char)0xc8 && actData[2] == 0x01)) return; // nothing to complete partial bytes from; the setters refuse without a block too
+  for (unsigned int i = 0; i < RMW_TRACKED; i++) {
+    rmwTracked t;
+    memcpy_P(&t, &rmwTrackedBytes[i], sizeof(t));
+    if (cmd[t.address] == 0) continue;
+    const byte value = merge_sent_byte(t.unit, cmd[t.address], effective_byte(t.address));
+    rmwPendingBytes[i].value = value;
+    rmwPendingBytes[i].since = millis();
+    rmwPendingBytes[i].valid = true;
+  }
+}
+
+// Called after every received main data block (actData has just been replaced).
+void rmw_data_block_received() {
+  for (unsigned int i = 0; i < RMW_TRACKED; i++) {
+    if (rmwPendingBytes[i].valid && (unsigned long)(millis() - rmwPendingBytes[i].since) >= RMW_SETTLE_MS) {
+      rmwPendingBytes[i].valid = false;
+    }
+  }
 }
 
 static bool have_data_block(char *log_msg, byte address) {
@@ -620,7 +692,8 @@ unsigned int set_bivalent_ap_stop_delay(char *msg, unsigned char *cmd, char *log
 // only those are handled and sent: 0x5 not used, 0xA heating (efficiency), 0xB DHW (efficiency), 0x7 DHW (comfort).
 // The split into use (bits 1-0: b01 not used, b10 heating, b11 DHW) and mode (bits 3-2: b01 comfort,
 // b10 efficiency) is derived from these four values. Bits 5-4 (static pressure) are kept as read, bits 7-6 sent as 0.
-// The cloud only allowed the setting with a DHW tank connected (bits 1-0 of byte 24 = b10), so that is required here too.
+// The cloud saved "heating" and "not used" without a DHW tank (tank connection = No), but offered DHW use and the
+// mode (comfort/efficiency) only with a tank (bits 1-0 of byte 24 = b10): the tank is required for those two only.
 static bool extra_pump_state_known(char *log_msg, byte &current) {
   if (!current_data_byte(log_msg, 31, current)) return false;
   const byte nibble = current & 0x0F;
@@ -628,6 +701,10 @@ static bool extra_pump_state_known(char *log_msg, byte &current) {
     snprintf_P(log_msg, 256, PSTR("Cannot set the extra pump: low nibble 0x%X of byte 31 is not one of the observed values 5, A, B, 7"), (unsigned int)nibble);
     return false;
   }
+  return true;
+}
+
+static bool require_dhw_tank(char *log_msg) {
   return require_state(log_msg, 24, 0x03, 0x02, "a connected DHW tank");
 }
 
@@ -640,22 +717,24 @@ static unsigned int send_extra_pump_nibble(unsigned char *cmd, char *log_msg, by
   return sizeof(panasonicSendQuery);
 }
 
-unsigned int set_extra_pump(char *msg, unsigned char *cmd, char *log_msg) { // 0 = not used, 1 = heating, 2 = DHW; TOP182
+unsigned int set_extra_pump(char *msg, unsigned char *cmd, char *log_msg) { // 0 = not used, 1 = heating, 2 = DHW (needs a tank); TOP182
   unsigned char tmp[sizeof(panasonicSendQuery)];
   if (set_integer_field(msg, tmp, log_msg, 31, 0, 2, 1, 1, 0, 1) == 0) return 0;
   byte current = 0;
   if (!extra_pump_state_known(log_msg, current)) return 0;
+  if (tmp[31] == 2 && !require_dhw_tank(log_msg)) return 0;
   byte nibble = 0x5;
   if (tmp[31] == 1) nibble = 0xA;
   if (tmp[31] == 2) nibble = (current & 0x0F) == 0x7 ? 0x7 : 0xB; // already DHW with comfort: keep it
   return send_extra_pump_nibble(cmd, log_msg, current, nibble);
 }
 
-unsigned int set_extra_pump_mode(char *msg, unsigned char *cmd, char *log_msg) { // 0 = comfort, 1 = efficiency; TOP183; only with DHW use
+unsigned int set_extra_pump_mode(char *msg, unsigned char *cmd, char *log_msg) { // 0 = comfort, 1 = efficiency; TOP183; only with DHW use and a tank
   unsigned char tmp[sizeof(panasonicSendQuery)];
   if (set_integer_field(msg, tmp, log_msg, 31, 0, 1, 1, 1, 0, 1) == 0) return 0;
   byte current = 0;
   if (!extra_pump_state_known(log_msg, current)) return 0;
+  if (!require_dhw_tank(log_msg)) return 0;
   if (!require_state(log_msg, 31, 0x03, 0x03, "the extra pump set to DHW")) return 0;
   return send_extra_pump_nibble(cmd, log_msg, current, tmp[31] == 0 ? 0x7 : 0xB);
 }
@@ -670,32 +749,6 @@ unsigned int set_internal_heater_capacity(char *msg, unsigned char *cmd, char *l
   tmp[25] = (unsigned char)((current & ~0x0C) | tmp[25]);
   memcpy(cmd, tmp, sizeof(tmp));
   return sizeof(panasonicSendQuery);
-}
-
-// Commands that build their byte from actData: send_heatpump_command() remembers the byte they sent.
-struct rmwCommand {
-  unsigned int (*func)(char *msg, unsigned char *cmd, char *log_msg);
-  byte address;
-};
-
-static const rmwCommand rmwCommands[] = {
-  { set_anti_freeze_mode, 20 }, { set_internal_heater_capacity, 25 }, { set_bivalent_ap_heat, 26 },
-  { set_demand_control_enable, 27 }, { set_bivalent_operating_mode, 27 }, { set_bivalent_external_pump, 27 },
-  { set_dhw_defrost, 30 }, { set_static_pressure, 31 }, { set_extra_pump, 31 }, { set_extra_pump_mode, 31 },
-  { set_efficiency_stage1_time, 33 }, { set_efficiency_stage2_time, 33 },
-  { set_sensor_offset_remote_th1, 35 }, { set_sensor_offset_outdoor, 35 },
-};
-
-static void remember_rmw_command(unsigned int (*func)(char *, unsigned char *, char *), const unsigned char *cmd) {
-  for (unsigned int i = 0; i < sizeof(rmwCommands) / sizeof(rmwCommands[0]); i++) {
-    if (rmwCommands[i].func != func) continue;
-    for (unsigned int j = 0; j < sizeof(rmwShadows) / sizeof(rmwShadows[0]); j++) {
-      if (rmwShadows[j].address != rmwCommands[i].address) continue;
-      rmwShadows[j].value = cmd[rmwCommands[i].address];
-      rmwShadows[j].since = millis();
-      rmwShadows[j].valid = true;
-    }
-  }
 }
 
 // Single-byte temperature settings (degC or K + 128), same style as SetPoolDelta
@@ -1698,10 +1751,7 @@ void send_heatpump_command(char* topic, char *msg, bool (*send_command)(byte*, i
     if (strcmp(topic, tmp.name) == 0) {
       len = tmp.func(msg, cmd, log_msg);
       log_message(log_msg);
-      if (len > 0) {
-        remember_rmw_command(tmp.func, cmd);
-        send_command(cmd, len);
-      }
+      if (len > 0) send_command(cmd, len);
     }
   }
 
