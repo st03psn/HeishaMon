@@ -2,7 +2,7 @@
 [![Build binary](https://github.com/the78mole/HeishaMon/actions/workflows/main.yml/badge.svg)](https://github.com/the78mole/HeishaMon/actions/workflows/main.yml)
 
 
-# Panasonic H, J, K & L Series Aquarea air-water heat pump protocol
+# Panasonic H, J, K, L & M Series Aquarea air-water heat pump protocol
 
 This project makes it possible to read information from Panasonic Aquarea heat pump and report the data either to an MQTT server or as JSON format over HTTP.
 
@@ -17,7 +17,7 @@ Latest release is available [here](https://github.com/Egyras/HeishaMon/releases)
 
 
 # Using the software
-HeishaMon is able to communicate with the Panasonic Aquarea H, J, K and L&series. [Confirmed by users types of HP you can find here](HeatPumpType.md) \
+HeishaMon is able to communicate with the Panasonic Aquarea H, J, K, L and M series. [Confirmed by users types of HP you can find here](HeatPumpType.md) \
 To tell us which values and commands work on your model, press **Report to HeishaMon** on the "Heatpump Values" panel of the web page. It opens a prefilled GitHub issue form in your browser; HeishaMon itself sends nothing, and you check the form before you submit it. \
 If you want to compile this image yourself be sure to use the mentioned libraries and support for a filesystem on the esp8266 so select the correct flash option in arduino ide for that.
 
