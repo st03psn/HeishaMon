@@ -1229,7 +1229,7 @@ async function refreshTable(){
 }
 // Opens the heat pump report form of the HeishaMon repository with the current values filled in.
 // Nothing is sent by HeishaMon: the browser opens GitHub, the user checks the form and submits it.
-var hmReportRepo='heishamon/HeishaMon';
+var hmReportRepo='st03psn/HeishaMon'; // test build: reports go to the fork
 function reportHeatpump(){
   fetch('/json').then(function(r){return r.json();}).then(function(d){
     var model='',lines=[];
