@@ -83,11 +83,8 @@ unsigned int set_room_operation_max_time(char *msg, unsigned char *cmd, char *lo
 unsigned int set_dhw_heatup_max_time(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_quiet_mode_schedule(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_anti_freeze_mode(char *msg, unsigned char *cmd, char *log_msg);
-unsigned int set_liquid_type(char *msg, unsigned char *cmd, char *log_msg);
-unsigned int set_zone_type(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_pool_delta(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_demand_control_enable(char *msg, unsigned char *cmd, char *log_msg);
-unsigned int set_heating_water_mode(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_dhw_defrost(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_static_pressure(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_heating_on_outdoor_temp(char *msg, unsigned char *cmd, char *log_msg);
@@ -217,11 +214,8 @@ const cmdStruct commands[] PROGMEM = {
   { "SetDHWHeatupMaxTime", set_dhw_heatup_max_time },
   { "SetQuietModeSchedule", set_quiet_mode_schedule },
   { "SetAntiFreezeMode", set_anti_freeze_mode },
-  { "SetLiquidType", set_liquid_type },
-  { "SetZoneType", set_zone_type },
   { "SetPoolDelta", set_pool_delta },
   { "SetDemandControlEnable", set_demand_control_enable },
-  { "SetHeatingWaterMode", set_heating_water_mode },
   { "SetDHWDefrost", set_dhw_defrost },
   { "SetStaticPressure", set_static_pressure },
   { "SetHeatingOnOutdoorTemp", set_heating_on_outdoor_temp },
