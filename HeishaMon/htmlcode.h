@@ -1229,6 +1229,7 @@ async function refreshTable(){
 }
 // Opens the heat pump report form of the HeishaMon repository with the current values filled in.
 // Nothing is sent by HeishaMon: the browser opens GitHub, the user checks the form and submits it.
+// The browser also reads HeatPumpType.md from GitHub to mark model bytes that are not listed yet.
 var hmReportRepo='heishamon/HeishaMon';
 function reportHeatpump(){
   var model='',lines=[];
@@ -1239,12 +1240,24 @@ function reportHeatpump(){
     lines.push(t+'='+v);
   });
   if(!model||/^(00 ?)+$/.test(model)){alert('No data from the heat pump yet.');return;}
-  var ver=document.getElementById('sideVersion');
-  var q={template:'heatpump-report.yml',title:'Heat pump report: '+model,
-    version:ver?ver.textContent:'',board:hmBoard,model_bytes:model,values:lines.join('\n')};
-  var u='https://github.com/'+hmReportRepo+'/issues/new?'+Object.keys(q).map(function(k){
-    return k+'='+encodeURIComponent(q[k]);}).join('&');
-  window.open(u,'_blank','noopener');
+  // Open the tab inside the click, so pop-up blockers allow it; it gets its address below.
+  var w=window.open('','_blank');
+  if(!w){alert('Your browser blocked the new tab. Please allow pop-ups for this page and try again.');return;}
+  w.opener=null;
+  var ver=document.getElementById('sideVersion'),done=false;
+  function go(known){
+    if(done)return;done=true;
+    var q={template:'heatpump-report.yml',title:(known===false?'New model: ':'Heat pump report: ')+model,
+      version:ver?ver.textContent:'',board:hmBoard,model_bytes:model,values:lines.join('\n')};
+    w.location='https://github.com/'+hmReportRepo+'/issues/new?'+Object.keys(q).map(function(k){
+      return k+'='+encodeURIComponent(q[k]);}).join('&');
+  }
+  setTimeout(function(){go(null);},4000);
+  fetch('https://raw.githubusercontent.com/'+hmReportRepo+'/main/HeatPumpType.md').then(function(r){
+    if(!r.ok)throw new Error(r.status);return r.text();
+  }).then(function(t){
+    go(t.replace(/\s/g,'').toUpperCase().indexOf(model.replace(/\s/g,'').toUpperCase())>=0);
+  }).catch(function(){go(null);});
 }
 function buildRow(item,idKey){
   var row=document.createElement('tr');

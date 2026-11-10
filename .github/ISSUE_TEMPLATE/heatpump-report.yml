@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for reporting. Reports from all series (H, J, K, L, M) help to confirm which topics and commands work on which models, and new model bytes go into [HeatPumpType.md](https://github.com/heishamon/HeishaMon/blob/main/HeatPumpType.md).
 
-        The fields below are filled in by the **Report to HeishaMon** button on the "Heatpump Values" panel of your HeishaMon. Please check them before you submit; nothing is sent until you submit the form.
+        The fields below are filled in by the **Report to HeishaMon** button on the "Heatpump Values" panel of your HeishaMon. Please check them before you submit; nothing is sent until you submit the form. If your model bytes are not listed in HeatPumpType.md yet, the button sets the title to "New model: ..."; please fill in the indoor and outdoor unit so that the model can be added.
   - type: input
     id: version
     attributes:
