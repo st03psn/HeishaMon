@@ -1227,6 +1227,25 @@ async function refreshTable(){
     }
   } catch(e){console.error(e);}
 }
+// Opens the heat pump report form of the HeishaMon repository with the current values filled in.
+// Nothing is sent by HeishaMon: the browser opens GitHub, the user checks the form and submits it.
+var hmReportRepo='heishamon/HeishaMon';
+function reportHeatpump(){
+  fetch('/json').then(function(r){return r.json();}).then(function(d){
+    var model='',lines=[];
+    ['heatpump','heatpump extra','heatpump optional'].forEach(function(k){
+      if(d&&Array.isArray(d[k]))d[k].forEach(function(i){
+        if(i.Topic==='TOP92')model=String(i.Value);
+        lines.push(i.Topic+'='+i.Value);
+      });
+    });
+    var q={template:'heatpump-report.yml',title:'Heat pump report: '+model,
+      version:hmVersion,board:hmBoard,model_bytes:model,values:lines.join('\n')};
+    var u='https://github.com/'+hmReportRepo+'/issues/new?'+Object.keys(q).map(function(k){
+      return k+'='+encodeURIComponent(q[k]);}).join('&');
+    window.open(u,'_blank','noopener');
+  }).catch(function(e){console.error(e);});
+}
 function buildRow(item,idKey){
   var row=document.createElement('tr');
   var topic=item[idKey];
@@ -1419,13 +1438,20 @@ static const char webBodyEndDiv[] FLASHPROG = "</div>";
 static const char webBodyRootHeatpumpValues[] FLASHPROG = R"====(
 <div id='Heatpump' class='tab-pane active'>
 <div class='panel'>
-  <div class='panel-header'><h3>Heatpump Values</h3><span class='panel-meta' id='hpMeta'>Live</span></div>
+  <div class='panel-header'><h3>Heatpump Values</h3><span><span class='panel-meta' id='hpMeta'>Live</span> <button onclick='reportHeatpump()' class='btn btn-ghost' title='Opens a prefilled GitHub issue form in a new tab. HeishaMon itself sends nothing.' style='padding:4px 10px;font-size:11px;height:24px;'>Report to HeishaMon</button></span></div>
   <table><thead><tr>
     <th>Topic</th><th>Name</th><th>Value</th><th>Description</th>
   </tr></thead><tbody id='heishavalues'>
     <tr><td colspan='4' style='color:var(--text-muted);padding:24px;text-align:center'>Loading…</td></tr>
   </tbody></table>
 </div></div>
+<script>var hmVersion=')====" HEISHAMON_VERSION R"====(';var hmBoard=')===="
+#ifdef ESP32
+"ESP32-S3 (large)"
+#else
+"ESP8266 (small)"
+#endif
+R"====(';</script>
 )====";
 
 static const char webBodyRootDallasValues[] FLASHPROG = R"====(
