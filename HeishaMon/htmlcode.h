@@ -1259,7 +1259,7 @@ function checkModel(){
     box.textContent='';
     if(row){
       say('Your model is listed: '+row[3]+' / '+row[4]+(row[5]?' ('+row[5]+')':'')+'. Nothing to add.');
-      hmFormButton(box,row,'Share my values anyway');
+      hmFormButton(box,row,'Share my topic values');
     }else{
       say('Your model '+m+' is not listed yet. You can add it: the form opens on GitHub, you fill in the indoor and outdoor unit from the type plate and submit it.');
       hmFormButton(box,null,'Add my model');
@@ -1283,7 +1283,7 @@ function hmFormButton(box,row,label){
   b.style.cssText='padding:4px 10px;font-size:11px;height:24px;';
   b.onclick=function(){
     var d=hmValues(),ver=document.getElementById('sideVersion');
-    var q={template:'heatpump-model.yml',title:(row?'Heat pump values: ':'New model: ')+d.model,
+    var q={template:row?'heatpump-values.yml':'heatpump-model.yml',title:(row?'Topic values: ':'New model: ')+d.model,
       model_bytes:d.model,version:ver?ver.textContent:'',board:hmBoard};
     if(row){q.indoor_unit=row[3];q.outdoor_unit=row[4];q.kit=row[5];}
     if(row||cb.checked)q.values=d.lines.join('\n');
