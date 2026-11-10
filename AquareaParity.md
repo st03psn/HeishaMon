@@ -20,7 +20,7 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 ### 3.1 Command frame
 
-- A data byte of 0x00 means "no change". The same holds for a zero bit pair inside a shared byte (shown for bytes 24, 26, 27, 31) and for a zero nibble (shown for bytes 35, 36, 37).
+- A data byte of 0x00 means "no change". The same holds for a zero bit pair inside a shared byte (shown for bytes 20, 24, 25, 26, 27, 28, 30, 31) and for a zero nibble (shown for bytes 22, 33, 35, 36, 37). For bytes 20, 22, 25, 28, 30 and 33 this was checked with raw writes that set one field to its current value and all other fields of the byte to 0, together with a change of byte 60 that showed the frame was taken over: the other fields stayed unchanged in every case (heat pump off).
 - A command with a wrong length is ignored without an error.
 - A write is visible in the data block 0.4 to 5 s after the log line `Command datagram sent bytes: 111`.
 - Values outside the step size of the menu are shown for one read cycle and then reverted by the heat pump. Seen with +1 minute on bytes 67, 69, 98 and 101 (menu steps of 5 minutes) and +1 on byte 100. Valid steps are kept.
@@ -88,10 +88,8 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 ## 4. What the new commands do with these findings
 
-- Commands on shared bytes send the whole byte, built from the new field and the last received value of the other bits, and are refused until a data block has been received. A short memory of sent bytes covers commands that follow each other faster than the read cycle.
-- The memory of a byte is kept while a frame that carries it still waits for transmission (ESP32 command queue, ESP8266 command buffer) and ends after that frame has been sent and a later data block has arrived; a buffered frame that is sent later does not put its older value back.
-- Known limit on ESP8266 (existing behaviour of the send path): a command sent while older commands are still buffered can overtake them, so the order on the wire can differ from the order of the commands.
-- Not covered: changes the heat pump makes by itself in another byte (bivalent control and defrost signal). After one of these two commands wait for the next data block before sending a command on byte 26 or 28.
+- Commands on shared bytes send only their own bit pair or nibble and leave the rest of the byte 0 (no change, see 3.1). Two commands in a row on the same byte therefore do not undo each other, and nothing has to be remembered between commands.
+- Commands are refused until a data block has been received and while their own byte reads 0. Checks against other settings use the last data block: right after a parent setting was switched on, a dependent command is refused until the next data block reports it.
 - Value ranges follow the installer menu of the service manual.
 - Some guards mirror the installer menu (for example `SetExtraPump 2` needs a DHW tank). They are not complete, see section 5.
 
