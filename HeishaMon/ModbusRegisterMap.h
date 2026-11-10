@@ -175,6 +175,8 @@ constexpr MainCommand MAIN_COMMANDS[] = {
   {98, "SetSensorOffsetReturn", true},
   {99, "SetZ1SensorSettings", false},
   {101, "SetDefrostSignal", false},  // ID 100 is reserved for SetReset
+  {102, "SetSensorOffsetDhwTank", true},
+  {103, "SetSensorOffsetFlow", true},
   {RESET_COMMAND_ID, "SetReset", false},
 };
 

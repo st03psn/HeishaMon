@@ -111,6 +111,8 @@ unsigned int set_zone_type(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_heating_water_mode(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_cooling_water_mode(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_defrost_signal(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sensor_offset_dhw_tank(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_sensor_offset_flow(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_liquid_type(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_dhw_heater_type(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_dhw_installed(char *msg, unsigned char *cmd, char *log_msg);
@@ -280,6 +282,8 @@ const cmdStruct commands[] PROGMEM = {
   { "SetSensorOffsetReturn", set_sensor_offset_return },
   { "SetZ1SensorSettings", set_z1_sensor_settings },
   { "SetDefrostSignal", set_defrost_signal },
+  { "SetSensorOffsetDhwTank", set_sensor_offset_dhw_tank },
+  { "SetSensorOffsetFlow", set_sensor_offset_flow },
 };
 
 struct optCmdStruct{

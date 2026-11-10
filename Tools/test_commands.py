@@ -553,6 +553,42 @@ RMW_SETTERS = {
         ["-3.5", "3.5", "4", "-4", "0.25", "1.", ".5", "1.55", "10"],
         {"skip": {"1.0"}},
     ),
+    # byte 36 low nibble = offset of the DHW tank sensor, byte 37 low nibble = offset of the flow sensor (same encoding);
+    # the other nibble must be 2..14 and is sent as read
+    "SetSensorOffsetDhwTank": (
+        36,
+        [
+            ({}, "1", 0x8A),
+            ({}, "0.5", 0x89),
+            ({}, "0", 0x88),
+            ({}, "-3", 0x82),
+            ({}, "3.0", 0x8E),
+            ({}, "-0.5", 0x87),
+            ({}, "-2", 0x84),
+            ({36: 0xE8}, "1", 0xEA),
+            ({36: 0x28}, "-3", 0x22),
+        ],
+        [({36: 0x08}, "1"), ({36: 0x18}, "1"), ({36: 0xF8}, "1")],
+        ["-3.5", "3.5", "4", "-4", "0.25", "1.", ".5", "1.55", "10"],
+        {"skip": {"1.0"}},
+    ),
+    "SetSensorOffsetFlow": (
+        37,
+        [
+            ({}, "1", 0x8A),
+            ({}, "0.5", 0x89),
+            ({}, "0", 0x88),
+            ({}, "-3", 0x82),
+            ({}, "3.0", 0x8E),
+            ({}, "-0.5", 0x87),
+            ({}, "-2", 0x84),
+            ({37: 0xE8}, "1", 0xEA),
+            ({37: 0x28}, "-3", 0x22),
+        ],
+        [({37: 0x08}, "1"), ({37: 0x18}, "1"), ({37: 0xF8}, "1")],
+        ["-3.5", "3.5", "4", "-4", "0.25", "1.", ".5", "1.55", "10"],
+        {"skip": {"1.0"}},
+    ),
     # byte 22 low nibble = zone 1 sensor type, payload 0..3 -> nibble 1..4; the zone 2 nibble must be 1..4
     "SetZ1SensorSettings": (
         22,
@@ -1162,6 +1198,21 @@ def main():
     assert(run_command("SetZ1SensorSettings", "2") && sent[22] == 0x13);
     assert(run_command("SetZ1SensorSettings", "0") && sent[22] == 0x11);
     assert(actData[36] == (char)0x88 && actData[22] == 0x11);
+  }
+  { // low nibbles of bytes 36 / 37 (DHW tank, flow): the other nibble stays, also across commands in a row
+    reset_act_data(); actData[36] = (char)0x48; actData[37] = (char)0x68;
+    assert(run_command("SetSensorOffsetDhwTank", "1") && sent[36] == 0x4A);
+    assert(run_command("SetSensorOffsetReturn", "3") && sent[36] == 0xEA);   // low nibble from the pending byte
+    assert(run_command("SetSensorOffsetDhwTank", "-3") && sent[36] == 0xE2); // high nibble from the pending byte
+    assert(run_command("SetSensorOffsetFlow", "0.5") && sent[37] == 0x69);
+    assert(run_command("SetSensorOffsetFlow", "-1") && sent[37] == 0x66);
+    for (unsigned int i = 0; i < sent.size(); ++i) if (i != 37) assert(sent[i] == panasonicSendQuery[i]);
+    assert(actData[36] == (char)0x48 && actData[37] == (char)0x68);
+    reset_act_data(); actData[36] = 0; actData[37] = 0;
+    assert(!run_command("SetSensorOffsetDhwTank", "1") && !run_command("SetSensorOffsetFlow", "1"));
+    reset_act_data(); actData[0] = 0;
+    assert(!run_command("SetSensorOffsetDhwTank", "1") && !run_command("SetSensorOffsetFlow", "1"));
+    reset_act_data();
   }
   { // shared-byte commands never send a byte they could not complete: no data block, byte 0
     reset_act_data(); actData[0] = 0;

@@ -52,7 +52,7 @@ static const char _unknown[] PROGMEM = "unknown";
 
 
 
-#define NUMBER_OF_TOPICS 195 //last topic number + 1
+#define NUMBER_OF_TOPICS 197 //last topic number + 1
 #define NUMBER_OF_TOPICS_EXTRA 6 //last topic number + 1
 #define NUMBER_OF_OPT_TOPICS 7 //last topic number + 1
 #define MAX_TOPIC_LEN 42 // max length + 1
@@ -281,6 +281,8 @@ static const char topics[][MAX_TOPIC_LEN] PROGMEM = {
   "SG_Ready_2_Cool_Capacity", //TOP192
   "Sensor_Offset_Return", //TOP193
   "Defrost_Signal", //TOP194
+  "Sensor_Offset_DHW_Tank", //TOP195
+  "Sensor_Offset_Flow", //TOP196
 };
 
 static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit unsigned humber) as there aren't more then 255 bytes (actually only 203 bytes) to decode
@@ -479,6 +481,8 @@ static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit 
   103, //TOP192
   36, //TOP193
   28, //TOP194
+  36, //TOP195
+  37, //TOP196
 };
 
 
@@ -689,6 +693,8 @@ static const topicFP topicFunctions[] PROGMEM = {
   getIntMinus128, //TOP192
   getHighNibbleOffset, //TOP193
   getBit1and2, //TOP194
+  getLowNibbleOffset, //TOP195
+  getLowNibbleOffset, //TOP196
 };
 
 static const char *DisabledEnabled[] PROGMEM = {"2", "Disabled", "Enabled"};
@@ -962,4 +968,6 @@ static const char **topicDescription[] PROGMEM = {
   Celsius, //TOP192
   Kelvin, //TOP193
   YesNoInvalid, //TOP194
+  Kelvin, //TOP195
+  Kelvin, //TOP196
 };

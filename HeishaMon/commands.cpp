@@ -410,11 +410,11 @@ struct rmwTracked {
 
 static const rmwTracked rmwTrackedBytes[] PROGMEM = {
   { 20, 2 }, { 21, 2 }, { 22, 4 }, { 24, 2 }, { 25, 2 }, { 26, 2 }, { 27, 2 }, { 28, 2 }, { 30, 2 }, { 31, 2 },
-  { 33, 4 }, { 34, 4 }, { 35, 4 }, { 36, 4 },
+  { 33, 4 }, { 34, 4 }, { 35, 4 }, { 36, 4 }, { 37, 4 },
 };
 #define RMW_TRACKED (sizeof(rmwTrackedBytes) / sizeof(rmwTrackedBytes[0]))
 
-// RAM: 14 slots x 6 bytes (value, valid, 32-bit time) = 84 bytes on ESP8266; the address/unit table is in flash.
+// RAM: 15 slots x 6 bytes (value, valid, 32-bit time) = 90 bytes on ESP8266; the address/unit table is in flash.
 struct rmwPending {
   unsigned long since;
   byte value;
@@ -986,10 +986,21 @@ unsigned int set_sg_ready_cool_capacity_1(char *msg, unsigned char *cmd, char *l
 unsigned int set_sg_ready_cool_capacity_2(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_cool_capacity(msg, cmd, log_msg, 103); }
 
 // Return sensor offset, byte 36 high nibble (TOP193), same encoding and limits as the offsets of byte 35. The other nibble
-// of byte 36 must be a valid offset nibble (2..14). The low nibbles of bytes 36 and 37 are not assigned to a sensor;
-// they have neither a command nor a topic.
+// of byte 36 must be a valid offset nibble (2..14).
 unsigned int set_sensor_offset_return(char *msg, unsigned char *cmd, char *log_msg) {
   return set_sensor_offset(msg, cmd, log_msg, 36, true);
+}
+
+// DHW tank sensor offset, byte 36 low nibble (TOP195), and flow sensor offset, byte 37 low nibble (TOP196): same encoding
+// and limits as above (offset / 0.5 + 8 per nibble). The other nibble of the byte is sent as read (pending byte or data
+// block) and must be a valid offset nibble (2..14): the return sensor offset in byte 36, the nibble above the flow
+// sensor offset in byte 37 (its meaning is unknown, 8 was seen).
+unsigned int set_sensor_offset_dhw_tank(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_sensor_offset(msg, cmd, log_msg, 36, false);
+}
+
+unsigned int set_sensor_offset_flow(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_sensor_offset(msg, cmd, log_msg, 37, false);
 }
 
 // Zone 1 sensor type, byte 22 low nibble (TOP111): payload 0..3 = nibble 1..4 (water temperature, external thermostat,

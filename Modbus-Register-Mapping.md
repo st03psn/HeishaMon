@@ -64,7 +64,7 @@ extra data block, and optional PCB topics (OPT) while optional PCB emulation is 
 
 | Group | Reserved integer block (FC03, int16) | Reserved float block (FC03, float32) | Currently implemented |
 | --- | --- | --- | --- |
-| Main TOPn | 0-999 | 10000-11999 | TOP0-TOP194: integer 0-194, float 10000-10389 |
+| Main TOPn | 0-999 | 10000-11999 | TOP0-TOP196: integer 0-196, float 10000-10393 |
 | Extra XTOPn | 1000-1999 | 12000-13999 | XTOP0-XTOP5: integer 1000-1005, float 12000-12011 |
 | Optional PCB OPTn | 2000-2999 | 14000-15999 | OPT0-OPT6: integer 2000-2006, float 14000-14013 |
 | S0 inputs | 3000-3999 | 16000-17999 | Input 1: integer 3000-3005, float 16000-16011; input 2: integer 3100-3105, float 16200-16211 |
@@ -76,7 +76,7 @@ All floats are IEEE 754 float32, unscaled.
 
 | Other group | Reserved block | Access | Implemented |
 | --- | --- | --- | --- |
-| Heat-pump commands | 5000-5999 | FC06 / FC16, int16 | 5000-5098 and 5100; 5015 is reserved for JSON-only SetCurves and rejects writes |
+| Heat-pump commands | 5000-5999 | FC06 / FC16, int16 | 5000-5098 and 5100-5102; 5015 is reserved for JSON-only SetCurves and rejects writes |
 | Optional PCB commands | 6000-6999 | FC06 / FC16, int16 | 6000-6013 |
 | System commands | 7000-7999 | FC06 / FC16, int16 | 7000 = SetReset |
 | Float32 commands | 20000-29999 | FC16, float32 (2 registers) | 20000 + 2 * (command address - 5000): heat pump 20000-21999, optional PCB 22000-23999, system 24000-25999 |
@@ -142,7 +142,7 @@ commands: SetZ1HeatRequestTemperature, SetZ1CoolRequestTemperature,
 SetZ2HeatRequestTemperature, SetZ2CoolRequestTemperature, SetDHWTemp, SetFloorHeatDelta,
 SetFloorCoolDelta, SetDHWHeatDelta, SetHeaterStartDelta, SetHeaterStopDelta, SetBufferDelta,
 SetHeatingOffOutdoorTemp, SetBivalentStartTemp, SetBivalentAPStartTemp,
-SetBivalentAPStopTemp, SetHeaterOnOutdoorTemp, SetSterilizationTemp, SetHeatToCoolTemp, SetCoolToHeatTemp, SetPoolDelta, SetHeatingOnOutdoorTemp, SetSensorOffsetRemoteTh1, SetSensorOffsetOutdoor, SetSensorOffsetReturn, SetSolarOnDelta, SetSolarOffDelta, SetSolarFrostProtection, SetSolarHighLimit, SetSGReadyCoolCapacity1, SetSGReadyCoolCapacity2 and SetRoomHolidayShiftTemp (the sensor offsets therefore accept whole degrees only through Modbus; use MQTT for half degrees). All other commands (modes, states, times,
+SetBivalentAPStopTemp, SetHeaterOnOutdoorTemp, SetSterilizationTemp, SetHeatToCoolTemp, SetCoolToHeatTemp, SetPoolDelta, SetHeatingOnOutdoorTemp, SetSensorOffsetRemoteTh1, SetSensorOffsetOutdoor, SetSensorOffsetReturn, SetSensorOffsetDhwTank, SetSensorOffsetFlow, SetSolarOnDelta, SetSolarOffDelta, SetSolarFrostProtection, SetSolarHighLimit, SetSGReadyCoolCapacity1, SetSGReadyCoolCapacity2 and SetRoomHolidayShiftTemp (the sensor offsets therefore accept whole degrees only through Modbus; use MQTT for half degrees). All other commands (modes, states, times,
 duty) are unscaled signed int16; this includes the SG ready power limits (SetSGReadyDHWPower1 to SetSGReadyStopPower), which take whole kW only through Modbus (write 4 for 4.0 kW; use MQTT for tenths). Allowed values are those of the regular HeishaMon command
 handlers. SetCurves needs JSON and must use MQTT/HTTP.
 
@@ -302,6 +302,8 @@ is `MAIN_COMMANDS` in `HeishaMon/ModbusRegisterMap.h`. IDs 1-1000 map to
 | 5097 | `SetSensorOffsetReturn` |
 | 5098 | `SetZ1SensorSettings` |
 | 5100 | `SetDefrostSignal` |
+| 5101 | `SetSensorOffsetDhwTank` |
+| 5102 | `SetSensorOffsetFlow` |
 
 ## Optional PCB commands
 
