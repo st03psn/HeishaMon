@@ -49,7 +49,7 @@ body:
         - 3ph
         - Not known
   - type: input
-    id: type
+    id: hp_type
     attributes:
       label: Type
       description: For example HP, T-CAP, All-In-One, Super Quiet, as in HeatPumpType.md.
