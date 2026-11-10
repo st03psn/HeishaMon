@@ -116,7 +116,7 @@ def main():
     uri = ino[ino.index("case WEBSERVER_CLIENT_REQUEST_URI:") : ino.index("case WEBSERVER_CLIENT_ARGS:")]
     assert uri.index("webAuthAllowed(remote, &heishamonSettings)") < uri.index('"/togglelog"')
     assert uri.index("webAuthAllowed(remote, &heishamonSettings)") < uri.index('PSTR("/command")')
-    assert uri.index("webAuthAllowed(remote, &heishamonSettings)") < uri.index("client->route == 110")
+    assert uri.index("webAuthAllowed(remote, &heishamonSettings)") < uri.index("} else if (client->route == 110)")
     assert uri.count("webAuthAllowed(") == 1
     print("PASS: web login logic (sessions, lock, trusted addresses) and position of the check")
 
