@@ -1231,20 +1231,20 @@ async function refreshTable(){
 // Nothing is sent by HeishaMon: the browser opens GitHub, the user checks the form and submits it.
 var hmReportRepo='heishamon/HeishaMon';
 function reportHeatpump(){
-  fetch('/json').then(function(r){return r.json();}).then(function(d){
-    var model='',lines=[];
-    ['heatpump','heatpump extra','heatpump optional'].forEach(function(k){
-      if(d&&Array.isArray(d[k]))d[k].forEach(function(i){
-        if(i.Topic==='TOP92')model=String(i.Value);
-        lines.push(i.Topic+'='+i.Value);
-      });
-    });
-    var q={template:'heatpump-report.yml',title:'Heat pump report: '+model,
-      version:hmVersion,board:hmBoard,model_bytes:model,values:lines.join('\n')};
-    var u='https://github.com/'+hmReportRepo+'/issues/new?'+Object.keys(q).map(function(k){
-      return k+'='+encodeURIComponent(q[k]);}).join('&');
-    window.open(u,'_blank','noopener');
-  }).catch(function(e){console.error(e);});
+  var model='',lines=[];
+  document.querySelectorAll('#heishavalues td[id$="-Topic"]').forEach(function(c){
+    var t=c.textContent,v=document.getElementById(t+'-Value');
+    v=v?v.textContent:'';
+    if(t==='TOP92')model=v;
+    lines.push(t+'='+v);
+  });
+  if(!model||/^(00 ?)+$/.test(model)){alert('No data from the heat pump yet.');return;}
+  var ver=document.getElementById('sideVersion');
+  var q={template:'heatpump-report.yml',title:'Heat pump report: '+model,
+    version:ver?ver.textContent:'',board:hmBoard,model_bytes:model,values:lines.join('\n')};
+  var u='https://github.com/'+hmReportRepo+'/issues/new?'+Object.keys(q).map(function(k){
+    return k+'='+encodeURIComponent(q[k]);}).join('&');
+  window.open(u,'_blank','noopener');
 }
 function buildRow(item,idKey){
   var row=document.createElement('tr');
@@ -1423,7 +1423,7 @@ static const char webBodyRootHeatpumpValues[] FLASHPROG = R"====(
     <tr><td colspan='4' style='color:var(--text-muted);padding:24px;text-align:center'>Loading…</td></tr>
   </tbody></table>
 </div></div>
-<script>var hmVersion=')====" HEISHAMON_VERSION R"====(';var hmBoard=')===="
+<script>var hmBoard=')===="
 #ifdef ESP32
 "ESP32-S3 (large)"
 #else
