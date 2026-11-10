@@ -836,9 +836,9 @@ bool readSerial()
         if  (data[3] == 0x10) { //decode the normal data block
           decode_heatpump_data(data, actData, mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
 #ifdef ESP32
-          rmw_data_block_received(cmdQueue != NULL && uxQueueMessagesWaiting(cmdQueue) > 0); // pending bytes of shared-byte settings, see commands.cpp
+          rmw_data_block_received(cmdQueue != NULL ? (unsigned int)uxQueueMessagesWaiting(cmdQueue) : 0); // pending bytes of shared-byte settings, see commands.cpp
 #else
-          rmw_data_block_received(cmdnrel > 0); // pending bytes of shared-byte settings, see commands.cpp
+          rmw_data_block_received(0); // pending bytes of shared-byte settings, see commands.cpp
 #endif
           if ( (!extraDataBlockAvailable) && ((actData[0] == 0x71) && (actData[0xc7] >= 3)) ) { //do we have valid header and byte 0xc7 is more or equal 3 then assume K&L and more series
             log_message(_F("Extra data available on this heatpump"));
@@ -1014,7 +1014,7 @@ bool send_command(byte* command, int length) {
   cmd.length = length;
   memcpy(&cmd.data, command, length);
   if (xQueueSend(cmdQueue, &cmd, 0) != pdTRUE) return false; // queue full: nothing was handed over
-  rmw_note_command_sent(command, length); // pending bytes of shared-byte settings, see commands.cpp
+  rmw_note_command_queued(command, length, true); // pending bytes of shared-byte settings, see commands.cpp
   return true;
 }
 
@@ -1028,7 +1028,7 @@ bool send_command(byte* command, int length) {
   }
   if ( sending ) {
     log_message(_F("Already sending data. Buffering this send request"));
-    if (cmdnrel + 1 <= MAXCOMMANDSINBUFFER) rmw_note_command_sent(command, length); // buffered below, see commands.cpp
+    if (cmdnrel + 1 <= MAXCOMMANDSINBUFFER) rmw_note_command_queued(command, length, false); // buffered below, see commands.cpp
     pushCommandBuffer(command, length);
     return false;
   }

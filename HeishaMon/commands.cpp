@@ -380,7 +380,7 @@ unsigned int set_quiet_mode_schedule(char *msg, unsigned char *cmd, char *log_ms
 // (decode_heatpump_data compares against it).
 //
 // touches upstream send path: send_command() (HeishaMon.ino, both the ESP32 and the ESP8266 version) calls
-// rmw_note_command_sent() once a command was accepted for sending, so every writer is covered (MQTT, Modbus,
+// rmw_note_command_sent() / rmw_note_command_queued() once a command was accepted for sending, so every writer is covered (MQTT, Modbus,
 // rules, web console, raw frames, and the existing upstream setters on the same bytes). The data block
 // receive code calls rmw_data_block_received() after decode_heatpump_data(). The setters themselves stay
 // free of side effects (Modbus uses them as a dry run).
@@ -389,10 +389,7 @@ unsigned int set_quiet_mode_schedule(char *msg, unsigned char *cmd, char *log_ms
 //  - at the first data block that is received RMW_SETTLE_MS or more after the command was handed over,
 //    whether that block confirms the value or not (then actData is the truth again), or
 //  - RMW_SHADOW_MS after the command (unsigned difference, so it also holds when millis() wraps).
-// While commands are still waiting to be transmitted (ESP32 cmdQueue, ESP8266 command buffer) a data
-// block does not end anything: it may be the answer to an earlier command, and the frame that carries the
-// pending value may not have left yet. Such a block restarts both times instead, so they count from the
-// last block that was received while something was waiting (review 4, Major 1).
+// An entry whose frame still waits for transmission does not end, see "Frames that wait" below.
 // RMW_SHADOW_MS: the minimum poll interval (waitTime) is 5 s, so 12 s is two polls plus a margin.
 // RMW_SETTLE_MS: a data block that was already on its way when the command was handed over still carries
 // the old value, and so may the pump's answer to the command itself. A block (203 bytes, ~0.25 s at 9600
@@ -418,24 +415,46 @@ static const rmwTracked rmwTrackedBytes[] PROGMEM = {
 };
 #define RMW_TRACKED (sizeof(rmwTrackedBytes) / sizeof(rmwTrackedBytes[0]))
 
-// RAM: 15 slots x 8 bytes (32-bit time, value, valid, padding) = 120 bytes on ESP8266; the address/unit table is in flash.
+// RAM: 15 slots x 8 bytes (32-bit time, value, valid, unsent, padding) = 120 bytes plus the 16-entry frame
+// ring (32 bytes, used on ESP32 only); the address/unit table is in flash.
 struct rmwPending {
-  unsigned long since;
+  unsigned long since; // last note, or the moment the last frame that carries this byte left the queue
   byte value;
   bool valid;
+  byte unsent;         // frames that carry this byte and still wait for transmission
 };
 
 static rmwPending rmwPendingBytes[RMW_TRACKED];
 
+// Frames that wait for transmission (review 4). A frame that was handed over but is still in the ESP32
+// cmdQueue or the ESP8266 command buffer has not reached the heat pump, so a data block cannot confirm or
+// refute its bytes yet: an entry with unsent > 0 is kept, whatever arrives. When the frame leaves the
+// queue the entry gets the time of that moment and from then on ends as described above. Only the bytes
+// of frames that really wait are held, so other traffic (rules that send a command on every block) does
+// not keep an entry alive. RMW_STUCK_MS is a safety net: an entry whose frame never leaves ends anyway.
+#define RMW_STUCK_MS 60000UL
+// ESP32: the main task cannot see the moment serialTXTask takes a frame from cmdQueue. The queue is first
+// in, first out and only send_command() fills it, so the frames that left are the oldest ones noted here:
+// one bit mask of tracked bytes per queued frame, compared with the queue length at every data block.
+#define RMW_RING 16
+static uint16_t rmwRing[RMW_RING];
+static byte rmwRingStart = 0, rmwRingCount = 0;
+
+static bool rmw_entry_alive(const rmwPending &p) {
+  if (!p.valid) return false;
+  const unsigned long age = (unsigned long)(millis() - p.since);
+  return p.unsent > 0 ? age < RMW_STUCK_MS : age < RMW_SHADOW_MS;
+}
+
 // The pending value of a tracked byte or actData. Read-only: the Modbus task runs the setters as a dry
-// run, so nothing may be written here (review 4, Minor 2). An expired entry is skipped; it is cleared or
-// overwritten by rmw_data_block_received() / rmw_note_command_sent() in the main task.
+// run, so nothing may be written here. An expired entry is skipped; it is cleared or overwritten by
+// rmw_data_block_received() / the note functions in the main task.
 static byte effective_byte(byte address) {
   for (unsigned int i = 0; i < RMW_TRACKED; i++) {
     rmwTracked t;
     memcpy_P(&t, &rmwTrackedBytes[i], sizeof(t));
-    if (t.address != address || !rmwPendingBytes[i].valid) continue;
-    if ((unsigned long)(millis() - rmwPendingBytes[i].since) < RMW_SHADOW_MS) return rmwPendingBytes[i].value;
+    if (t.address != address) continue;
+    if (rmw_entry_alive(rmwPendingBytes[i])) return rmwPendingBytes[i].value;
   }
   return (byte)actData[address];
 }
@@ -452,45 +471,100 @@ static byte merge_sent_byte(byte unit, byte sent, byte base) {
   return result;
 }
 
-// Called from send_command() when a command frame was accepted for sending (written, queued or buffered;
-// not in listen-only mode, not when the queue is full). It runs in the main task only (the Modbus task
-// only runs the setters as a dry run and never gets here).
-// ESP8266: popCommandBuffer() hands a buffered frame to send_command() a second time. That frame was
-// already noted when it was buffered, and newer frames on the same byte may have been noted since, so a
-// second note must not put the older value back (review 4, Major 2). Between rmw_set_resending(true)
-// and (false) a note only restarts the time of an entry that is still valid.
+// a write frame for the main data block, and a data block to complete partial bytes from (the setters
+// refuse without a block too)
+static bool rmw_frame_tracked(const unsigned char *cmd, int length) {
+  if (length < (int)sizeof(panasonicSendQuery) || cmd[0] != 0xF1 || cmd[3] != 0x10) return false;
+  return actData[0] == 0x71 && actData[1] == (char)0xc8 && actData[2] == 0x01;
+}
+
+// Remembers the tracked bytes of a frame; returns the bit mask of the entries it touched.
+static uint16_t rmw_note(const unsigned char *cmd, int length, bool waits) {
+  uint16_t touched = 0;
+  if (!rmw_frame_tracked(cmd, length)) return touched;
+  for (unsigned int i = 0; i < RMW_TRACKED; i++) {
+    rmwTracked t;
+    memcpy_P(&t, &rmwTrackedBytes[i], sizeof(t));
+    if (cmd[t.address] == 0) continue;
+    rmwPending &p = rmwPendingBytes[i];
+    const byte value = merge_sent_byte(t.unit, cmd[t.address], effective_byte(t.address));
+    if (!rmw_entry_alive(p)) p.unsent = 0;
+    p.value = value;
+    p.since = millis();
+    p.valid = true;
+    if (waits && p.unsent < 255) p.unsent++;
+    touched |= (uint16_t)(1u << i);
+  }
+  return touched;
+}
+
+// One frame that carried these entries has left the queue or buffer.
+static void rmw_frame_left(uint16_t touched) {
+  for (unsigned int i = 0; i < RMW_TRACKED; i++) {
+    if (!(touched & (1u << i))) continue;
+    rmwPending &p = rmwPendingBytes[i];
+    if (!p.valid) continue;
+    if (p.unsent > 0) p.unsent--;
+    p.since = millis();
+  }
+}
+
+// ESP8266: popCommandBuffer() hands a buffered frame to send_command() a second time. It was noted when
+// it was buffered and newer frames on the same byte may have been noted since, so the second note must
+// not put the older value back: between rmw_set_resending(true) and (false) rmw_note_command_sent() only
+// records that the frame has left the buffer.
 static bool rmwResending = false;
 void rmw_set_resending(bool resending) {
   rmwResending = resending;
 }
 
+// Called from send_command() when a frame was written to the heat pump directly (ESP8266). Main task only.
 void rmw_note_command_sent(const unsigned char *cmd, int length) {
-  if (length < (int)sizeof(panasonicSendQuery) || cmd[0] != 0xF1 || cmd[3] != 0x10) return; // a write frame for the main data block
-  if (!(actData[0] == 0x71 && actData[1] == (char)0xc8 && actData[2] == 0x01)) return; // nothing to complete partial bytes from; the setters refuse without a block too
+  if (!rmwResending) {
+    rmw_note(cmd, length, false);
+    return;
+  }
+  if (!rmw_frame_tracked(cmd, length)) return;
+  uint16_t touched = 0;
   for (unsigned int i = 0; i < RMW_TRACKED; i++) {
     rmwTracked t;
     memcpy_P(&t, &rmwTrackedBytes[i], sizeof(t));
-    if (cmd[t.address] == 0) continue;
-    if (rmwResending && rmwPendingBytes[i].valid && (unsigned long)(millis() - rmwPendingBytes[i].since) < RMW_SHADOW_MS) {
-      rmwPendingBytes[i].since = millis();
-      continue;
-    }
-    const byte value = merge_sent_byte(t.unit, cmd[t.address], effective_byte(t.address));
-    rmwPendingBytes[i].value = value;
-    rmwPendingBytes[i].since = millis();
-    rmwPendingBytes[i].valid = true;
+    if (cmd[t.address] != 0) touched |= (uint16_t)(1u << i);
   }
+  rmw_frame_left(touched);
 }
 
-// Called after every received main data block (actData has just been replaced). commands_waiting: a
-// command is still queued or buffered for transmission.
-void rmw_data_block_received(bool commands_waiting) {
+// Called from send_command() when a frame was accepted but waits for transmission: ESP32 (every frame
+// that was put into cmdQueue, also frames without tracked bytes, with ring = true) and the ESP8266
+// buffer path (ring = false, the frame comes back through rmw_note_command_sent() while resending).
+void rmw_note_command_queued(const unsigned char *cmd, int length, bool ring) {
+  const uint16_t touched = rmw_note(cmd, length, true);
+  if (!ring) return;
+  if (rmwRingCount == RMW_RING) { // cannot happen while the queue is shorter than the ring; keep the counts consistent
+    rmw_frame_left(rmwRing[rmwRingStart]);
+    rmwRingStart = (byte)((rmwRingStart + 1) % RMW_RING);
+    rmwRingCount--;
+  }
+  rmwRing[(rmwRingStart + rmwRingCount) % RMW_RING] = touched;
+  rmwRingCount++;
+}
+
+// Called after every received main data block (actData has just been replaced). frames_waiting: ESP32,
+// the number of frames still in cmdQueue; ESP8266 passes 0 (its buffer is accounted for by the resend).
+void rmw_data_block_received(unsigned int frames_waiting) {
+  while (rmwRingCount > frames_waiting) {
+    rmw_frame_left(rmwRing[rmwRingStart]);
+    rmwRingStart = (byte)((rmwRingStart + 1) % RMW_RING);
+    rmwRingCount--;
+  }
   for (unsigned int i = 0; i < RMW_TRACKED; i++) {
-    if (!rmwPendingBytes[i].valid) continue;
-    if (commands_waiting) {
-      rmwPendingBytes[i].since = millis();
-    } else if ((unsigned long)(millis() - rmwPendingBytes[i].since) >= RMW_SETTLE_MS) {
-      rmwPendingBytes[i].valid = false;
+    rmwPending &p = rmwPendingBytes[i];
+    if (!p.valid) continue;
+    const unsigned long age = (unsigned long)(millis() - p.since);
+    if (p.unsent > 0) {
+      if (age >= RMW_STUCK_MS) { p.valid = false; p.unsent = 0; }
+    } else if (age >= RMW_SETTLE_MS) {
+      p.valid = false;
     }
   }
 }
@@ -778,8 +852,8 @@ unsigned int set_extra_pump_mode(char *msg, unsigned char *cmd, char *log_msg) {
 }
 
 // Back-up heater capacity, byte 25 bits 3-2 (TOP147): 3 kW = b01, 6 kW = b10 (both seen on the wire),
-// 9 kW = b11 (not seen on the wire: the encoding comes from the upstream decode table, getHeaterCapacity(), and
-// from the 3 / 6 / 9 kW option list of the cloud and the manuals). Bits 1-0 (tank heater type) and 7-4 are sent as read.
+// 9 kW = b11 (raw write 0x2D on a unit with a 9 kW heater, shown as 9 kW by the Panasonic cloud; units with a
+// smaller heater were not tested). Bits 1-0 (tank heater type) and 7-4 are sent as read.
 unsigned int set_internal_heater_capacity(char *msg, unsigned char *cmd, char *log_msg) {
   unsigned char tmp[sizeof(panasonicSendQuery)];
   if (set_integer_field(msg, tmp, log_msg, 25, 3, 9, 3, 3, 0, 4) == 0) return 0;

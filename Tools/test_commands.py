@@ -687,17 +687,21 @@ struct String {
 };
 void rmw_note_command_sent(const unsigned char *cmd, int length);
 void rmw_set_resending(bool resending);
+void rmw_note_command_queued(const unsigned char *cmd, int length, bool ring);
 std::vector<byte> sent;
 int send_count;
 // Models the hand-over in the two real send_command() versions (HeishaMon.ino): a command that is not
 // handed over (listen-only, ESP32 queue full) is not reported to the pending-byte memory; a command
 // that is buffered (ESP8266, answer of the previous command still pending) is, and reports false.
-bool listen_only = false, queue_full = false, buffered = false;
+// queued models the ESP32 send_command(): every accepted frame goes into cmdQueue first.
+bool listen_only = false, queue_full = false, buffered = false, queued = false;
 bool send_command(byte* data, int length) {
   if (length <= 0) return false;
   if (listen_only || queue_full) return false;
   ++send_count; sent.assign(data, data + length);
-  rmw_note_command_sent(data, length);
+  if (queued) rmw_note_command_queued(data, length, true);
+  else if (buffered) rmw_note_command_queued(data, length, false);
+  else rmw_note_command_sent(data, length);
   return !buffered;
 }
 void log_message(char*) {}
@@ -752,11 +756,11 @@ static bool run_direct(const char *name, const char *payloadText) {
   return send_count == 1;
 }
 // a main data block arrives (readSerial(): decode_heatpump_data() replaces actData, then the hook)
-static void deliver_block(unsigned long after_ms, int a0 = -1, int v0 = 0, int a1 = -1, int v1 = 0, bool commands_waiting = false) {
+static void deliver_block(unsigned long after_ms, int a0 = -1, int v0 = 0, int a1 = -1, int v1 = 0, unsigned int frames_waiting = 0) {
   fake_millis += after_ms;
   if (a0 >= 0) actData[a0] = (char)v0;
   if (a1 >= 0) actData[a1] = (char)v1;
-  rmw_data_block_received(commands_waiting);
+  rmw_data_block_received(frames_waiting);
 }
 """
 GENERIC_REJECTED = ["", "abc", "1x", "1.0", " 1", "+1", "1 ", "-", "999999999999999"]
@@ -1392,52 +1396,82 @@ def main():
     assert(run_command("SetEfficiencyStage2Time", "35") && sent[33] == 0x86);
     assert(run_command("SetSensorOffsetOutdoor", "-1.5") && sent[35] == 0x85); // byte 35 ended too: actData (0x86) is used
   }
-  { // review 4, Major 1: a block that arrives while commands are still waiting for transmission ends nothing
+  { // review 4, Major 1 (ESP32): a frame that still waits in cmdQueue is not ended by the blocks that arrive meanwhile
     reset_act_data(); actData[28] = (char)0x55;
-    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x59); // queued behind other commands
-    deliver_block(SETTLE, 28, 0x55, -1, 0, true);     // answer to an earlier command, this frame has not left yet
-    deliver_block(SETTLE, 28, 0x55, -1, 0, true);
-    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x5A); // built from the pending 0x59, not 0x55
-    deliver_block(LIFE + 1000, 28, 0x55, -1, 0, true); // waiting restarts the life time as well
-    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x9A);
-    deliver_block(SETTLE - 1, 28, 0x55);               // queue empty now, but the block is too early to be trusted
-    assert(run_command("SetDefrostSignal", "0") && sent[28] == 0x5A);
-    deliver_block(SETTLE, 28, 0x5A);                   // read-back with an empty queue ends the pending state
+    queued = true;
+    assert(run_command("SetEfficiencyStage1Time", "25") && sent[33] == 0x76);  // frame 1, another byte
+    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x59);        // frame 2
+    deliver_block(SETTLE, 28, 0x55, -1, 0, 2);     // both still queued
+    deliver_block(SETTLE, 28, 0x55, 33, 0x76, 1);  // frame 1 has left and is answered; frame 2 still waits
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x5A);        // frame 3, built from the pending 0x59
+    deliver_block(LIFE + 1000, 28, 0x55, -1, 0, 2); // waiting frames outlive the life time
+    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x9A);           // frame 4
+    deliver_block(SETTLE - 1, 28, 0x59, -1, 0, 0);  // all frames left just now: this block is too early to be trusted
+    assert(run_command("SetDefrostSignal", "0") && sent[28] == 0x5A);           // frame 5
+    deliver_block(1, 28, 0x9A, -1, 0, 0);           // frame 5 left; answer still shows the old value
+    deliver_block(SETTLE, 28, 0x5A);                // read-back with an empty queue ends the pending state
+    actData[28] = (char)0x55;
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);
+    queued = false;
+  }
+  { // review 4, Major 3: other traffic in the queue does not keep an entry alive whose own frame has left
+    reset_act_data(); actData[28] = (char)0x55;
+    queued = true;
+    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x95);           // the pump will not take it
+    deliver_block(500, 28, 0x55, -1, 0, 0);          // the frame left, answer with the old value
+    for (int i = 0; i < 20; i++) {                   // a rule sends one command on another byte per block
+      assert(run_command("SetEfficiencyStage1Time", i % 2 ? "25" : "20"));
+      deliver_block(5000, 28, 0x55, -1, 0, 1);
+    }
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);        // actData, not the stale 0x95
+    deliver_block(0, -1, 0, -1, 0, 0);               // the queue drains
+    // a frame that never leaves the queue ends after the safety time
+    reset_act_data(); actData[28] = (char)0x55;
+    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x95);
+    deliver_block(59000, 28, 0x55, -1, 0, 1);
+    { byte command[256]; char log[256]; char payload[] = "1";
+      assert(set_heating_water_mode(payload, command, log) > 0 && command[28] == 0x96); }
+    deliver_block(1000, 28, 0x55, -1, 0, 1);
+    { byte command[256]; char log[256]; char payload[] = "1";
+      assert(set_heating_water_mode(payload, command, log) > 0 && command[28] == 0x56); }
+    deliver_block(0, -1, 0, -1, 0, 0);               // the queue drains: ring and entries are consistent again
+    queued = false;
+  }
+  { // review 4, Major 2 (ESP8266): a buffered frame that is sent later does not put its older value back
+    reset_act_data(); actData[28] = (char)0x55;
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);        // written directly
+    buffered = true;
+    assert(!run_command("SetCoolingWaterMode", "1") || true); assert(sent[28] == 0x5A);
+    std::vector<byte> second = sent;
+    assert(!run_command("SetDefrostSignal", "1") || true); assert(sent[28] == 0x9A);
+    std::vector<byte> third = sent;
+    buffered = false;
+    deliver_block(SETTLE, 28, 0x56);                 // answer to the first frame: the buffered ones are kept
+    rmw_set_resending(true); send_command(second.data(), (int)second.size()); rmw_set_resending(false);
+    assert(run_command("SetCoolingWaterMode", "0") && sent[28] == 0x96);        // newer value kept, not 0x5A
+    deliver_block(SETTLE, 28, 0x5A);                 // the third frame still waits
+    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x9A);
+    rmw_set_resending(true); send_command(third.data(), (int)third.size()); rmw_set_resending(false);
+    deliver_block(SETTLE, 28, 0x9A);                 // nothing waits any more: ends
     actData[28] = (char)0x55;
     assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);
   }
-  { // review 4, Major 2: a buffered frame that is handed over again (ESP8266 popCommandBuffer) keeps the newer value
-    reset_act_data(); actData[28] = (char)0x55;
-    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);
-    std::vector<byte> first = sent;
-    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x5A);
-    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x9A);
-    rmw_set_resending(true);                           // the first frame leaves the buffer
-    send_command(first.data(), (int)first.size());
-    rmw_set_resending(false);
-    assert(run_command("SetCoolingWaterMode", "0") && sent[28] == 0x96); // defrost signal and heating mode kept
-    // an entry that has expired is noted again, also on a resend
-    reset_act_data(); actData[28] = (char)0x55;
-    rmw_set_resending(true);
-    send_command(first.data(), (int)first.size());
-    rmw_set_resending(false);
-    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x5A);
-  }
 """
     checks.append(shadow_tests)
-    cases += 16
+    cases += 17
 
     # structure of the production code that the host harness cannot compile (HeishaMon.ino, rules.cpp)
     ino = (ROOT / "HeishaMon/HeishaMon.ino").read_text()
     rules = (ROOT / "HeishaMon/rules.cpp").read_text()
-    assert ino.count("rmw_note_command_sent(command, length)") == 3, "ESP32 send, ESP8266 send and ESP8266 buffer path"
-    assert re.search(r"if \(xQueueSend\(cmdQueue, &cmd, 0\) != pdTRUE\) return false;[^\n]*\n\s*rmw_note_command_sent\(command, length\);", ino)
-    assert re.search(r"if \(cmdnrel \+ 1 <= MAXCOMMANDSINBUFFER\) rmw_note_command_sent\(command, length\);[^\n]*\n\s*pushCommandBuffer", ino)
+    assert ino.count("rmw_note_command_sent(command, length)") == 1 and ino.count("rmw_note_command_queued(command, length, ") == 2, "ESP8266 send; ESP32 queue and ESP8266 buffer path"
+    assert re.search(r"if \(xQueueSend\(cmdQueue, &cmd, 0\) != pdTRUE\) return false;[^\n]*\n\s*rmw_note_command_queued\(command, length, true\);", ino)
+    assert re.search(r"if \(cmdnrel \+ 1 <= MAXCOMMANDSINBUFFER\) rmw_note_command_queued\(command, length, false\);[^\n]*\n\s*pushCommandBuffer", ino)
     assert re.search(r"sendCommandReadTime = millis\(\);[^\n]*\n\s*rmw_note_command_sent\(command, length\);", ino)
-    assert re.search(r"decode_heatpump_data\(data, actData[^\n]*\n#ifdef ESP32\n\s*rmw_data_block_received\(cmdQueue != NULL && uxQueueMessagesWaiting\(cmdQueue\) > 0\);[^\n]*\n#else\n\s*rmw_data_block_received\(cmdnrel > 0\);", ino)
+    assert re.search(r"decode_heatpump_data\(data, actData[^\n]*\n#ifdef ESP32\n\s*rmw_data_block_received\(cmdQueue != NULL \? \(unsigned int\)uxQueueMessagesWaiting\(cmdQueue\) : 0\);[^\n]*\n#else\n\s*rmw_data_block_received\(0\);", ino)
     assert ino.count("rmw_data_block_received(") == 2
     assert re.search(r"rmw_set_resending\(true\);[^\n]*\n\s*send_command\(cmdbuffer\[cmdstart\]\.data, cmdbuffer\[cmdstart\]\.length\);\n\s*rmw_set_resending\(false\);", ino)
-    assert "rmwPendingBytes[i].valid = false" not in source.split("static byte effective_byte")[1].split("static byte merge_sent_byte")[0], "effective_byte is read-only"
+    body = source.split("static byte effective_byte")[1].split("static byte merge_sent_byte")[0]
+    assert " = " not in body.replace("i = 0", "").replace("!= address", ""), "effective_byte is read-only"
 
     settle = int(re.search(r"#define RMW_SETTLE_MS (\d+)UL", source)[1])
     assert settle == int(re.search(r"#define SERIALTIMEOUT (\d+)", ino)[1]), "settle time is tied to SERIALTIMEOUT"
