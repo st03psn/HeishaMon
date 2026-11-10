@@ -8,6 +8,7 @@ pio
 .vscode
 .pioenvs
 tests/modbus/build
+tests/commandnames/build
 .cache
 build_output
 firmware.map

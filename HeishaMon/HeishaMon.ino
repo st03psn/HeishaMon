@@ -43,6 +43,7 @@
 #include "webfunctions.h"
 #include "decode.h"
 #include "commands.h"
+#include "commandnames.h"
 #include "rules.h"
 #include "version.h"
 #ifdef ESP32
@@ -1200,6 +1201,8 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           }
           ((char *)client->userdata)[0] = 0;
           client->route = 100;
+        } else if (strcmp_P((char *)dat, PSTR("/commandnames")) == 0) {
+          client->route = 101;
         } else if (client->route == 110) {
           // Only accept settings POST requests
           if (strcmp_P((char *)dat, PSTR("/savesettings")) == 0) {
@@ -1504,6 +1507,18 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                 webserver_send_content(client, (char *)RESTmsg, strlen(RESTmsg));
                 free(RESTmsg);
                 client->userdata = NULL;
+              }
+              return 0;
+            } break;
+          case 101: {
+              // JSON array of the names /command accepts, one name per write step (see commandnames.h)
+              char part[40];
+              unsigned int len = commandNamesJsonPart(client->content, heishamonSettings.optionalPCB, part, sizeof(part));
+              if (client->content == 0) {
+                webserver_send(client, 200, (char *)"application/json", 0);
+              }
+              if (len > 0) {
+                webserver_send_content(client, part, len);
               }
               return 0;
             } break;

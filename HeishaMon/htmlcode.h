@@ -1306,6 +1306,28 @@ function downloadConsole() {
   URL.revokeObjectURL(url);
 }
 
+// Command form: names from the firmware's command table, sent via /command.
+var cmdNamesLoaded=false;
+function loadCmdNames(){
+  if(cmdNamesLoaded)return;
+  cmdNamesLoaded=true;
+  fetch('/commandnames').then(function(r){return r.json();}).then(function(names){
+    var sel=document.getElementById('cmdName');
+    sel.options.length=0;
+    names.forEach(function(n){sel.add(new Option(n,n));});
+  }).catch(function(e){cmdNamesLoaded=false;document.getElementById('cmdResult').textContent='Could not load command list';});
+}
+function sendCmd(){
+  var name=document.getElementById('cmdName').value,value=document.getElementById('cmdValue').value.trim();
+  var res=document.getElementById('cmdResult'),btn=document.getElementById('cmdSend');
+  if(!name||value===''){res.textContent='Select a command and enter a value';return;}
+  btn.disabled=true;res.textContent='';
+  fetch('/command?'+encodeURIComponent(name)+'='+encodeURIComponent(value)).then(function(r){return r.text();})
+    .then(function(t){res.textContent=t.trim()||'No response';})
+    .catch(function(e){res.textContent='Request failed';})
+    .then(function(){btn.disabled=false;});
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
   if (document.getElementById('mqttLogToggle')) {
@@ -1387,7 +1409,7 @@ static const char webBodyRootGpioTab[] FLASHPROG = R"====(
 <button class='tabnav-btn' data-tab='Gpio' onclick="openTable('Gpio')">GPIO</button>
 )====";
 static const char webTabnavClose[] FLASHPROG = R"====(
-  <button class='tabnav-btn' data-tab='Console' onclick="openTable('Console')">Console</button>
+  <button class='tabnav-btn' data-tab='Console' onclick="openTable('Console');loadCmdNames()">Console</button>
 </nav>
 )====";
 // These are injected by the server between tabnav wrappers:
@@ -1483,6 +1505,15 @@ static const char webBodyRootConsole[] FLASHPROG = R"====(
       </div>
       <button onclick='downloadConsole()' class='btn btn-ghost' style='padding:4px 10px;font-size:11px;height:24px;'>&#8681; Download</button>
     </div>
+  </div>
+  <div style='padding:12px 16px 0'>
+    <div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
+      <select id='cmdName' class='setting-input' style='width:auto'><option value=''>Loading…</option></select>
+      <input id='cmdValue' class='setting-input' style='width:160px' placeholder='Value' onkeydown="if(event.key==='Enter')sendCmd()">
+      <button id='cmdSend' onclick='sendCmd()' class='btn btn-primary' style='padding:6px 16px'>Send</button>
+      <span id='cmdResult' class='setting-hint'></span>
+    </div>
+    <div class='setting-hint' style='margin:6px 0 0'>Commands change heat pump settings; see MQTT-Topics.md for the values.</div>
   </div>
   <div style='flex:1;padding:16px;display:flex;flex-direction:column'>
     <textarea id='cli' disabled style='flex:1;height:auto;min-height:300px'></textarea>
