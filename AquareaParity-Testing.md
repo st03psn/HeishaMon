@@ -139,6 +139,7 @@ Rules for the write test:
 Do **not** send these unless you know what they do on your installation:
 
 - `SetBuffer 1` without a buffer sensor (error H43 on the M series, stays until reset).
+- `SetSolarMode 1` or `2` without a solar sensor (error H28 on the M series while the heat pump runs; it switches off and stays off until reset).
 - `SetAntiFreezeMode 0`.
 - `SetInternalHeaterCapacity` with a value above the back-up heater that is installed (not tested, result unknown).
 - Switches for hardware you do not have: `SetDHWInstalled`, `SetSolarMode`, `SetSGReadyMode`, `SetBivalentControl`, `SetZoneType`, `SetZ1SensorSettings`.
