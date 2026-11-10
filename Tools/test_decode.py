@@ -140,6 +140,12 @@ CASES = [
     (192, 103, 0x71, "-15"),
     (193, 36, 0x48, "-2.0"),
     (193, 36, 0xA8, "1.0"),
+    (194, 28, 0x95, "1"),  # defrost signal yes (b10), bits 5-0 = water modes
+    (194, 28, 0x55, "0"),  # no (b01)
+    (194, 28, 0x96, "1"),
+    (194, 28, 0x99, "1"),
+    (194, 28, 0x5A, "0"),
+    (194, 28, 0xD5, "2"),  # b11 is not a defined value
     (147, 25, 0x2D, "9"),
     (147, 25, 0x29, "6"),
     (147, 25, 0x25, "3"),
@@ -165,6 +171,9 @@ DESCRIPTION_CASES = [
     (182, 31, 0x5B, "DHW"),
     (183, 31, 0x5A, "Efficiency"),
     (183, 31, 0x5E, "Invalid"),
+    (194, 28, 0x95, "Yes"),
+    (194, 28, 0x55, "No"),
+    (194, 28, 0xD5, "Invalid"),
 ]
 # new topics (and TOP149, which SetSGReadyMode 2 makes reach b11) read the description at [value + 1]: the table must have
 # one entry more than the largest value of the getter (two-bit getters: 2)

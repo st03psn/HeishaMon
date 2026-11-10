@@ -409,7 +409,7 @@ RMW_SETTERS = {
         ["2", "-1", "15", "25", "21"],
     ),
     # byte 28 bits 1-0 (heating) / 3-2 (cooling): b01 compensation curve, b10 direct; bits 7-4 and the other pair stay as read,
-    # in particular bits 7-6 (meaning unknown); the pair must read b01 or b10
+    # in particular bits 7-6 (defrost signal, only SetDefrostSignal changes them); the pair must read b01 or b10
     "SetHeatingWaterMode": (
         28,
         [
@@ -566,6 +566,27 @@ RMW_SETTERS = {
         ],
         [({22: 0x01}, "1"), ({22: 0x0F}, "1"), ({22: 0x51}, "1"), ({22: 0xF1}, "1")],
         ["4", "-1"],
+    ),
+    # byte 28 bits 7-6 = defrost signal (b01 no, b10 yes); bits 5-0 (water temperature modes and the unassigned bits 5-4) stay as read.
+    # No check against bivalent control: the heat pump resolves that conflict itself
+    "SetDefrostSignal": (
+        28,
+        [
+            ({28: 0x95}, "0", 0x55),
+            ({28: 0x95}, "1", 0x95),
+            ({28: 0x55}, "1", 0x95),
+            ({28: 0x55}, "0", 0x55),
+            ({28: 0x96}, "0", 0x56),
+            ({28: 0x96}, "1", 0x96),
+            ({28: 0x99}, "0", 0x59),
+            ({28: 0x99}, "1", 0x99),
+            ({28: 0x5A}, "1", 0x9A),
+            ({28: 0x35}, "1", 0xB5),
+            ({28: 0xD5}, "0", 0x55),
+            ({28: 0x15}, "1", 0x95),
+        ],
+        [],
+        ["2", "-1"],
     ),
 }
 # SG ready limits: bytes 51..57 are (kW * 10 + 1) and need SG ready = power consumption (byte 27 bits 3-2 = b11);
@@ -887,15 +908,16 @@ def main():
         checks.append(f'  assert(!run_command("{name}", "0") && !run_command("{name}", "1"));\n')
         cases += 1
     ids = [(int(i), n) for i, n in re.findall(r'\{(\d+), "(\w+)", (?:true|false)\}', modbus_map)]
-    new_ids = [(i, n) for i, n in ids if i >= 55]
-    assert [i for i, _ in new_ids] == list(range(55, 55 + len(new_ids))), "Modbus IDs must be contiguous"
+    new_ids = [(i, n) for i, n in ids if i >= 55 and i != 100]
+    # ID 100 is reserved for SetReset (register 7000): the new IDs run 55..99, then 101 onwards
+    assert [i for i, _ in new_ids] == [i for i in range(55, 55 + len(new_ids) + 1) if i != 100], "Modbus IDs must be contiguous"
     command_names = set(re.findall(r'\{\s*"(Set\w+)",\s*\w+\s*\}', header))
     assert {n for _, n in new_ids} <= command_names, "every Modbus entry needs a command"
     for i, name in new_ids:
         assert f"SET{i + 1} | {name} |" in docs, f"SET{i + 1} row missing or misnumbered for {name}"
         assert f"| {4999 + i} | `{name}` |" in modbus_doc, f"register row missing for {name}"
     assert len(re.findall(r"^SET(?:5[6-9]|[6-9]\d|\d{3}) \|", docs, re.M)) == len(new_ids)
-    assert f"| {4999 + 55 + len(new_ids)} |" not in modbus_doc, "no register row without a command"
+    assert f"| {5000 + new_ids[-1][0]} |" not in modbus_doc, "no register row without a command"
     cases += 3 + len(new_ids)
 
     # --- sequences (shadow of the bytes sent by shared-byte commands) -------------------------------
@@ -994,7 +1016,7 @@ def main():
     assert(!run_command("SetZoneType", "1"));
     reset_act_data();
   }
-  { // byte 28: bits 7-6 (and 5-4, and the other pair) are never changed, for every byte value the commands accept
+  { // byte 28: the water mode commands never change bits 7-6 (and 5-4, and the other pair), for every byte value they accept
     for (int value = 1; value < 256; ++value) {
       for (int cooling = 0; cooling < 2; ++cooling) {
         for (int payload = 0; payload < 2; ++payload) {
@@ -1018,6 +1040,37 @@ def main():
     assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x96);
     assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x9A);
     assert(run_command("SetHeatingWaterMode", "0") && sent[28] == 0x99);
+    reset_act_data();
+  }
+  { // byte 28: SetDefrostSignal changes exactly bits 7-6, for every byte value it accepts (payload 0 -> b01, 1 -> b10)
+    for (int value = 1; value < 256; ++value) {
+      for (int payload = 0; payload < 2; ++payload) {
+        reset_act_data(); actData[28] = (char)value;
+        char text[2] = { (char)('0' + payload), 0 };
+        assert(run_command("SetDefrostSignal", text));
+        assert((sent[28] & 0x3F) == (value & 0x3F));
+        assert(((sent[28] >> 6) & 3) == payload + 1);
+        for (unsigned int i = 0; i < sent.size(); ++i) if (i != 28) assert(sent[i] == panasonicSendQuery[i]);
+      }
+    }
+    reset_act_data(); actData[28] = 0;
+    assert(!run_command("SetDefrostSignal", "1") && !run_command("SetDefrostSignal", "0"));
+    reset_act_data(); actData[0] = 0;
+    assert(!run_command("SetDefrostSignal", "1") && !run_command("SetDefrostSignal", "0"));
+    // in a row with the water modes through the pending byte, in both orders; actData itself is never changed
+    reset_act_data();
+    assert(run_command("SetDefrostSignal", "0") && sent[28] == 0x55);
+    assert(run_command("SetHeatingWaterMode", "1") && sent[28] == 0x56);
+    assert(run_command("SetCoolingWaterMode", "1") && sent[28] == 0x5A);
+    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x9A);
+    assert(run_command("SetHeatingWaterMode", "0") && sent[28] == 0x99);
+    assert(actData[28] == (char)0x95);
+    // no check against bivalent control (byte 26 bits 1-0 = b10): the heat pump resolves the conflict itself
+    reset_act_data(); actData[26] = (char)0x5E;
+    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x95 && sent[26] == panasonicSendQuery[26]);
+    assert(run_command("SetDefrostSignal", "0") && sent[28] == 0x55);
+    reset_act_data(); actData[28] = (char)0x55;
+    assert(run_command("SetDefrostSignal", "1") && sent[28] == 0x95);
     reset_act_data();
   }
   { // tank connection, then the tank heater type that needs it; a rejected tank command leaves the heater type blocked

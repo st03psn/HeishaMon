@@ -811,7 +811,7 @@ unsigned int set_zone_type(char *msg, unsigned char *cmd, char *log_msg) {
 }
 
 // Heating (bits 1-0, TOP76) and cooling (bits 3-2, TOP81) water temperature mode of byte 28: payload 0 = compensation
-// curve (b01), 1 = direct (b10). Bits 7-6 (meaning unknown) and 5-4 are never changed: they are sent as read. The pair
+// curve (b01), 1 = direct (b10). Bits 7-6 (defrost signal, SetDefrostSignal) and 5-4 are not changed: they are sent as read. The pair
 // that is set must currently read b01 or b10 (b00 = not used by this unit). The heat pump moves curve points when the
 // mode is changed (see MQTT-Topics.md).
 static unsigned int set_water_mode(char *msg, unsigned char *cmd, char *log_msg, byte shift) {
@@ -836,6 +836,14 @@ unsigned int set_heating_water_mode(char *msg, unsigned char *cmd, char *log_msg
 
 unsigned int set_cooling_water_mode(char *msg, unsigned char *cmd, char *log_msg) { // byte 28 bits 3-2, TOP81
   return set_water_mode(msg, cmd, log_msg, 2);
+}
+
+// Defrost signal, byte 28 bits 7-6 (TOP194; installer menu System setup): payload 0 = no (b01), 1 = yes (b10). Bits 5-0 (water
+// temperature modes, SetHeatingWaterMode / SetCoolingWaterMode) are sent as read. Defrost signal and bivalent control share one
+// terminal (service manual): the heat pump itself resets the other function when one is set (bivalent yes -> defrost signal no,
+// defrost signal yes -> bivalent no), so there is no check against bivalent control here. Needs a data block and a nonzero byte 28.
+unsigned int set_defrost_signal(char *msg, unsigned char *cmd, char *log_msg) {
+  return set_pair_field(msg, cmd, log_msg, 28, 6, 1);
 }
 
 // Circulation liquid, byte 20 bits 7-6 (TOP107): 0 = water (b01), 1 = glycol (b10). b01 was written and read back; b10 was

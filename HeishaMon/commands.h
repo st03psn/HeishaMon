@@ -110,6 +110,7 @@ unsigned int set_room_holiday_shift_temp(char *msg, unsigned char *cmd, char *lo
 unsigned int set_zone_type(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_heating_water_mode(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_cooling_water_mode(char *msg, unsigned char *cmd, char *log_msg);
+unsigned int set_defrost_signal(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_liquid_type(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_dhw_heater_type(char *msg, unsigned char *cmd, char *log_msg);
 unsigned int set_dhw_installed(char *msg, unsigned char *cmd, char *log_msg);
@@ -278,6 +279,7 @@ const cmdStruct commands[] PROGMEM = {
   { "SetSGReadyCoolCapacity2", set_sg_ready_cool_capacity_2 },
   { "SetSensorOffsetReturn", set_sensor_offset_return },
   { "SetZ1SensorSettings", set_z1_sensor_settings },
+  { "SetDefrostSignal", set_defrost_signal },
 };
 
 struct optCmdStruct{

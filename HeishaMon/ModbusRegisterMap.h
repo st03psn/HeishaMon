@@ -174,6 +174,7 @@ constexpr MainCommand MAIN_COMMANDS[] = {
   {97, "SetSGReadyCoolCapacity2", true},
   {98, "SetSensorOffsetReturn", true},
   {99, "SetZ1SensorSettings", false},
+  {101, "SetDefrostSignal", false},  // ID 100 is reserved for SetReset
   {RESET_COMMAND_ID, "SetReset", false},
 };
 
