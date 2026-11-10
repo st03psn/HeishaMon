@@ -155,7 +155,8 @@ Please report as an issue in the fork (<https://github.com/st03psn/HeishaMon/iss
 3. The table of step 4 with matches / differs / not present.
 4. For step 5: command, value sent, what the topic and the remote controller showed, and the Console log lines.
 5. Which back-up heater capacities the installer menu of your remote controller offers (for example only 3 kW, or 3 / 6 / 9 kW), and what Internal_Heater_Capacity shows. Reading is enough; do not write a higher value.
-6. Your `/json` output before and after, if you are willing to share it.
+6. If your installation has a buffer tank, solar, pool or DHW tank sensor: the values of Buffer_Temp, Solar_Temp, Pool_Temp and DHW_Temp in `/json`, and whether the matching function (Buffer_Installed, Solar_Mode, DHW_Installed) is on or off. Reading is enough. On the M-series test unit without these sensors they read -78 °C (DHW: -128 °C); we want to know what a connected sensor shows, also while the function is switched off.
+7. Your `/json` output before and after, if you are willing to share it.
 
 ## Going back
 

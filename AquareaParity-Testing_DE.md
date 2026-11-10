@@ -140,7 +140,8 @@ Bitte als Issue im Fork melden (<https://github.com/st03psn/HeishaMon/issues>), 
 3. Die Tabelle aus Schritt 4 mit stimmt / weicht ab / nicht vorhanden.
 4. Zu Schritt 5: Befehl, gesendeter Wert, was Topic und Bedienteil zeigten, und die Logzeilen der Console.
 5. Welche Heizstab-Leistungen das Installateurmenü des Bedienteils anbietet (zum Beispiel nur 3 kW oder 3 / 6 / 9 kW) und was Internal_Heater_Capacity anzeigt. Lesen genügt; keinen höheren Wert schreiben.
-6. Die Ausgabe von `/json` vorher und nachher, wer sie teilen möchte.
+6. Falls die Anlage einen Puffer-, Solar-, Pool- oder Warmwasserfühler hat: die Werte von Buffer_Temp, Solar_Temp, Pool_Temp und DHW_Temp aus `/json` und ob die zugehörige Funktion (Buffer_Installed, Solar_Mode, DHW_Installed) ein- oder ausgeschaltet ist. Lesen genügt. An der M-Serien-Testanlage ohne diese Fühler stehen dort -78 °C (Warmwasser: -128 °C); gesucht ist, was ein angeschlossener Fühler zeigt, auch bei ausgeschalteter Funktion.
+7. Die Ausgabe von `/json` vorher und nachher, wer sie teilen möchte.
 
 ## Zurück zur alten Firmware
 
