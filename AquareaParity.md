@@ -88,10 +88,8 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 ## 4. What the new commands do with these findings
 
-- Commands on shared bytes send the whole byte, built from the new field and the last received value of the other bits, and are refused until a data block has been received. A short memory of sent bytes covers commands that follow each other faster than the read cycle.
-- The memory of a byte is kept while a frame that carries it still waits for transmission (ESP32 command queue, ESP8266 command buffer) and ends after that frame has been sent and a later data block has arrived; a buffered frame that is sent later does not put its older value back.
-- Known limit on ESP8266 (existing behaviour of the send path): a command sent while older commands are still buffered can overtake them, so the order on the wire can differ from the order of the commands.
-- Not covered: changes the heat pump makes by itself in another byte (bivalent control and defrost signal). After one of these two commands wait for the next data block before sending a command on byte 26 or 28.
+- Commands on shared bytes send only their own bit pair or nibble and leave the rest of the byte 0 (no change, see 3.1). Two commands in a row on the same byte therefore do not undo each other, and nothing has to be remembered between commands.
+- Commands are refused until a data block has been received and while their own byte reads 0. Checks against other settings use the last data block: right after a parent setting was switched on, a dependent command is refused until the next data block reports it.
 - Value ranges follow the installer menu of the service manual.
 - Some guards mirror the installer menu (for example `SetExtraPump 2` needs a DHW tank). They are not complete, see section 5.
 
