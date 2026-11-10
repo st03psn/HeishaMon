@@ -6,7 +6,7 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 - One unit only: M series, WH-SDC0316M9E8 with WH-WXG09ME8, one heating circuit, no DHW tank, no buffer, no solar, optional PCB setting "yes". HeishaMon large (ESP32), firmware 4.3.0, CZ-TAW1 on the proxy port.
 - All write tests were made with the heat pump switched off.
-- **The firmware of this branch has never run on hardware.** Host tests and the CI build pass (section 6).
+- The firmware of this branch has run on one HeishaMon large (ESP32-S3) on that unit; see section 6. The ESP8266 build has not run on hardware.
 - Other series (H, J, K, L) were not tested. Byte positions that come only from the existing decode tables are marked as such in MQTT-Topics.md.
 
 ## 2. How findings were made
@@ -43,8 +43,8 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 | Byte | Bits | Setting | Evidence |
 |---|---|---|---|
 | 20 | 7-6 | Circulation liquid (b01 water, b10 glycol) | raw write |
-| 20 | 3-2 | Anti-freeze | cloud frame, raw write; the Service Cloud shows "Frostschutz = Nein" for 0x66 |
-| 20 | 1-0 | Optional PCB | raw write 0x69, the Service Cloud then shows "Nein" and greys the dependent fields |
+| 20 | 3-2 | Anti-freeze | cloud frame, raw write; the Service Cloud shows "anti-freeze = no" for 0x66 |
+| 20 | 1-0 | Optional PCB | raw write 0x69, the Service Cloud then shows "no" and greys the dependent fields |
 | 24 | 7-6 / 5-4 / 3-2 / 1-0 | DHW capacity / solar mode / buffer / DHW tank | cloud frames, raw write |
 | 25 | 3-2 | Back-up heater capacity (b01 3 kW, b10 6 kW, b11 9 kW) | raw write; the Service Cloud shows 6 kW for 0x29 and 9 kW for 0x2D on a unit with a 9 kW heater. Units with a smaller heater not tested |
 | 26 | 1-0 / 3-2 / 5-4 | Bivalent control / switching behaviour / heating | cloud frames, raw write |
@@ -97,7 +97,7 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 
 | No. | Task | Needs |
 |---|---|---|
-| 1 | Run this firmware on hardware and test each new command once (send, read back topic, compare with remote controller or cloud) | flashing an ESP32 HeishaMon |
+| 1 | Hardware test on an M-series unit: done (section 6). Open: ESP8266 board, other series (see AquareaParity-Testing.md) | testers |
 | 2 | Fourth review done (no blocker; three major findings in the pending-byte memory fixed, one minor fixed, two documented). Open from it: the pair setters do not check the foreign bits they write back (for example SetStaticPressure with an unknown extra-pump nibble) | code and tests |
 | 3 | Decide on dependency guards: refuse or only warn when a child command is sent while its parent is off (table in 3.5) | decision, then code and tests |
 | 4 | Warn before `SetBuffer 1` (H43 without a buffer sensor) | documentation is done in MQTT-Topics.md; a guard is not possible because the sensor state is not known |
@@ -108,7 +108,30 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 | 9 | Reports from other series (H, J, K, L) for the byte positions in 3.3 | owners of such units |
 | 10 | Not tested on purpose: dry concrete, two zones, pool, actuator test, pump down, reset of energy history | separate approval on a suitable unit |
 
-## 6. Test state of this branch
+## 6. Hardware test (2026-11-10, M series, HeishaMon large / ESP32-S3, build Alpha-531e0fd)
+
+Heat pump off, commands sent by MQTT, data block read back after each group, everything restored at the end (bytes 20 to 109 equal to the state before the test).
+
+| Part | Result |
+|---|---|
+| Boot and 55 minutes of operation | no restart, free heap as before the update (about 194 kB), correct data 99 to 100 %, CZ-TAW1 proxy keeps working |
+| 27 new topics | all show the values of the installer menu |
+| 5 existing commands (regression, also 5 in one burst) | arrived, restored |
+| 16 commands that must be refused (missing parent setting, wrong step, wrong range) | none sent, no byte changed |
+| Single-byte commands (pool delta, heating ON temperature and delay, booster delay, holiday shift, solar deltas, solar frost protection) | arrived, restored. Solar high limit: frame sent, value not kept by the heat pump (no solar installation) |
+| Two commands on the same byte sent together (bytes 20, 27, 28, 30, 31, 33, 35, 36) | both fields set, neighbours unchanged, in every case |
+| Back-up heater 6 kW and 9 kW, zone 1 sensor type 1 and 2, liquid type glycol with anti-freeze kept | arrived, restored |
+| SG ready: mode 1 and 2, both cooling offsets, all seven power limits (8 commands in one burst), demand control | arrived, restored; power limit refused while the mode was 1 |
+| DHW tank yes, tank heater external, booster delay, extra pump DHW / comfort / efficiency | arrived, restored; removing the tank refused while the extra pump was on DHW |
+| Solar mode buffer and DHW | arrived, restored, no fault |
+| Bivalent: control, heating, both delays, operating mode 1 and 2, mode alternative, external pump | arrived, restored; refusals as designed; the defrost signal stayed "no" |
+| Water temperature mode heating and cooling | arrived. As known from raw writes, the heat pump moved the curve bytes 75 to 78 (heating) and 86 to 88 (cooling) and did not move them back; they were restored with a raw write |
+
+New observation: `SetZ1SensorSettings 2` (internal thermostat) moved bytes 38 and 39 (0x80 to 0x94 / 0x9C); they returned when the type was set back.
+
+Not checked: the refusal texts in the log (only that nothing was sent), the Service Cloud display for each value, long-term operation, the ESP8266 build.
+
+## 7. Test state of this branch
 
 | Test | Result |
 |---|---|
@@ -117,4 +140,4 @@ This file documents the research behind the additional topics (TOP170 to TOP196)
 | `tests/modbus/run_tests.py` | pass |
 | `Examples/Rules/run_tests.sh` | 34 pass |
 | CI "Build binary" (ESP8266 and ESP32) | success; a build with `--warnings=all` shows no warning in lines of this branch |
-| Hardware | not run |
+| Hardware | ESP32-S3 on one M-series unit, see section 6 |

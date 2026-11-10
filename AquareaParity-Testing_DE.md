@@ -6,7 +6,8 @@ Diese Anleitung richtet sich an HeishaMon-Besitzer, die mithelfen wollen herausz
 
 - Alles wurde an **einem Gerät der M-Serie** erarbeitet (WH-SDC0316M9E8 mit WH-WXG09ME8). Über die Reihen H, J, K und L ist nichts bekannt.
 - Die Testfirmware läuft auf einem großen HeishaMon (ESP32-S3) an diesem Gerät: Sie startet, behält alle bisherigen Topics, und die 27 neuen Topics zeigen die Werte des Installateur-Menüs.
-- Die neuen **Befehle** haben die Tests am Rechner bestanden, und dieselben Bytes wurden per Rohschreiben erprobt. Über diese Firmware sind aber noch nicht alle Befehle auf Hardware gesendet worden.
+- An diesem Gerät wurden die neuen **Befehle** über diese Firmware gesendet und zurückgelesen (Wärmepumpe aus): Die Werte kamen an, Nachbareinstellungen im selben Byte blieben erhalten, Befehle, die abgelehnt werden müssen, wurden abgelehnt, und alles wurde zurückgestellt. Bewusst ausgelassen: `SetZoneType`, `SetAntiFreezeMode 0`, `SetDefrostSignal 1`, `SetZ1SensorSettings 3`.
+- Ob es eine Einstellung auf einer anderen Baureihe gibt, ist nicht bekannt. Sie kann dort durchaus funktionieren; es hat nur noch niemand ausprobiert.
 - Das ist Testfirmware. Die Nutzung geschieht auf eigenes Risiko. Nicht an einer Anlage testen, an die man im Notfall nicht herankommt.
 
 ## Was neu ist
@@ -15,7 +16,7 @@ Diese Anleitung richtet sich an HeishaMon-Besitzer, die mithelfen wollen herausz
 
 | Topic | Name | Bedeutung | Neuer Befehl |
 |---|---|---|---|
-| TOP170 | Static_Pressure | Option „Statischer Druck“ (M-Serie) | SetStaticPressure |
+| TOP170 | Static_Pressure | Option „Statischer Druck“ | SetStaticPressure |
 | TOP171 | Heating_On_Outdoor_Temp | Außentemperatur, unter der die Heizung einschaltet | SetHeatingOnOutdoorTemp |
 | TOP172 | Heating_On_Delay | Verzögerung, bevor die Heizung einschaltet | SetHeatingOnDelay |
 | TOP173 | DHW_Booster_Delay | Einschaltverzögerung eines externen Speicher-Heizstabs | SetDHWBoosterDelay |

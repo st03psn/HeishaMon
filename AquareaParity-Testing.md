@@ -6,7 +6,8 @@ This guide is for HeishaMon owners who want to help find out whether the new top
 
 - Everything was worked out on **one M-series unit** (WH-SDC0316M9E8 with WH-WXG09ME8). Nothing is known about H, J, K and L series.
 - The test firmware runs on a HeishaMon large (ESP32-S3) on that unit: it boots, keeps all existing topics, and the 27 new topics show the values of the installer menu.
-- The new **commands** have passed host tests and raw-write tests of the same bytes, but have not all been sent through this firmware on hardware yet.
+- On that unit the new **commands** were sent through this firmware and read back (heat pump off): the values arrived, neighbouring settings in the same byte stayed, commands that must be refused were refused, and everything was set back. Left out on purpose: `SetZoneType`, `SetAntiFreezeMode 0`, `SetDefrostSignal 1`, `SetZ1SensorSettings 3`.
+- Whether a setting exists on another series is not known. It may well work there; it has simply not been tried.
 - This is test firmware. You use it at your own risk. Do not test on a system you cannot reach physically.
 
 ## What is new in this firmware
@@ -15,7 +16,7 @@ This guide is for HeishaMon owners who want to help find out whether the new top
 
 | Topic | Name | What it is | New command |
 |---|---|---|---|
-| TOP170 | Static_Pressure | Static pressure option (M series) | SetStaticPressure |
+| TOP170 | Static_Pressure | Static pressure option | SetStaticPressure |
 | TOP171 | Heating_On_Outdoor_Temp | Outdoor temperature below which heating switches on | SetHeatingOnOutdoorTemp |
 | TOP172 | Heating_On_Delay | Delay before heating switches on | SetHeatingOnDelay |
 | TOP173 | DHW_Booster_Delay | Switch-on delay of an external tank heater | SetDHWBoosterDelay |
@@ -95,7 +96,7 @@ Open the web page (table "Heatpump Values") or `/json` and compare the new rows 
 
 | Topic | Name | Installer menu item to compare |
 |---|---|---|
-| TOP170 | Static_Pressure | Static pressure (M series) |
+| TOP170 | Static_Pressure | Static pressure |
 | TOP171 | Heating_On_Outdoor_Temp | Outdoor temperature for heating ON |
 | TOP172 | Heating_On_Delay | Heating ON delay time |
 | TOP173 | DHW_Booster_Delay | Booster heater delay (external tank heater) |
