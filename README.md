@@ -49,6 +49,8 @@ To get a single value, add one of these arguments (one per request):
 
 `Watthour` in the full output is the energy since the previous `/json` request, so single S0 requests leave it out and don't reset it. An unknown value, or a section that is not enabled, returns HTTP 404. More than one of these arguments in one request returns HTTP 400. A heat pump topic requested before any data has arrived from the heat pump (after boot, or with no heat pump connected) returns HTTP 503.
 
+The Console tab of the web interface shows the live log. Above the log you can also send a single command to the heat pump: choose the command, enter a value and press Send. This uses the same HTTP `/command` route as `http://heishamon.local/command?SetDHWTemp=48` (one command per request), so values and checks are the same as for MQTT; see [MQTT-Topics.md](MQTT-Topics.md) for the values each command accepts. The answer is shown next to the button and in the log. The list of commands is read from the firmware (`http://heishamon.local/commandnames` returns it as a JSON array; the optional PCB commands are included only when the optional PCB is enabled). In listen-only mode commands are not sent. Note that the web interface has no login, so anyone on your network can send commands, just as with the existing `/command` route.
+
 Within the 'integrations' folder you can find examples how to connect your automation platform to the HeishaMon.
 
 # Rules functionality
