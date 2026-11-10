@@ -67,6 +67,8 @@ struct settingsStruct {
   bool logSerial1 = true; //log to serial1 (gpio2) from start
   bool opentherm = false; //opentherm enable flag
   bool hotspot = true; //enable wifi hotspot when wifi is not connected
+  bool webLogin = false; //web interface and HTTP API need a login (update password)
+  char webTrusted[64] = ""; //comma separated IPv4 addresses that need no login (for example Home Assistant)
 #ifdef ESP32
   bool proxy = true; //cztaw proxy port enable flag
   bool ethernet = true; //probe for W5500 ethernet module at boot (disable on boards without it)
@@ -110,6 +112,10 @@ int getSettingsJson(struct webserver_t *client, settingsStruct *heishamonSetting
 int handleModbus(struct webserver_t *client);
 #endif
 int handleSettings(struct webserver_t *client);
+int handleLogin(struct webserver_t *client, bool failed);
+bool webAuthAllowed(uint32_t ip, settingsStruct *heishamonSettings);
+bool webAuthLogin(uint32_t ip, const char *password, size_t length, settingsStruct *heishamonSettings);
+void webAuthLogout(uint32_t ip);
 int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings);
 int settingsReconnectWifi(struct webserver_t *client, settingsStruct *heishamonSettings);
 int settingsNewPassword(struct webserver_t *client, settingsStruct *heishamonSettings);

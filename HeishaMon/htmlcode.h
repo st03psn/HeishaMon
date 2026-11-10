@@ -1727,6 +1727,20 @@ static const char settingsForm1[] FLASHPROG = R"====(
       <label class='setting-label'>New Password</label>
       <input type='password' name='new_ota_password' maxlength='39' class='setting-input' value=''>
     </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Require login</label>
+      <div style='display:flex;align-items:center;gap:10px'>
+        <div class='checkbox-wrap'><input type='checkbox' name='web_login' value='enabled'></div>
+        <span class='setting-hint'>web interface and HTTP API ask for the update password; change the default password first</span>
+      </div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Addresses without login</label>
+      <div style='display:flex;align-items:center;gap:10px'>
+        <input type='text' name='web_trusted' maxlength='63' class='setting-input' value='' placeholder='192.168.1.10, 192.168.1.11'>
+        <span class='setting-hint'>for example Home Assistant</span>
+      </div>
+    </div>
   </div></div>
   <div class='panel' style='margin-bottom:16px'>
   <div class='panel-header'><h3>MQTT</h3></div>
@@ -2673,6 +2687,25 @@ static const char webBodyFactoryResetWarning[] FLASHPROG = R"====(
 <div class='msg-box danger'>
   <h2>Factory Reset</h2>
   <p>All configuration has been erased.<br>Connect to the <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> WiFi hotspot to reconfigure.</p>
+</div>
+)====";
+
+static const char webBodyLogin1[] FLASHPROG = R"====(
+</head>
+<body>
+<div class='msg-box'>
+  <h2>HeishaMon</h2>
+)====";
+
+static const char webBodyLoginFailed[] FLASHPROG = R"====(
+  <p style='color:var(--red)'>Wrong password, or too many attempts (wait a minute).</p>
+)====";
+
+static const char webBodyLogin2[] FLASHPROG = R"====(
+  <form method='POST' action='/login'>
+    <p><input type='password' name='password' maxlength='39' class='setting-input' placeholder='Update password' autofocus></p>
+    <p><button type='submit' class='btn btn-primary'>Log in</button></p>
+  </form>
 </div>
 )====";
 

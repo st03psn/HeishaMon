@@ -1150,6 +1150,25 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
         return 0;
       } break;
     case WEBSERVER_CLIENT_REQUEST_URI: {
+        // Login (see webfunctions.cpp): checked here, before any action of a route runs.
+        const bool isPost = (client->route == 110);
+        const uint32_t remote = (client->client != NULL) ? (uint32_t)client->client->remoteIP() : 0;
+        if (strcmp_P((char *)dat, PSTR("/login")) == 0) {
+          client->route = isPost ? 213 : 212;
+          return 0;
+        } else if (strcmp_P((char *)dat, PSTR("/logout")) == 0) {
+          webAuthLogout(remote);
+          client->route = 210;
+          return 0;
+        }
+        if (!webAuthAllowed(remote, &heishamonSettings)) {
+          if (strcmp_P((char *)dat, PSTR("/ws")) == 0) return -1; // live log
+          const bool page = !isPost && (strcmp_P((char *)dat, PSTR("/")) == 0 || strcmp_P((char *)dat, PSTR("/settings")) == 0 ||
+                                        strcmp_P((char *)dat, PSTR("/rules")) == 0 || strcmp_P((char *)dat, PSTR("/firmware")) == 0 ||
+                                        strcmp_P((char *)dat, PSTR("/modbus")) == 0);
+          client->route = page ? 210 : 211; // pages go to the login page, everything else gets 403
+          return 0;
+        }
         if (strcmp_P((char *)dat, PSTR("/")) == 0) {
           client->route = 1;
 #ifdef ESP32
@@ -1355,6 +1374,18 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 110: {
               return cacheSettings(client, args);
+            } break;
+          case 213: {
+              if (strcmp_P((char *)args->name, PSTR("password")) == 0) {
+                const uint32_t remote = (client->client != NULL) ? (uint32_t)client->client->remoteIP() : 0;
+                if (webAuthLogin(remote, (char *)args->value, args->value == NULL ? 0 : args->len, &heishamonSettings)) {
+                  client->route = 214;
+                  log_message(_F("Web login"));
+                } else {
+                  log_message(_F("Web login failed"));
+                }
+              }
+              return 0;
             } break;
           case 191: {
               // GPIO web API: /gpio?pin=<physical pin>&value=<0/1/on/off/true/false>, in any order.
@@ -1567,6 +1598,24 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case 120: {
               return handleSettings(client);
             } break;
+          case 211: {
+              if (client->content == 0) {
+                webserver_send(client, 403, (char *)"text/plain", 14);
+                webserver_send_content_P(client, PSTR("Login required"), 14);
+              }
+              return 0;
+            } break;
+          case 210:
+          case 214: {
+              webserver_send(client, 303, (char *)"text/plain", 0); // not cached by browsers, unlike 301
+              return -1;
+            } break;
+          case 212: {
+              return handleLogin(client, false);
+            } break;
+          case 213: {
+              return handleLogin(client, true);
+            } break;
           case 130: {
               return getSettings(client, &heishamonSettings);
             } break;
@@ -1684,6 +1733,14 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;            
           case 170: {
               header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /rules"));
+              return -1;
+            } break;
+          case 210: {
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /login"));
+              return -1;
+            } break;
+          case 214: {
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /"));
               return -1;
             } break;
           default: {
