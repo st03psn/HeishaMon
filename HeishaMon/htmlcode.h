@@ -1227,11 +1227,11 @@ async function refreshTable(){
     }
   } catch(e){console.error(e);}
 }
-// Opens the heat pump report form of the HeishaMon repository with the current values filled in.
-// Nothing is sent by HeishaMon: the browser opens GitHub, the user checks the form and submits it.
-// The browser also reads HeatPumpType.md from GitHub to mark model bytes that are not listed yet.
-var hmReportRepo='heishamon/HeishaMon';
-function reportHeatpump(){
+// "Check my model": the browser reads HeatPumpType.md from GitHub and looks up the model bytes (TOP92).
+// If the model is not listed, the user can open a prefilled GitHub issue form to add it, optionally with
+// all topic values. Nothing is sent by HeishaMon: the browser opens GitHub, the user checks and submits.
+var hmRepo='heishamon/HeishaMon';
+function hmValues(){
   var model='',lines=[];
   document.querySelectorAll('#heishavalues td[id$="-Topic"]').forEach(function(c){
     var t=c.textContent,v=document.getElementById(t+'-Value');
@@ -1239,25 +1239,58 @@ function reportHeatpump(){
     if(t==='TOP92')model=v;
     lines.push(t+'='+v);
   });
-  if(!model||/^(00 ?)+$/.test(model)){alert('No data from the heat pump yet.');return;}
-  // Open the tab inside the click, so pop-up blockers allow it; it gets its address below.
-  var w=window.open('','_blank');
-  if(!w){alert('Your browser blocked the new tab. Please allow pop-ups for this page and try again.');return;}
-  w.opener=null;
-  var ver=document.getElementById('sideVersion'),done=false;
-  function go(known){
-    if(done)return;done=true;
-    var q={template:'heatpump-report.yml',title:(known===false?'New model: ':'Heat pump report: ')+model,
-      version:ver?ver.textContent:'',board:hmBoard,model_bytes:model,values:lines.join('\n')};
-    w.location='https://github.com/'+hmReportRepo+'/issues/new?'+Object.keys(q).map(function(k){
-      return k+'='+encodeURIComponent(q[k]);}).join('&');
-  }
-  setTimeout(function(){go(null);},4000);
-  fetch('https://raw.githubusercontent.com/'+hmReportRepo+'/main/HeatPumpType.md').then(function(r){
+  return {model:model,lines:lines};
+}
+function hmKey(s){return s.replace(/\s/g,'').toUpperCase();}
+function checkModel(){
+  var box=document.getElementById('hmModelCheck'),m=hmValues().model;
+  function say(t){var p=document.createElement('div');p.textContent=t;p.style.marginBottom='8px';box.appendChild(p);}
+  box.style.display='';box.textContent='';
+  if(!m||/^(00 ?)+$/.test(m)){say('No data from the heat pump yet.');return;}
+  say('Looking up '+m+' in HeatPumpType.md ...');
+  fetch('https://raw.githubusercontent.com/'+hmRepo+'/main/HeatPumpType.md').then(function(r){
     if(!r.ok)throw new Error(r.status);return r.text();
   }).then(function(t){
-    go(t.replace(/\s/g,'').toUpperCase().indexOf(model.replace(/\s/g,'').toUpperCase())>=0);
-  }).catch(function(){go(null);});
+    var row=null;
+    t.split('\n').forEach(function(l){
+      var c=l.split('|');
+      if(!row&&c.length>5&&hmKey(c[2])===hmKey(m))row=c.map(function(x){return x.trim();});
+    });
+    box.textContent='';
+    if(row){
+      say('Your model is listed: '+row[3]+' / '+row[4]+(row[5]?' ('+row[5]+')':'')+'. Nothing to add.');
+      hmFormButton(box,row,'Share my values anyway');
+    }else{
+      say('Your model '+m+' is not listed yet. You can add it: the form opens on GitHub, you fill in the indoor and outdoor unit from the type plate and submit it.');
+      hmFormButton(box,null,'Add my model');
+    }
+  }).catch(function(){
+    box.textContent='';
+    say('Could not load the model list from GitHub. You can still open the form to add your model.');
+    hmFormButton(box,null,'Add my model');
+  });
+}
+function hmFormButton(box,row,label){
+  var cb=null;
+  if(!row){
+    var l=document.createElement('label');cb=document.createElement('input');
+    cb.type='checkbox';cb.checked=true;l.appendChild(cb);
+    l.appendChild(document.createTextNode(' Also send all topic values (helps the development of HeishaMon)'));
+    l.style.display='block';l.style.marginBottom='8px';box.appendChild(l);
+  }
+  var b=document.createElement('button');
+  b.className='btn btn-ghost';b.textContent=label;
+  b.style.cssText='padding:4px 10px;font-size:11px;height:24px;';
+  b.onclick=function(){
+    var d=hmValues(),ver=document.getElementById('sideVersion');
+    var q={template:'heatpump-model.yml',title:(row?'Heat pump values: ':'New model: ')+d.model,
+      model_bytes:d.model,version:ver?ver.textContent:'',board:hmBoard};
+    if(row){q.indoor_unit=row[3];q.outdoor_unit=row[4];q.kit=row[5];}
+    if(row||cb.checked)q.values=d.lines.join('\n');
+    window.open('https://github.com/'+hmRepo+'/issues/new?'+Object.keys(q).map(function(k){
+      return k+'='+encodeURIComponent(q[k]);}).join('&'),'_blank','noopener');
+  };
+  box.appendChild(b);
 }
 function buildRow(item,idKey){
   var row=document.createElement('tr');
@@ -1429,7 +1462,8 @@ static const char webBodyEndDiv[] FLASHPROG = "</div>";
 static const char webBodyRootHeatpumpValues[] FLASHPROG = R"====(
 <div id='Heatpump' class='tab-pane active'>
 <div class='panel'>
-  <div class='panel-header'><h3>Heatpump Values</h3><span><span class='panel-meta' id='hpMeta'>Live</span> <button onclick='reportHeatpump()' class='btn btn-ghost' title='Opens a prefilled GitHub issue form in a new tab. HeishaMon itself sends nothing.' style='padding:4px 10px;font-size:11px;height:24px;'>Report to HeishaMon</button></span></div>
+  <div class='panel-header'><h3>Heatpump Values</h3><span><span class='panel-meta' id='hpMeta'>Live</span> <button onclick='checkModel()' class='btn btn-ghost' title='Looks up your model bytes in HeatPumpType.md on GitHub. HeishaMon itself sends nothing.' style='padding:4px 10px;font-size:11px;height:24px;'>Check my model</button></span></div>
+  <div id='hmModelCheck' style='display:none;padding:12px 20px;font-size:12px;border-bottom:1px solid var(--border)'></div>
   <table><thead><tr>
     <th>Topic</th><th>Name</th><th>Value</th><th>Description</th>
   </tr></thead><tbody id='heishavalues'>
