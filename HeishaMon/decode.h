@@ -52,7 +52,7 @@ static const char _unknown[] PROGMEM = "unknown";
 
 
 
-#define NUMBER_OF_TOPICS 196 //last topic number + 1
+#define NUMBER_OF_TOPICS 194 //last topic number + 1
 #define NUMBER_OF_TOPICS_EXTRA 6 //last topic number + 1
 #define NUMBER_OF_OPT_TOPICS 7 //last topic number + 1
 #define MAX_TOPIC_LEN 42 // max length + 1
@@ -280,8 +280,6 @@ static const char topics[][MAX_TOPIC_LEN] PROGMEM = {
   "SG_Ready_1_Cool_Capacity", //TOP191
   "SG_Ready_2_Cool_Capacity", //TOP192
   "Sensor_Offset_Return", //TOP193
-  "Sensor_Offset_Byte36_Low", //TOP194
-  "Sensor_Offset_Byte37_Low", //TOP195
 };
 
 static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit unsigned humber) as there aren't more then 255 bytes (actually only 203 bytes) to decode
@@ -479,8 +477,6 @@ static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit 
   102, //TOP191
   103, //TOP192
   36, //TOP193
-  36, //TOP194
-  37, //TOP195
 };
 
 
@@ -690,8 +686,6 @@ static const topicFP topicFunctions[] PROGMEM = {
   getIntMinus128, //TOP191
   getIntMinus128, //TOP192
   getHighNibbleOffset, //TOP193
-  getLowNibbleOffset, //TOP194
-  getLowNibbleOffset, //TOP195
 };
 
 static const char *DisabledEnabled[] PROGMEM = {"2", "Disabled", "Enabled"};
@@ -742,6 +736,12 @@ static const char *ZoneConfiguration[] PROGMEM = {"0", "Configuration code"};
 static const char *Steps[] PROGMEM = {"0", "Steps"};
 static const char *BivalentOperatingMode[] PROGMEM = {"3", "Auto", "SG ready", "Intelligent"};
 static const char *ExtraPumpUse[] PROGMEM = {"3", "Not used", "Heating", "DHW"};
+// The two-bit getters can return 0..2 (b01, b10, b11), and the description is looked up at [value + 1]: a table
+// for a field that can hold b11 needs three entries, otherwise the lookup reads behind the array.
+static const char *SGReadyControl[] PROGMEM = {"3", "Disabled", "Enabled, capacity", "Enabled, power consumption"};
+static const char *DisabledEnabledInvalid[] PROGMEM = {"3", "Disabled", "Enabled", "Invalid"};
+static const char *OffOnInvalid[] PROGMEM = {"3", "Off", "On", "Invalid"};
+static const char *HeatingControlInvalid[] PROGMEM = {"3", "Comfort", "Efficiency", "Invalid"};
 
 static const char **opttopicDescription[] PROGMEM = {
   OffOn,          //OPT0
@@ -912,7 +912,7 @@ static const char **topicDescription[] PROGMEM = {
   ZoneConfiguration, //TOP146
   Kilowatt, //TOP147
   DHWHeaterType, //TOP148
-  DisabledEnabled, //TOP149
+  SGReadyControl, //TOP149
   DisabledEnabled, //TOP150
   DisabledEnabled, //TOP151
   Celsius, //TOP152
@@ -933,7 +933,7 @@ static const char **topicDescription[] PROGMEM = {
   InactiveActive, //TOP167
   InactiveActive, //TOP168
   Celsius, //TOP169
-  DisabledEnabled, //TOP170
+  DisabledEnabledInvalid, //TOP170
   Celsius, //TOP171
   Minutes, //TOP172
   Minutes, //TOP173
@@ -942,11 +942,11 @@ static const char **topicDescription[] PROGMEM = {
   Minutes, //TOP176
   Kelvin, //TOP177
   Kelvin, //TOP178
-  DisabledEnabled, //TOP179
+  DisabledEnabledInvalid, //TOP179
   BivalentOperatingMode, //TOP180
-  OffOn, //TOP181
+  OffOnInvalid, //TOP181
   ExtraPumpUse, //TOP182
-  HeatingControl, //TOP183
+  HeatingControlInvalid, //TOP183
   Kilowatt, //TOP184
   Kilowatt, //TOP185
   Kilowatt, //TOP186
@@ -957,6 +957,4 @@ static const char **topicDescription[] PROGMEM = {
   Celsius, //TOP191
   Celsius, //TOP192
   Kelvin, //TOP193
-  Kelvin, //TOP194
-  Kelvin, //TOP195
 };

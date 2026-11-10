@@ -2,7 +2,7 @@
 
 Byte numbers are decimal; example values are hexadecimal. For the documented bit-pair fields, bits 1–2 are the most significant pair (mask 0xC0), bits 3–4 use 0x30, bits 5–6 use 0x0C, and bits 7–8 use 0x03. The individual zone-activity bits in byte 117 use masks 0x02 (Z2) and 0x01 (Z1).
 
-TOP144–TOP195 expose the additional documented fields below; see MQTT-Topics.md for topic names and payloads. Byte 21 is published as its decimal configuration code, without inferring undocumented bit fields. Byte 176 (possible bypass valve), byte 191 (meaning of heat-pump power), and byte 192 (possible T-CAP indicator) remain unexposed pending verification. The conflicting RC-2 offsets (documented byte 200 versus existing decoder byte 128) are unchanged.
+TOP144–TOP193 expose the additional documented fields below; see MQTT-Topics.md for topic names and payloads. Byte 21 is published as its decimal configuration code, without inferring undocumented bit fields. Byte 176 (possible bypass valve), byte 191 (meaning of heat-pump power), and byte 192 (possible T-CAP indicator) remain unexposed pending verification. The conflicting RC-2 offsets (documented byte 200 versus existing decoder byte 128) are unchanged.
 
 |  Topic# | Byte# | Possible Value | Value decrypt | Value Description |
 | :---- | ---- | ---- | ----- | ----:|
@@ -42,8 +42,7 @@ TOP144–TOP195 expose the additional documented fields below; see MQTT-Topics.m
 | TOP174+TOP175 | 33 | 75 | Low nibble = efficiency stage 1 time, high nibble = stage 2 time; each nibble = minutes / 5 + 1 (0x75: stage 1 20 min, stage 2 30 min). SetEfficiencyStage1Time / SetEfficiencyStage2Time | Heating control efficiency stage times (M series) |
 | TOP176+TOP179 | 34 | a7 | Low nibble = efficiency stage 3 time, minutes / 5 + 1 (0x7: 30 min, SetEfficiencyStage3Time, which sends the high nibble as 0). 1st & 2nd bit = Anti-stick mode (b01=disabled, b10=enabled), read-only: the heat pump ignored a raw write of it. 3rd & 4th bit = b10 seen, meaning unknown | Efficiency stage 3 time, Anti-stick mode (M series) |
 | TOP177+TOP178 | 35 | 86 | High nibble = sensor offset Th1 (remote), low nibble = sensor offset outdoor; each nibble = offset in K / 0.5 + 8 (8 = 0 K, 0xA = +1 K, 6 = -1 K). SetSensorOffsetRemoteTh1 / SetSensorOffsetOutdoor | Sensor calibration offsets (M series) |
-| TOP193+TOP194 | 36 | 88 | High nibble = sensor offset return sensor (SetSensorOffsetReturn), low nibble = offset of an unidentified sensor (read-only); each nibble = offset in K / 0.5 + 8 | Sensor calibration offsets (M series) |
-| TOP195 | 37 | 88 | Low nibble = offset of an unidentified sensor (read-only), K / 0.5 + 8; high nibble 8 seen, meaning unknown | Sensor calibration offsets (M series) |
+| TOP193 | 36 | 88 | High nibble = sensor offset return sensor (SetSensorOffsetReturn), K / 0.5 + 8; the low nibble is an offset of an unidentified sensor (no topic) | Sensor calibration offsets (M series) |
 |  TOP27 | 38 | 80 | Convert to DEC 128-128 = 0  | Zone 1 water shift set or direct mode value Temperature For Heat Mode [°C] |
 |  TOP28 | 39 | 8f | Convert to DEC 143-128 = 15 in direct mode set temp or shift value  | Zone 1 water shift set Temperature For Cool Mode [°C] |
 |  TOP34 | 40 | 80 | Convert to DEC 128-128 = 0  | Zone 2 water shift or direct mode set Temperature For Heat Mode [°C] |

@@ -665,14 +665,19 @@ unsigned int set_bivalent_ap_heat(char *msg, unsigned char *cmd, char *log_msg) 
 }
 
 // byte 27 bits 5-4: b01 auto, b10 SG ready, b11 intelligent (TOP180). Bits 1-0 (demand control) and 3-2
-// (SG ready) of the same byte are kept as read. The manuals state that this bivalent pattern and the SG ready
-// setting (menu 16, SetSGReadyMode) exclude each other and that the unit resets the other one when one is set
-// (SM p.103, p.105): SG ready or intelligent are therefore refused while SG ready is on (bits 3-2 = b10 or b11).
+// (SG ready) of the same byte are kept as read. The manuals state that the bivalent "SG ready" input and the SG ready
+// setting (menu 16, SetSGReadyMode) share one terminal and that the unit resets the other one when one is set
+// (SM p.103, p.105). Only the bivalent operating mode "SG ready" (b10) is therefore refused while SG ready is on
+// (bits 3-2 = b10 or b11); "intelligent" is not affected by the manuals' statement.
+// Payload 0 (auto) is the way out of a leftover SG ready / intelligent pattern and is allowed whenever the byte was
+// read, also with bivalent control off (the pattern stays hidden in the byte then); 1 and 2 need bivalent control = yes.
 unsigned int set_bivalent_operating_mode(char *msg, unsigned char *cmd, char *log_msg) {
   unsigned char tmp[sizeof(panasonicSendQuery)];
-  if (set_pair_field(msg, tmp, log_msg, 27, 4, 2, true) == 0) return 0;
-  if ((tmp[27] & 0x30) != 0x10 && (tmp[27] & 0x08) != 0) {
-    snprintf_P(log_msg, 256, PSTR("Cannot set this bivalent operating mode while SG ready is on: switch SG ready off first (SetSGReadyMode 0)"));
+  if (set_pair_field(msg, tmp, log_msg, 27, 4, 2) == 0) return 0;
+  const byte mode = (tmp[27] >> 4) & 0x03;
+  if (mode != 0x01 && !require_bivalent_yes(log_msg)) return 0;
+  if (mode == 0x02 && (effective_byte(27) & 0x08) != 0) {
+    snprintf_P(log_msg, 256, PSTR("Cannot set the bivalent operating mode SG ready while SG ready is on: switch SG ready off first (SetSGReadyMode 0)"));
     return 0;
   }
   memcpy(cmd, tmp, sizeof(tmp));
@@ -877,20 +882,28 @@ unsigned int set_solar_mode(char *msg, unsigned char *cmd, char *log_msg) {
 }
 
 // Solar high limit, byte 64 (TOP105), degC + 128, 70..90 degC (SM p.182). The heat pump reverted a raw write after about 5 s.
+// Like the other commands of this block it needs a data block and a nonzero byte 64.
 unsigned int set_solar_high_limit(char *msg, unsigned char *cmd, char *log_msg) {
-  return set_integer_field(msg, cmd, log_msg, 64, 70, 90, 1, 1, 128, 1);
+  unsigned char tmp[sizeof(panasonicSendQuery)];
+  if (set_integer_field(msg, tmp, log_msg, 64, 70, 90, 1, 1, 128, 1) == 0) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, 64, current)) return 0;
+  memcpy(cmd, tmp, sizeof(tmp));
+  return sizeof(panasonicSendQuery);
 }
 
 // SG ready, byte 27 bits 3-2 (TOP149): 0 = off (b01), 1 = on, mode capacity (b10), 2 = on, mode power consumption (b11).
-// The manuals state that SG ready and the bivalent operating mode exclude each other, so switching it on is refused
-// while the bivalent operating mode (bits 5-4) is SG ready or intelligent (b10 or b11). Bits 7-6 and 1-0 are sent as read.
+// The manuals state that the bivalent "SG ready" input and SG ready share one terminal (the unit resets the other one),
+// so switching it on is refused only while bivalent control is on (byte 26 bits 1-0 = b10) and the bivalent operating
+// mode (bits 5-4) is SG ready (b10). Switching it off (0) is always possible once the byte was read, and with
+// bivalent control off a hidden bivalent pattern in the byte does not matter. Bits 7-6 and 1-0 are sent as read.
 unsigned int set_sg_ready_mode(char *msg, unsigned char *cmd, char *log_msg) {
   unsigned char tmp[sizeof(panasonicSendQuery)];
   if (set_integer_field(msg, tmp, log_msg, 27, 0, 2, 1, 1, 1, 4) == 0) return 0;
   byte current = 0;
   if (!current_data_byte(log_msg, 27, current)) return 0;
-  if (tmp[27] != 0x04 && (current & 0x20) != 0) {
-    snprintf_P(log_msg, 256, PSTR("Cannot switch SG ready on while the bivalent operating mode is SG ready or intelligent (SetBivalentOperatingMode 0)"));
+  if (tmp[27] != 0x04 && (current & 0x30) == 0x20 && (effective_byte(26) & 0x03) == 0x02) {
+    snprintf_P(log_msg, 256, PSTR("Cannot switch SG ready on while bivalent control is on and the bivalent operating mode is SG ready (SetBivalentOperatingMode 0)"));
     return 0;
   }
   tmp[27] = (unsigned char)((current & ~0x0C) | tmp[27]);
@@ -918,8 +931,10 @@ static bool parse_tenths(const char *msg, int &tenths) {
 }
 
 // SG ready power consumption limits, bytes 51..57, byte = kW * 10 + 1 (kW = (x - 1) / 10), 0.5..10.0 kW (SM p.190).
-// Raw writes of bytes 51, 56 and 57 were accepted while byte 27 was b11 (power consumption); the cloud fields exist in that
-// mode only, so the commands need byte 27 bits 3-2 = b11.
+// Raw writes of bytes 51, 56 and 57 were accepted while byte 27 was b11 (power consumption); bytes 52-55 were raw-written
+// while byte 27 was 0x55 (SG ready off) and held. The wire evidence therefore does not require the gate: the cloud only
+// offers the fields in the power consumption mode, and the commands follow that UI state (byte 27 bits 3-2 = b11) as a
+// precaution. Like the other commands they need a data block and a nonzero own byte.
 static unsigned int set_sg_ready_power(char *msg, unsigned char *cmd, char *log_msg, byte address) {
   int tenths = 0;
   if (!parse_tenths(msg, tenths) || tenths < 5 || tenths > 100) {
@@ -927,6 +942,8 @@ static unsigned int set_sg_ready_power(char *msg, unsigned char *cmd, char *log_
     return 0;
   }
   if (!require_state(log_msg, 27, 0x0C, 0x0C, "SG ready set to power consumption (SetSGReadyMode 2)")) return 0;
+  byte current = 0;
+  if (!current_data_byte(log_msg, address, current)) return 0;
   memcpy_P(cmd, panasonicSendQuery, sizeof(panasonicSendQuery));
   cmd[address] = (unsigned char)(tenths + 1);
   snprintf_P(log_msg, 256, PSTR("set byte %u to %d tenths of a kW"), address, tenths);
@@ -951,6 +968,8 @@ static unsigned int set_sg_ready_cool_capacity(char *msg, unsigned char *cmd, ch
     snprintf_P(log_msg, 256, PSTR("Cannot set this field now: it needs SG ready switched on (SetSGReadyMode 1 or 2, byte 27)"));
     return 0;
   }
+  byte current = 0;
+  if (!current_data_byte(log_msg, address, current)) return 0;
   memcpy(cmd, tmp, sizeof(tmp));
   return sizeof(panasonicSendQuery);
 }
@@ -959,8 +978,8 @@ unsigned int set_sg_ready_cool_capacity_1(char *msg, unsigned char *cmd, char *l
 unsigned int set_sg_ready_cool_capacity_2(char *msg, unsigned char *cmd, char *log_msg) { return set_sg_ready_cool_capacity(msg, cmd, log_msg, 103); }
 
 // Return sensor offset, byte 36 high nibble (TOP193), same encoding and limits as the offsets of byte 35. The other nibble
-// of byte 36 must be a valid offset nibble (2..14). The low nibbles of bytes 36 and 37 are not assigned to a sensor
-// and have no command.
+// of byte 36 must be a valid offset nibble (2..14). The low nibbles of bytes 36 and 37 are not assigned to a sensor;
+// they have neither a command nor a topic.
 unsigned int set_sensor_offset_return(char *msg, unsigned char *cmd, char *log_msg) {
   return set_sensor_offset(msg, cmd, log_msg, 36, true);
 }

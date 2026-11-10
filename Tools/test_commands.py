@@ -79,12 +79,6 @@ SETTERS = {
         [("-10", 118), ("-9", 119), ("-127", 1), ("127", 255), ("0", 128)],
         ["-128", "128"],
     ),
-    # solar high limit, 70..90 degC (SM p.182)
-    "SetSolarHighLimit": (
-        64,
-        [("80", 208), ("79", 207), ("70", 198), ("90", 218)],
-        ["69", "91", "0", "-1", "127", "-127", "128", "-128", "255"],
-    ),
 }
 # Read-modify-write setters for bytes with several fields (and commands that need a state of the data
 # block). Each accepted case is (actData overrides, payload, expected value of the byte); the rest of
@@ -92,6 +86,14 @@ SETTERS = {
 # command must refuse. Optional last element: {"skip": generic payloads that are valid for this command,
 # "gate": byte that must not be 0 (default: the written byte)}.
 RMW_SETTERS = {
+    # solar high limit, byte 64 of its own, 70..90 degC (SM p.182); needs a data block and byte 64 != 0 like the other
+    # commands of the thinner-evidence block (the pump reverted a raw write, see MQTT-Topics.md)
+    "SetSolarHighLimit": (
+        64,
+        [({}, "80", 208), ({}, "79", 207), ({}, "70", 198), ({}, "90", 218)],
+        [],
+        ["69", "91", "0", "-1", "127", "-127", "128", "-128", "255"],
+    ),
     # byte 20 bits 3-2 (b01 off, b10 on); the other bits stay as read
     "SetAntiFreezeMode": (
         20,
@@ -234,8 +236,8 @@ RMW_SETTERS = {
         ],
         ["2", "-1"],
     ),
-    # byte 27 bits 5-4 (b01 auto, b10 SG ready, b11 intelligent); bits 1-0, 3-2 and 7-6 stay as read; needs bivalent = yes and,
-    # for SG ready / intelligent, SG ready (bits 3-2) off
+    # byte 27 bits 5-4 (b01 auto, b10 SG ready, b11 intelligent); bits 1-0, 3-2 and 7-6 stay as read; 1 and 2 need bivalent = yes,
+    # 1 (SG ready) also SG ready (bits 3-2) off; 0 (auto) is always possible once byte 27 was read
     "SetBivalentOperatingMode": (
         27,
         [
@@ -247,11 +249,22 @@ RMW_SETTERS = {
             ({26: 0x5E, 27: 0x51}, "1", 0x61),  # SG ready not set (b00) is no conflict
             ({26: 0x5E, 27: 0x76}, "0", 0x56),
             ({26: 0x56, 27: 0x55}, "1", 0x65),
+            # only the bivalent operating mode "SG ready" (b10) conflicts with SG ready; "intelligent" does not
+            ({26: 0x5E, 27: 0x59}, "2", 0x79),
+            ({26: 0x5E, 27: 0x5D}, "2", 0x7D),
+            # "auto" is the way out and works with bivalent control off too (hidden SG ready / intelligent pattern, review 3 F2)
+            ({26: 0x5D, 27: 0x65}, "0", 0x55),
+            ({26: 0x5D, 27: 0x75}, "0", 0x55),
+            ({26: 0x5D, 27: 0x69}, "0", 0x59),
+            ({26: 0x5C, 27: 0x65}, "0", 0x55),
+            ({26: 0x00, 27: 0x65}, "0", 0x55),
         ],
         [
             ({26: 0x5D, 27: 0x55}, "1"), ({26: 0x5C, 27: 0x55}, "1"), ({26: 0x5F, 27: 0x55}, "1"),
-            # SG ready (menu 16) and the bivalent SG ready / intelligent pattern exclude each other (manual): only "auto" is possible
-            ({26: 0x5E, 27: 0x59}, "1"), ({26: 0x5E, 27: 0x59}, "2"), ({26: 0x5E, 27: 0x5D}, "1"), ({26: 0x5E, 27: 0x5D}, "2"),
+            # 1 and 2 still need bivalent control = yes
+            ({26: 0x5D, 27: 0x55}, "2"), ({26: 0x5D, 27: 0x65}, "1"), ({26: 0x5D, 27: 0x65}, "2"), ({26: 0x5F, 27: 0x55}, "2"),
+            # the bivalent SG ready input and SG ready (menu 16) share one terminal (manual): bivalent "SG ready" is refused while SG ready is on
+            ({26: 0x5E, 27: 0x59}, "1"), ({26: 0x5E, 27: 0x5D}, "1"),
         ],
         ["3", "-1"],
     ),
@@ -493,7 +506,7 @@ RMW_SETTERS = {
         ["3", "-1"],
     ),
     # byte 27 bits 3-2 (b01 off, b10 capacity, b11 power consumption); bits 7-4 and 1-0 stay as read; switching it on is refused
-    # while the bivalent operating mode (bits 5-4) is SG ready or intelligent (b10 / b11)
+    # only while bivalent control is on (byte 26 bits 1-0 = b10) and the bivalent operating mode (bits 5-4) is SG ready (b10)
     "SetSGReadyMode": (
         27,
         [
@@ -507,8 +520,19 @@ RMW_SETTERS = {
             ({27: 0x69}, "0", 0x65),  # switching off is always possible
             ({27: 0x45}, "1", 0x49),  # bivalent operating mode not set (b00) is no conflict
             ({27: 0x55}, "0", 0x55),
+            # the conflict exists only with bivalent control = yes (byte 26 bits 1-0 = b10) and bivalent operating mode SG ready (b10)
+            ({26: 0x5D, 27: 0x65}, "1", 0x69),  # state of review 3 F2: bivalent control off, hidden b10
+            ({26: 0x5D, 27: 0x65}, "2", 0x6D),
+            ({26: 0x5C, 27: 0xA5}, "1", 0xA9),
+            ({26: 0x5F, 27: 0x65}, "1", 0x69),
+            ({26: 0x5E, 27: 0x75}, "1", 0x79),  # bivalent "intelligent" is no conflict
+            ({26: 0x5E, 27: 0x75}, "2", 0x7D),
+            ({26: 0x5D, 27: 0x75}, "2", 0x7D),
+            ({26: 0x5E, 27: 0x69}, "0", 0x65),  # off is possible in every state
+            ({26: 0x5E, 27: 0x6D}, "0", 0x65),
+            ({26: 0x5E, 27: 0x65}, "0", 0x65),
         ],
-        [({27: 0x65}, "1"), ({27: 0x65}, "2"), ({27: 0x75}, "1"), ({27: 0x75}, "2"), ({27: 0xA5}, "1")],
+        [({26: 0x5E, 27: 0x65}, "1"), ({26: 0x5E, 27: 0x65}, "2"), ({26: 0x5E, 27: 0xA5}, "1"), ({26: 0x56, 27: 0x65}, "1")],
         ["3", "-1"],
     ),
     # byte 36 nibbles (like byte 35): high nibble = offset of the return sensor, K / 0.5 + 8; the other nibble must be 2..14
@@ -568,7 +592,7 @@ for _name, _byte in (
             ({27: 0x55}, "4.2"), ({27: 0x59}, "4.2"), ({27: 0x51}, "4"), ({27: 0xD5}, "4.2"), ({27: 0x00}, "4.2"),
         ],
         ["0", "0.4", "0.0", "10.1", "11", "100", "0.55", "4.", ".5", "-1", "-0.5", "4,2", "4.2.1", "1e1", "4.25", "010.5"],
-        {"gate": 27, "skip": {"1.0"}},
+        {"gate": 27, "extra_gates": (_byte,), "skip": {"1.0"}},
     )
 for _name, _byte in (("SetSGReadyCoolCapacity1", 102), ("SetSGReadyCoolCapacity2", 103)):
     RMW_SETTERS[_name] = (
@@ -582,7 +606,7 @@ for _name, _byte in (("SetSGReadyCoolCapacity1", 102), ("SetSGReadyCoolCapacity2
         ],
         [({27: 0x55}, "-3"), ({27: 0x51}, "-3"), ({27: 0x45}, "0")],
         ["-16", "1", "15", "10", "128", "-128", "255"],
-        {"gate": 27},
+        {"gate": 27, "extra_gates": (_byte,)},
     )
 # commands that must not exist: the pump ignores an anti-stick write, bytes above 109 cannot be written, concrete drying
 REMOVED_COMMANDS = ("SetAntiStickMode", "SetAntiStick", "SetDryConcrete", "SetConcreteDrying", "SetBackupHeaterEnable", "SetCoolModeEnable")
@@ -635,6 +659,9 @@ void reset_act_data() {
   actData[24] = 0x55; actData[25] = 0x25; actData[26] = 0x5D; actData[27] = 0x55; actData[31] = 0x5A;
   actData[33] = 0x75; actData[34] = (char)0xA7; actData[35] = (char)0x86;
   actData[21] = 0x15; actData[22] = 0x11; actData[28] = (char)0x95; actData[36] = (char)0x88; actData[37] = (char)0x88;
+  // SG ready limits (51..57), solar high limit (64), SG ready cooling offsets (102 / 103): the reference unit reports them
+  actData[51] = 0x2B; actData[52] = 0x2B; actData[53] = 0x29; actData[54] = 0x29; actData[55] = 0x29; actData[56] = 0x29;
+  actData[57] = 0x2B; actData[64] = (char)0xD0; actData[102] = 0x7E; actData[103] = 0x7C;
 }
 struct ActDataInit {
   ActDataInit() { reset_act_data(); }
@@ -832,7 +859,9 @@ def main():
         cases += 1
         # no data block yet, or the byte itself still 0: refuse instead of guessing the other bits
         payload = accepted[0][1]
-        for broken in ("actData[0] = 0;", f"actData[{gate}] = 0;"):
+        for broken in ("actData[0] = 0;", f"actData[{gate}] = 0;") + tuple(
+            f"actData[{g}] = 0;" for g in options.get("extra_gates", ())
+        ):
             checks.append(
                 f"""
   {{ char topic[] = "{topic}", payload[] = "{payload}";
@@ -1031,8 +1060,46 @@ def main():
     assert(!run_command("SetSGReadyMode", "1") && !run_command("SetSGReadyMode", "2"));
     assert(run_command("SetBivalentOperatingMode", "0") && sent[27] == 0x55);
     assert(run_command("SetSGReadyMode", "2") && sent[27] == 0x5D);
-    assert(!run_command("SetBivalentOperatingMode", "1") && !run_command("SetBivalentOperatingMode", "2"));
+    assert(!run_command("SetBivalentOperatingMode", "1"));
+    assert(run_command("SetBivalentOperatingMode", "2") && sent[27] == 0x7D); // intelligent does not conflict
     assert(run_command("SetBivalentOperatingMode", "0") && sent[27] == 0x5D);
+    reset_act_data();
+  }
+  { // review 3 F2: state bivalent control off (26 = 0x5D) with a hidden bivalent SG ready pattern (27 = 0x65); every way out works
+    reset_act_data(); actData[26] = (char)0x5D; actData[27] = (char)0x65;
+    assert(run_command("SetSGReadyMode", "1") && sent[27] == 0x69);
+    assert(run_command("SetSGReadyMode", "0") && sent[27] == 0x65);
+    assert(run_command("SetBivalentOperatingMode", "0") && sent[27] == 0x55);
+    assert(!run_command("SetBivalentOperatingMode", "1")); // needs bivalent control = yes
+    reset_act_data(); actData[26] = (char)0x5D; actData[27] = (char)0x65;
+    assert(run_command("SetBivalentOperatingMode", "0") && sent[27] == 0x55);
+    assert(run_command("SetSGReadyMode", "2") && sent[27] == 0x5D);
+    assert(run_command("SetSGReadyMode", "0") && sent[27] == 0x55);
+    // bivalent control on, bivalent SG ready and SG ready both set (reached at the remote controller): both can be switched off
+    reset_act_data(); actData[26] = (char)0x5E; actData[27] = (char)0x69;
+    assert(!run_command("SetBivalentOperatingMode", "1"));
+    assert(run_command("SetSGReadyMode", "0") && sent[27] == 0x65);
+    reset_act_data(); actData[26] = (char)0x5E; actData[27] = (char)0x69;
+    assert(run_command("SetBivalentOperatingMode", "0") && sent[27] == 0x59);
+    reset_act_data(); actData[26] = (char)0x5E; actData[27] = (char)0x6D;
+    assert(run_command("SetBivalentOperatingMode", "2") && sent[27] == 0x7D);
+    assert(run_command("SetSGReadyMode", "0") && sent[27] == 0x75);
+    // switching bivalent control on does not matter for "off"; SG ready on is refused as soon as it is on with b10
+    reset_act_data(); actData[26] = (char)0x5D; actData[27] = (char)0x65;
+    assert(run_command("SetSGReadyMode", "1") && sent[27] == 0x69);
+    reset_act_data(); actData[26] = (char)0x5E; actData[27] = (char)0x65;
+    assert(!run_command("SetSGReadyMode", "1") && !run_command("SetSGReadyMode", "2"));
+    assert(run_command("SetSGReadyMode", "0") && sent[27] == 0x65);
+    reset_act_data();
+  }
+  { // review 3 F3: solar high limit and SG ready limits refuse without a data block and while their own byte reads 0
+    reset_act_data(); actData[0] = 0;
+    assert(!run_command("SetSolarHighLimit", "80"));
+    reset_act_data(); actData[64] = 0;
+    assert(!run_command("SetSolarHighLimit", "80"));
+    reset_act_data(); actData[27] = (char)0x5D; actData[52] = 0; actData[102] = 0;
+    assert(!run_command("SetSGReadyHeatPower1", "4.2") && !run_command("SetSGReadyCoolCapacity1", "-3"));
+    assert(run_command("SetSGReadyDHWPower1", "4.2") && sent[51] == 43 && run_command("SetSGReadyCoolCapacity2", "-6") && sent[103] == 122);
     reset_act_data();
   }
   { // sensor offset of the return sensor and zone 1 sensor type: pending nibbles
@@ -1054,7 +1121,7 @@ def main():
   }
 """
     checks.append(sequences)
-    cases += 15
+    cases += 35
 
     shadow_tests = r"""
   const unsigned long SETTLE = 2000, LIFE = 12000;
