@@ -748,6 +748,7 @@ static const char webBodyStart[] FLASHPROG = R"====(
   <nav class='sidemenu-nav' id='sideNav'></nav>
   <div class='sidemenu-footer'>
     <a href='https://github.com/heishamon/HeishaMon' target='_blank'>GitHub</a>
+    <a href='/logout' id='menuLogout' style='display:none;margin-left:12px'>Log out</a>
   </div>
 </aside>
 <header class='topbar'>
@@ -766,6 +767,8 @@ static const char webFooter[] FLASHPROG = "</body></html>";
 // ─────────────────────────────────────────────────────────────────────────────
 static const char menuJS[] FLASHPROG = R"====(
 <script>
+// the cookie only says "this browser logged in", to show the log out link; the login itself does not use it
+if(document.cookie.indexOf('hmlogin=1')>-1){var lo=document.getElementById('menuLogout');if(lo)lo.style.display='';}
 function toggleMenu(){
   var m=document.getElementById('sideMenu');
   var o=document.getElementById('menuOverlay');

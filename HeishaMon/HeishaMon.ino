@@ -1158,7 +1158,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           return 0;
         } else if (strcmp_P((char *)dat, PSTR("/logout")) == 0) {
           webAuthLogout(remote);
-          client->route = 210;
+          client->route = 217;
           return 0;
         }
         if (!webAuthAllowed(remote, &heishamonSettings)) {
@@ -1606,7 +1606,8 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               return 0;
             } break;
           case 210:
-          case 214: {
+          case 214:
+          case 217: {
               webserver_send(client, 303, (char *)"text/plain", 0); // not cached by browsers, unlike 301
               return -1;
             } break;
@@ -1739,8 +1740,12 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /login"));
               return -1;
             } break;
-          case 214: {
-              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /"));
+          case 214: { // logged in; the cookie is only a hint for the menu (log out link)
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /\r\nSet-Cookie: hmlogin=1; Path=/\r\n"));
+              return -1;
+            } break;
+          case 217: { // logged out
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /login\r\nSet-Cookie: hmlogin=; Path=/; Max-Age=0\r\n"));
               return -1;
             } break;
           default: {
