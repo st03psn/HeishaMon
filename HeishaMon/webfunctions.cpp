@@ -261,6 +261,9 @@ void loadSettings(settingsStruct *heishamonSettings) {
           heishamonSettings->use_s0 = ( jsonDoc[F("use_s0")] == "enabled" ) ? true : false;
           heishamonSettings->hotspot = ( jsonDoc[F("hotspot")] == "disabled" ) ? false : true; //default to true if not found in settings
           heishamonSettings->listenonly = ( jsonDoc[F("listenonly")] == "enabled" ) ? true : false;
+          heishamonSettings->webLogin = ( jsonDoc[F("web_login")] == "enabled" ) ? true : false;
+          if ( jsonDoc[F("web_password")] ) strlcpy(heishamonSettings->webPassword, jsonDoc[F("web_password")], sizeof(heishamonSettings->webPassword));
+          if ( jsonDoc[F("web_trusted")] ) strlcpy(heishamonSettings->webTrusted, jsonDoc[F("web_trusted")], sizeof(heishamonSettings->webTrusted));
           heishamonSettings->logMqtt = ( jsonDoc[F("logMqtt")] == "enabled" ) ? true : false;
           heishamonSettings->logHexdump = ( jsonDoc[F("logHexdump")] == "enabled" ) ? true : false;
           heishamonSettings->logSerial1 = ( jsonDoc[F("logSerial1")] == "enabled" ) ? true : false;
@@ -464,6 +467,107 @@ int handleFactoryReset(struct webserver_t *client) {
   return 0;
 }
 
+// ---- Login for the web interface and the HTTP API ---------------------------------------------------
+// The web server runs actions while it reads the URL and its arguments, before the request headers
+// arrive, so a cookie or an Authorization header comes too late. The login is therefore bound to the
+// address of the client: a successful POST /login opens a session for that address, which ends after
+// WEB_SESSION_MS without a request or with /logout. Addresses in the setting "web_trusted" need no
+// login (integrations and scripts). This keeps other devices in the network out; it does not protect
+// against a device that reads or redirects the network traffic (no HTTPS here).
+#define WEB_SESSIONS 4
+#define WEB_SESSION_MS 1800000UL
+#define WEB_LOGIN_FAILS 5
+#define WEB_LOGIN_LOCK_MS 60000UL
+
+static struct {
+  uint32_t ip;
+  unsigned long seen;
+  bool used;
+} webSessions[WEB_SESSIONS];
+static uint8_t webLoginFails = 0;
+static unsigned long webLoginLastFail = 0;
+
+static bool webAuthTrusted(uint32_t ip, settingsStruct *heishamonSettings) {
+  char list[sizeof(heishamonSettings->webTrusted)];
+  strlcpy(list, heishamonSettings->webTrusted, sizeof(list));
+  char *save = NULL;
+  for (char *token = strtok_r(list, ", ", &save); token != NULL; token = strtok_r(NULL, ", ", &save)) {
+    IPAddress address;
+    if (address.fromString(token) && (uint32_t)address == ip) return true;
+  }
+  return false;
+}
+
+bool webAuthAllowed(uint32_t ip, settingsStruct *heishamonSettings) {
+  if (!heishamonSettings->webLogin) return true;
+  if (webAuthTrusted(ip, heishamonSettings)) return true;
+  for (uint8_t i = 0; i < WEB_SESSIONS; i++) {
+    if (!webSessions[i].used || webSessions[i].ip != ip) continue;
+    if ((unsigned long)(millis() - webSessions[i].seen) >= WEB_SESSION_MS) {
+      webSessions[i].used = false;
+      return false;
+    }
+    webSessions[i].seen = millis();
+    return true;
+  }
+  return false;
+}
+
+// compares without stopping at the first different character, so the time does not tell how much of the password was right
+static bool webAuthEqual(const char *given, size_t length, const char *expected, size_t expectedLength) {
+  uint8_t diff = (length != expectedLength) ? 1 : 0;
+  for (size_t i = 0; i < length; i++) diff |= (uint8_t)given[i] ^ (uint8_t)expected[i % expectedLength];
+  return diff == 0;
+}
+
+bool webAuthLogin(uint32_t ip, const char *password, size_t length, settingsStruct *heishamonSettings) {
+  if (webLoginFails >= WEB_LOGIN_FAILS) {
+    if ((unsigned long)(millis() - webLoginLastFail) < WEB_LOGIN_LOCK_MS) return false; // too many wrong passwords: wait
+    webLoginFails = 0;
+  }
+  const size_t expected = strlen(heishamonSettings->webPassword);
+  if (password == NULL || expected == 0 || !webAuthEqual(password, length, heishamonSettings->webPassword, expected)) {
+    webLoginFails++;
+    webLoginLastFail = millis();
+    return false;
+  }
+  webLoginFails = 0;
+  uint8_t slot = 0;
+  unsigned long oldest = 0;
+  for (uint8_t i = 0; i < WEB_SESSIONS; i++) {
+    if (webSessions[i].used && webSessions[i].ip == ip) { slot = i; break; }
+    const unsigned long age = webSessions[i].used ? (unsigned long)(millis() - webSessions[i].seen) : 0xFFFFFFFFUL;
+    if (age >= oldest) { oldest = age; slot = i; } // a free slot, otherwise the session that was idle longest
+  }
+  webSessions[slot].ip = ip;
+  webSessions[slot].seen = millis();
+  webSessions[slot].used = true;
+  return true;
+}
+
+void webAuthLogout(uint32_t ip) {
+  for (uint8_t i = 0; i < WEB_SESSIONS; i++) {
+    if (webSessions[i].used && webSessions[i].ip == ip) webSessions[i].used = false;
+  }
+}
+
+int handleLogin(struct webserver_t *client, bool failed) {
+  switch (client->content) {
+    case 0: {
+        webserver_send(client, failed ? 403 : 200, (char *)"text/html", 0);
+        webserver_send_content_P(client, webHeader, strlen_P(webHeader));
+        webserver_send_content_P(client, webCSS, strlen_P(webCSS));
+      } break;
+    case 1: {
+        webserver_send_content_P(client, webBodyLogin1, strlen_P(webBodyLogin1));
+        if (failed) webserver_send_content_P(client, webBodyLoginFailed, strlen_P(webBodyLoginFailed));
+        webserver_send_content_P(client, webBodyLogin2, strlen_P(webBodyLogin2));
+        webserver_send_content_P(client, webFooter, strlen_P(webFooter));
+      } break;
+  }
+  return 0;
+}
+
 int handleReboot(struct webserver_t *client) {
   switch (client->content) {
     case 0: {
@@ -498,6 +602,9 @@ void settingsToJson(JsonDocument &jsonDoc, settingsStruct *heishamonSettings) {
   jsonDoc[F("mqtt_username")] = heishamonSettings->mqtt_username;
   jsonDoc[F("mqtt_password")] = heishamonSettings->mqtt_password;
   jsonDoc[F("ntp_servers")] = heishamonSettings->ntp_servers;
+  jsonDoc[F("web_login")] = heishamonSettings->webLogin ? "enabled" : "disabled";
+  jsonDoc[F("web_password")] = heishamonSettings->webPassword;
+  jsonDoc[F("web_trusted")] = heishamonSettings->webTrusted;
   jsonDoc[F("timezone")] = heishamonSettings->timezone;
 #ifdef TLS_SUPPORT
   if (heishamonSettings->mqtt_tls_enabled) {
@@ -715,6 +822,7 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   const char *mqtt_password = NULL;
   const char *new_ota_password = NULL;
   const char *current_ota_password = NULL;
+  const char *new_web_password = NULL;
 
   bool reconnectWiFi = false;
   bool wrongPassword = false;
@@ -725,6 +833,7 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   jsonDoc[F("force_rules")] = String("disabled");
   jsonDoc[F("rules_mqtt_events")] = String("disabled");
   jsonDoc[F("hotspot")] = String("disabled");
+  jsonDoc[F("web_login")] = String("disabled");
   jsonDoc[F("listenonly")] = String("disabled");
   jsonDoc[F("logMqtt")] = String("disabled");
   jsonDoc[F("logHexdump")] = String("disabled");
@@ -802,6 +911,12 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
 #endif      
     } else if (strcmp(tmp->name.c_str(), "ntp_servers") == 0) {
       jsonDoc[F("ntp_servers")] = tmp->value;
+    } else if (strcmp(tmp->name.c_str(), "web_login") == 0) {
+      jsonDoc[F("web_login")] = tmp->value;
+    } else if (strcmp(tmp->name.c_str(), "web_trusted") == 0) {
+      jsonDoc[F("web_trusted")] = tmp->value;
+    } else if (strcmp(tmp->name.c_str(), "new_web_password") == 0) {
+      new_web_password = tmp->value.c_str();
     } else if (strcmp(tmp->name.c_str(), "timezone") == 0) {
       jsonDoc[F("timezone")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "waitTime") == 0) {
@@ -867,6 +982,14 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
     } else {
       wrongPassword = true;
     }
+  }
+  if (new_web_password != NULL && strlen(new_web_password) > 0) {
+    jsonDoc[F("web_password")] = new_web_password;
+  }
+  // a login without a password would lock everybody out: keep it off until a web password is set
+  if (jsonDoc[F("web_login")] == "enabled" && strlen(jsonDoc[F("web_password")] | "") == 0) {
+    jsonDoc[F("web_login")] = String("disabled");
+    log_message(_F("Login not enabled: set a web password first"));
   }
 
   if (wifi_ssid != NULL && strlen(wifi_ssid) > 0) {
@@ -1018,6 +1141,8 @@ int getSettings(struct webserver_t *client, settingsStruct *heishamonSettings) {
         jsonDoc[F("mqtt_password")] = masked_mqtt_password;
         //the update password is never needed by the settings page (it has its own "current" and "new" fields)
         jsonDoc.remove(F("ota_password"));
+        //same for the web password (the page only has a "new" field)
+        jsonDoc.remove(F("web_password"));
 #ifdef TLS_SUPPORT
         jsonDoc[F("mqtt_ca_cert")] = LittleFS.exists("/ca.pem") ? F("CA certificate stored in filesystem") : F("No CA certificate found");
 #endif   
