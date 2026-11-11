@@ -47,6 +47,7 @@
 #include "version.h"
 #ifdef ESP32
 #include "HeishaModbusServer.h"
+#include "TlsSpike.h"
 #endif
 
 DNSServer dnsServer;
@@ -2205,6 +2206,7 @@ void loop() {
   ArduinoOTA.handle();
 
 #ifdef ESP32
+  tlsSpikeLoop(); // throwaway TLS measurement, see TlsSpike.h
   modbusServer.configure(heishamonSettings.modbus, heishamonSettings.optionalPCB, heishamonSettings.modbusWrites, heishamonSettings.listenonly);
   if (heishamonSettings.modbus) modbusServer.loop(heishamonSettings.use_s0, extraDataBlockAvailable);
 #endif
