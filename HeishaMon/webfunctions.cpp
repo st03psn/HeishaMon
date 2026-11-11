@@ -894,7 +894,8 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   if (new_ota_password != NULL && strlen(new_ota_password) > 0 && current_ota_password != NULL && strlen(current_ota_password) > 0) {
     if (strcmp(heishamonSettings->ota_password, current_ota_password) == 0) {
       jsonDoc[F("ota_password")] = new_ota_password;
-    } else {
+    } else if (strcmp(heishamonSettings->ota_password, new_ota_password) != 0) {
+      // the new password is already the stored one when a browser sends the form a second time: no error then
       wrongPassword = true;
     }
   }
