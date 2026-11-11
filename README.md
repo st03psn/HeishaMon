@@ -37,6 +37,8 @@ Updating the firmware is as easy as going to the firmware menu and, after authen
 
 A JSON output of heat pump data and enabled 1-wire/S0 sensors is available at http://heishamon.local/json (replace heishamon.local with the IP address of your HeishaMon device if mDNS is not working). On the ESP32 large board, the two relays are the `relay/one` and `relay/two` entries of the `gpio` list. See [relay control](#large-board-relay-control) for reading and switching those outputs.
 
+By default every device in your network can open the web interface, send commands and upload firmware. To change that, set a new update password in the settings and switch on *Require login*. The web interface and the HTTP interface (`/command`, `/json`, `/gpio`, settings, rules, firmware upload, live log) then ask for the update password. The login is bound to the address of the device you log in from; it ends after 30 minutes without a request or with *Log out* in the menu. Devices that have to reach HeishaMon without a login, for example Home Assistant for firmware updates or a script that calls `/command`, go into *Addresses without login*. This keeps other devices in the network out. It does not protect against a device that can read or redirect your network traffic, because the web interface does not use HTTPS. MQTT is not affected; protect it at the broker. If you lose the password, do a hard factory reset (see below).
+
 To get a single value, add one of these arguments (one per request):
 
 | Argument | Value | Example | Returns |
