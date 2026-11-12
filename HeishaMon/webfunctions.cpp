@@ -573,79 +573,6 @@ bool webOriginHost(const char *value, size_t length, char *host, size_t size) {
   return n > 0;
 }
 
-// The first web password needs somebody at the device. The page saves it as a pending request, and a
-// short press on the boot button takes it over. A press only confirms when exactly one address has asked,
-// so another device in the network can block this but cannot get its own password in.
-// Not needed at first setup (no WiFi configured), the device is in hand then.
-#define WEB_PENDING_MS 300000UL
-#define WEB_DONE_MS 60000UL
-static struct {
-  bool used;
-  bool conflict;
-  uint32_t ip;
-  unsigned long at;
-  char password[40];
-  char trusted[64];
-} webPending;
-static struct {
-  bool used;
-  uint32_t ip;
-  unsigned long at;
-} webDone;
-
-static void webPendingExpire() {
-  if (webPending.used && (unsigned long)(millis() - webPending.at) >= WEB_PENDING_MS) webPending.used = false;
-  if (webDone.used && (unsigned long)(millis() - webDone.at) >= WEB_DONE_MS) webDone.used = false;
-}
-
-bool webFirstPasswordNeedsButton(settingsStruct *heishamonSettings) {
-  return heishamonSettings->webPassword[0] == 0 && heishamonSettings->wifi_ssid[0] != 0;
-}
-
-void webPendingRequest(uint32_t ip, const char *password, const char *trusted) {
-  webPendingExpire();
-  if (webPending.used && webPending.ip != ip) {
-    webPending.conflict = true; // two addresses ask: the button confirms neither
-    return;
-  }
-  if (!webPending.used) {
-    webPending.used = true;
-    webPending.conflict = false;
-    webPending.ip = ip;
-    webPending.at = millis();
-  }
-  strlcpy(webPending.password, password, sizeof(webPending.password));
-  strlcpy(webPending.trusted, trusted == NULL ? "" : trusted, sizeof(webPending.trusted));
-}
-
-// 0: nothing, 1: this address waits for the button, 2: more than one address asked, 3: confirmed for this address
-uint8_t webPendingState(uint32_t ip) {
-  webPendingExpire();
-  if (webPending.used && webPending.conflict) return 2;
-  if (webPending.used && webPending.ip == ip) return 1;
-  if (webDone.used && webDone.ip == ip) return 3;
-  return 0;
-}
-
-// The button was pressed. 0: nothing was pending, 1: taken (password, trusted and ip are filled), 2: conflict, nothing taken
-uint8_t webPendingTake(uint32_t *ip, char *password, size_t passwordSize, char *trusted, size_t trustedSize) {
-  webPendingExpire();
-  if (!webPending.used) return 0;
-  webPending.used = false;
-  if (webPending.conflict) {
-    memset(webPending.password, 0, sizeof(webPending.password));
-    return 2;
-  }
-  *ip = webPending.ip;
-  strlcpy(password, webPending.password, passwordSize);
-  strlcpy(trusted, webPending.trusted, trustedSize);
-  memset(webPending.password, 0, sizeof(webPending.password));
-  webDone.used = true;
-  webDone.ip = webPending.ip;
-  webDone.at = millis();
-  return 1;
-}
-
 int handleLogin(struct webserver_t *client, bool failed) {
   switch (client->content) {
     case 0: {
@@ -673,37 +600,18 @@ int handleSecure(struct webserver_t *client, uint8_t failed) {
         webserver_send_content_P(client, webCSS, strlen_P(webCSS));
       } break;
     case 1: {
-        if (failed == 2) { // waiting for the button; the page reloads itself
-          webserver_send_content_P(client, webBodySecureWait, strlen_P(webBodySecureWait));
-        } else if (failed == 4) {
-          webserver_send_content_P(client, webBodySecureDone, strlen_P(webBodySecureDone));
-        } else {
-          webserver_send_content_P(client, webBodySecure1, strlen_P(webBodySecure1));
-          if (failed == 1) webserver_send_content_P(client, webBodySecureFailed, strlen_P(webBodySecureFailed));
-          if (failed == 3) webserver_send_content_P(client, webBodySecureConflict, strlen_P(webBodySecureConflict));
-          webserver_send_content_P(client, webBodySecure2, strlen_P(webBodySecure2));
-        }
+        webserver_send_content_P(client, webBodySecure1, strlen_P(webBodySecure1));
+        if (failed == 1) webserver_send_content_P(client, webBodySecureFailed, strlen_P(webBodySecureFailed));
+        webserver_send_content_P(client, webBodySecure2, strlen_P(webBodySecure2));
         webserver_send_content_P(client, webFooter, strlen_P(webFooter));
       } break;
   }
   return 0;
 }
 
-// Switches the login on with this password and logs the address in that asked for it.
-static void webLoginApply(uint32_t ip, const char *password, const char *trusted, settingsStruct *heishamonSettings) {
-  strlcpy(heishamonSettings->webPassword, password, sizeof(heishamonSettings->webPassword));
-  if (trusted != NULL && trusted[0] != 0) strlcpy(heishamonSettings->webTrusted, trusted, sizeof(heishamonSettings->webTrusted));
-  heishamonSettings->webLogin = true;
-  JsonDocument jsonDoc;
-  settingsToJson(jsonDoc, heishamonSettings);
-  saveJsonToFile(jsonDoc, "/config.json");
-  log_message(_F("Web login switched on"));
-  webAuthLogin(ip, password, strlen(password), heishamonSettings);
-}
-
 // Saves what the page above posted (collected by cacheSettings). Only the login settings are touched.
-// Returns 0 when saved (the browser is logged in right away), 1 when the two entries differ,
-// 2 when it now waits for the button on the device (first web password).
+// The browser that set the password is logged in right away.
+// Returns 0 when saved, 1 when the two entries differ.
 uint8_t saveWebLogin(struct webserver_t *client, uint32_t ip, settingsStruct *heishamonSettings) {
   String password, repeat, trusted;
   bool hasRepeat = false;
@@ -723,30 +631,15 @@ uint8_t saveWebLogin(struct webserver_t *client, uint32_t ip, settingsStruct *he
   if (password.length() == 0 || password.length() >= sizeof(heishamonSettings->webPassword) || !hasRepeat || password != repeat) {
     return 1;
   }
-  if (webFirstPasswordNeedsButton(heishamonSettings)) {
-    webPendingRequest(ip, password.c_str(), trusted.c_str());
-    log_message(_F("Web password waits for the boot button on the device"));
-    return 2;
-  }
-  webLoginApply(ip, password.c_str(), trusted.c_str(), heishamonSettings);
+  strlcpy(heishamonSettings->webPassword, password.c_str(), sizeof(heishamonSettings->webPassword));
+  if (trusted.length() > 0) strlcpy(heishamonSettings->webTrusted, trusted.c_str(), sizeof(heishamonSettings->webTrusted));
+  heishamonSettings->webLogin = true;
+  JsonDocument jsonDoc;
+  settingsToJson(jsonDoc, heishamonSettings);
+  saveJsonToFile(jsonDoc, "/config.json");
+  log_message(_F("Web login switched on"));
+  webAuthLogin(ip, password.c_str(), password.length(), heishamonSettings);
   return 0;
-}
-
-// The boot button was pressed briefly: take over the pending first web password, if exactly one address asked.
-void webFirstPasswordButton(settingsStruct *heishamonSettings) {
-  uint32_t ip = 0;
-  char password[sizeof(heishamonSettings->webPassword)];
-  char trusted[sizeof(heishamonSettings->webTrusted)];
-  switch (webPendingTake(&ip, password, sizeof(password), trusted, sizeof(trusted))) {
-    case 1: {
-        if (heishamonSettings->webPassword[0] == 0) webLoginApply(ip, password, trusted, heishamonSettings);
-        memset(password, 0, sizeof(password));
-      } break;
-    case 2: {
-        log_message(_F("Boot button: more than one device asked to set the web password, nothing set"));
-      } break;
-    default: break;
-  }
 }
 
 int handleReboot(struct webserver_t *client) {
@@ -1008,7 +901,6 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
 
   bool reconnectWiFi = false;
   bool wrongPassword = false;
-  bool waitForButton = false;
   JsonDocument jsonDoc;
 
   settingsToJson(jsonDoc, heishamonSettings); //stores current settings in a json document
@@ -1170,18 +1062,10 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   }
   if (new_web_password != NULL && strlen(new_web_password) > 0) {
     // the page checks this too; a typo here would lock the user out
-    if (repeat_web_password == NULL || strcmp(new_web_password, repeat_web_password) != 0) {
-      log_message(_F("Web password not changed: the two entries are not the same"));
-    } else if (webFirstPasswordNeedsButton(heishamonSettings)) {
-      // first web password: keep it pending until the boot button confirms it (the login stays off until then)
-      if (jsonDoc[F("web_login")] == "enabled" && strlen(new_web_password) < sizeof(heishamonSettings->webPassword)) {
-        const uint32_t remote = (client->client != NULL) ? (uint32_t)client->client->remoteIP() : 0;
-        webPendingRequest(remote, new_web_password, NULL);
-        waitForButton = true;
-        log_message(_F("Web password waits for the boot button on the device"));
-      }
-    } else {
+    if (repeat_web_password != NULL && strcmp(new_web_password, repeat_web_password) == 0) {
       jsonDoc[F("web_password")] = new_web_password;
+    } else {
+      log_message(_F("Web password not changed: the two entries are not the same"));
     }
   }
   if (jsonDoc[F("web_login")] != "enabled") {
@@ -1190,7 +1074,7 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   } else if (strlen(jsonDoc[F("web_password")] | "") == 0) {
     // a login without a password would lock everybody out: keep it off until a web password is set
     jsonDoc[F("web_login")] = String("disabled");
-    if (!waitForButton) log_message(_F("Login not enabled: set a web password first"));
+    log_message(_F("Login not enabled: set a web password first"));
   }
 
   if (wifi_ssid != NULL && strlen(wifi_ssid) > 0) {
@@ -1226,7 +1110,7 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
     return 0;
   }
 
-  client->route = waitForButton ? 227 : 113;
+  client->route = 113;
   return 0;
 }
 

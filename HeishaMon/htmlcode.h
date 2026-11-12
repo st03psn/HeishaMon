@@ -1631,7 +1631,7 @@ static const char settingsForm1[] FLASHPROG = R"====(
       <label class='setting-label'>New web password</label>
       <div style='display:flex;align-items:center;gap:10px'>
         <input type='password' name='new_web_password' maxlength='39' class='setting-input' value='' autocomplete='new-password'>
-        <span class='setting-hint'>needed when the login is switched on; later leave empty to keep it. Not the update password. The first one is confirmed with a short press on the boot button of the board after saving</span>
+        <span class='setting-hint'>needed when the login is switched on; later leave empty to keep it. Not the update password</span>
       </div>
     </div>
     <div class='setting-row'>
@@ -2619,36 +2619,11 @@ static const char webBodySecure1[] FLASHPROG = R"====(
 <div class='msg-box'>
   <h2>Secure this device</h2>
   <p>Without a login every device in your network can open this web interface, send commands to the heat pump and upload firmware.<br><br>
-  Set a web password here to switch the login on. Nothing changes until you save.<br><br>
-  The first web password needs somebody at the device: after saving, press the boot button on the HeishaMon board briefly within 5 minutes to confirm it. This is not needed at first setup.</p>
+  Set a web password here to switch the login on. Nothing changes until you save.</p>
 )====";
 
 static const char webBodySecureFailed[] FLASHPROG = R"====(
   <p style='color:var(--red)'>Not saved: enter the same web password twice.</p>
-)====";
-
-static const char webBodySecureConflict[] FLASHPROG = R"====(
-  <p style='color:var(--red)'>More than one device is asking to set the web password, so the button confirms none of them. Wait 5 minutes and try again; if it keeps happening, another device in your network is doing this.</p>
-)====";
-
-static const char webBodySecureWait[] FLASHPROG = R"====(
-<meta http-equiv='refresh' content='4;url=/secure'>
-</head>
-<body>
-<div class='msg-box'>
-  <h2>Press the button on the device</h2>
-  <p>The web password is not active yet.<br><br>
-  Press the boot button on the HeishaMon board briefly within 5 minutes to confirm it. This page checks every few seconds.</p>
-</div>
-)====";
-
-static const char webBodySecureDone[] FLASHPROG = R"====(
-</head>
-<body>
-<div class='msg-box success'>
-  <h2>Web login is on</h2>
-  <p>The web password is set and this browser is logged in.<br><br><a href='/settings'>Continue to the settings</a></p>
-</div>
 )====";
 
 static const char webBodySecure2[] FLASHPROG = R"====(
