@@ -1601,6 +1601,9 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                 case 113: {
                     webserver_send(client, 301, (char *)"text/plain", 0);
                   } break;
+                case 227: {
+                    webserver_send(client, 303, (char *)"text/plain", 0);
+                  } break;
               }
               return 0;
             } break;
@@ -1635,25 +1638,24 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               }
               return 0;
             } break;
-          case 220: {
-              return handleSecure(client, 0);
+          case 220: { // 0: form, 2: waiting for the button, 3: conflict, 4: confirmed
+              const uint32_t remote = (client->client != NULL) ? (uint32_t)client->client->remoteIP() : 0;
+              const uint8_t state = webPendingState(remote);
+              return handleSecure(client, state == 0 ? 0 : state + 1);
             } break;
           case 221: {
               const uint32_t remote = (client->client != NULL) ? (uint32_t)client->client->remoteIP() : 0;
               const uint8_t failed = saveWebLogin(client, remote, &heishamonSettings);
-              if (failed == 0) {
-                client->route = 222;
-                webserver_send(client, 303, (char *)"text/plain", 0);
-                return -1;
+              if (failed == 1) {
+                client->route = 223;
+                return handleSecure(client, 1);
               }
-              client->route = 222 + failed; // 223: entries differ, 224: button first
-              return handleSecure(client, failed);
+              client->route = (failed == 0) ? 222 : 227; // 227: back to /secure, which shows the waiting page
+              webserver_send(client, 303, (char *)"text/plain", 0);
+              return -1;
             } break;
           case 223: {
               return handleSecure(client, 1);
-            } break;
-          case 224: {
-              return handleSecure(client, 2);
             } break;
           case 212: {
               return handleLogin(client, false);
@@ -1788,6 +1790,10 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 214: { // logged in; the cookie is only a hint for the menu (log out link)
               header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /\r\nSet-Cookie: hmlogin=1; Path=/\r\n"));
+              return -1;
+            } break;
+          case 227: { // first web password waits for the button
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /secure"));
               return -1;
             } break;
           case 222: { // web password saved and logged in
@@ -2312,10 +2318,9 @@ void readHeatpump() {
 void checkBootButton() {
   static bool bootButtonWasPressed = false;
   if (digitalRead(BOOTPIN)) { //true = 1, not pressed
-    // released after a short press: allow setting the first web password for a few minutes
+    // released after a short press: confirms a first web password that is waiting for it
     if (bootButtonWasPressed && (unsigned long)(millis() - bootButtonNotPressed) >= 50) {
-      webFirstPasswordButton();
-      log_message(_F("Boot button pressed: the first web password can be set for 5 minutes"));
+      webFirstPasswordButton(&heishamonSettings);
     }
     bootButtonWasPressed = false;
     bootButtonNotPressed = millis();

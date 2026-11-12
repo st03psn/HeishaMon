@@ -106,15 +106,36 @@ int main() {
   assert(!webOriginHost("http://", 7, host, sizeof(host)));
   assert(!webOriginHost("http://a-very-long-host-name-that-does-not-fit.example", 53, host, sizeof(host)));
 
-  // first web password: allowed at first setup, otherwise only for five minutes after the button
-  assert(webFirstPasswordAllowed(&s));               // no WiFi configured
-  strcpy(s.wifi_ssid, "home");
-  assert(!webFirstPasswordAllowed(&s));
-  webFirstPasswordButton();
-  assert(webFirstPasswordAllowed(&s));
-  fake_millis += 299999; assert(webFirstPasswordAllowed(&s));
-  fake_millis += 1; assert(!webFirstPasswordAllowed(&s));
-  assert(!webFirstPasswordAllowed(&s));
+  // first web password: no button at first setup, otherwise the button confirms a pending request
+  {
+    settingsStruct f;
+    assert(!webFirstPasswordNeedsButton(&f));          // no WiFi configured
+    strcpy(f.wifi_ssid, "home");
+    assert(webFirstPasswordNeedsButton(&f));
+    strcpy(f.webPassword, "x");
+    assert(!webFirstPasswordNeedsButton(&f));          // not the first password any more
+    uint32_t who = 0; char pw[40], tr[64];
+    assert(webPendingTake(&who, pw, sizeof(pw), tr, sizeof(tr)) == 0);      // button without a request
+    webPendingRequest(a, "first-pw", "192.168.1.10");
+    assert(webPendingState(a) == 1 && webPendingState(b) == 0);
+    webPendingRequest(a, "second-pw", NULL);                               // same address: replaces it
+    assert(webPendingTake(&who, pw, sizeof(pw), tr, sizeof(tr)) == 1);
+    assert(who == a && strcmp(pw, "second-pw") == 0 && tr[0] == 0);
+    assert(webPendingState(a) == 3 && webPendingState(b) == 0);             // confirmed, shown for a minute
+    fake_millis += 60000; assert(webPendingState(a) == 0);
+    assert(webPendingTake(&who, pw, sizeof(pw), tr, sizeof(tr)) == 0);      // a second press does nothing
+    // two addresses ask: the button confirms neither, whoever asked first
+    webPendingRequest(b, "attacker", NULL);
+    webPendingRequest(a, "owner", NULL);
+    assert(webPendingState(a) == 2 && webPendingState(b) == 2);
+    assert(webPendingTake(&who, pw, sizeof(pw), tr, sizeof(tr)) == 2);
+    assert(webPendingState(a) == 0);
+    // a request that nobody confirms ends after five minutes
+    webPendingRequest(a, "owner", NULL);
+    fake_millis += 299999; assert(webPendingState(a) == 1);
+    fake_millis += 1; assert(webPendingState(a) == 0);
+    assert(webPendingTake(&who, pw, sizeof(pw), tr, sizeof(tr)) == 0);
+  }
 
   // millis() wraps: a session survives the wrap
   fake_millis = 0xFFFFFF00u;
