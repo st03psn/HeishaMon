@@ -1575,7 +1575,7 @@ static const char settingsForm1[] FLASHPROG = R"====(
   <div class='spinner'></div> Loading settings…
 </div>
 <div id='settings_form' style='display:none'>
-  <form accept-charset='UTF-8' action='/savesettings' method='POST'>
+  <form accept-charset='UTF-8' action='/savesettings' method='POST' onsubmit="if(this.new_web_password.value!=this.repeat_web_password.value){alert('The two web passwords are not the same.');return false;}return true;">
   <div class='panel' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Network</h3></div>
   <div class='settings-grid'>
@@ -1632,6 +1632,10 @@ static const char settingsForm1[] FLASHPROG = R"====(
         <input type='password' name='new_web_password' maxlength='39' class='setting-input' value='' autocomplete='new-password'>
         <span class='setting-hint'>leave empty to keep the current one; not the update password</span>
       </div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Repeat web password</label>
+      <input type='password' name='repeat_web_password' maxlength='39' class='setting-input' value='' autocomplete='new-password'>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Addresses without login</label>

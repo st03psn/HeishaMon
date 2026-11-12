@@ -823,6 +823,7 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   const char *new_ota_password = NULL;
   const char *current_ota_password = NULL;
   const char *new_web_password = NULL;
+  const char *repeat_web_password = NULL;
 
   bool reconnectWiFi = false;
   bool wrongPassword = false;
@@ -917,6 +918,8 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
       jsonDoc[F("web_trusted")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "new_web_password") == 0) {
       new_web_password = tmp->value.c_str();
+    } else if (strcmp(tmp->name.c_str(), "repeat_web_password") == 0) {
+      repeat_web_password = tmp->value.c_str();
     } else if (strcmp(tmp->name.c_str(), "timezone") == 0) {
       jsonDoc[F("timezone")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "waitTime") == 0) {
@@ -984,7 +987,12 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
     }
   }
   if (new_web_password != NULL && strlen(new_web_password) > 0) {
-    jsonDoc[F("web_password")] = new_web_password;
+    // the page checks this too; a typo here would lock the user out
+    if (repeat_web_password != NULL && strcmp(new_web_password, repeat_web_password) == 0) {
+      jsonDoc[F("web_password")] = new_web_password;
+    } else {
+      log_message(_F("Web password not changed: the two entries are not the same"));
+    }
   }
   // a login without a password would lock everybody out: keep it off until a web password is set
   if (jsonDoc[F("web_login")] == "enabled" && strlen(jsonDoc[F("web_password")] | "") == 0) {
