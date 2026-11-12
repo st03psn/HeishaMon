@@ -1623,15 +1623,15 @@ static const char settingsForm1[] FLASHPROG = R"====(
     <div class='setting-row'>
       <label class='setting-label'>Require login</label>
       <div style='display:flex;align-items:center;gap:10px'>
-        <div class='checkbox-wrap'><input type='checkbox' name='web_login' value='enabled'></div>
-        <span class='setting-hint'>web interface and HTTP API ask for the web password; set one first</span>
+        <div class='checkbox-wrap'><input type='checkbox' name='web_login' value='enabled' onchange='webLoginFields()'></div>
+        <span class='setting-hint'>web interface and HTTP API ask for the web password; switching it off removes the web password</span>
       </div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>New web password</label>
       <div style='display:flex;align-items:center;gap:10px'>
         <input type='password' name='new_web_password' maxlength='39' class='setting-input' value='' autocomplete='new-password'>
-        <span class='setting-hint'>leave empty to keep the current one; not the update password</span>
+        <span class='setting-hint'>needed when the login is switched on; later leave empty to keep it. Not the update password</span>
       </div>
     </div>
     <div class='setting-row'>
@@ -2012,11 +2012,26 @@ R"====(
       document.getElementById('loading_settings').style.display='none';
       document.getElementById('settings_form').style.display='block';
       changeMinWatt(1);changeMinWatt(2);
+      webLoginFields(j.web_password_set);
     }
   };
   req.open('GET','/getsettings',true);
   req.send();
 };
+// the web password fields are only usable while "Require login" is ticked, and required when no password is stored yet
+var webPasswordSet=false;
+function webLoginFields(isSet){
+  if(isSet!==undefined)webPasswordSet=!!isSet;
+  var on=document.getElementsByName('web_login')[0].checked;
+  ['new_web_password','repeat_web_password'].forEach(function(n){
+    var e=document.getElementsByName(n)[0];
+    e.disabled=!on;
+    e.required=on&&!webPasswordSet;
+    e.style.opacity=on?'':'0.45';
+    e.style.borderColor=(on&&!webPasswordSet)?'var(--accent)':'';
+    if(!on)e.value='';
+  });
+}
 getSettings();
 </script>
 )====";

@@ -262,7 +262,7 @@ void loadSettings(settingsStruct *heishamonSettings) {
           heishamonSettings->hotspot = ( jsonDoc[F("hotspot")] == "disabled" ) ? false : true; //default to true if not found in settings
           heishamonSettings->listenonly = ( jsonDoc[F("listenonly")] == "enabled" ) ? true : false;
           heishamonSettings->webLogin = ( jsonDoc[F("web_login")] == "enabled" ) ? true : false;
-          if ( jsonDoc[F("web_password")] ) strlcpy(heishamonSettings->webPassword, jsonDoc[F("web_password")], sizeof(heishamonSettings->webPassword));
+          strlcpy(heishamonSettings->webPassword, jsonDoc[F("web_password")] | "", sizeof(heishamonSettings->webPassword));
           if ( jsonDoc[F("web_trusted")] ) strlcpy(heishamonSettings->webTrusted, jsonDoc[F("web_trusted")], sizeof(heishamonSettings->webTrusted));
           heishamonSettings->logMqtt = ( jsonDoc[F("logMqtt")] == "enabled" ) ? true : false;
           heishamonSettings->logHexdump = ( jsonDoc[F("logHexdump")] == "enabled" ) ? true : false;
@@ -1045,8 +1045,11 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
       log_message(_F("Web password not changed: the two entries are not the same"));
     }
   }
-  // a login without a password would lock everybody out: keep it off until a web password is set
-  if (jsonDoc[F("web_login")] == "enabled" && strlen(jsonDoc[F("web_password")] | "") == 0) {
+  if (jsonDoc[F("web_login")] != "enabled") {
+    // switching the login off removes the web password; switching it on again asks for a new one
+    jsonDoc[F("web_password")] = "";
+  } else if (strlen(jsonDoc[F("web_password")] | "") == 0) {
+    // a login without a password would lock everybody out: keep it off until a web password is set
     jsonDoc[F("web_login")] = String("disabled");
     log_message(_F("Login not enabled: set a web password first"));
   }
@@ -1200,8 +1203,9 @@ int getSettings(struct webserver_t *client, settingsStruct *heishamonSettings) {
         jsonDoc[F("mqtt_password")] = masked_mqtt_password;
         //the update password is never needed by the settings page (it has its own "current" and "new" fields)
         jsonDoc.remove(F("ota_password"));
-        //same for the web password (the page only has a "new" field)
+        //same for the web password (the page only has a "new" field); the page only needs to know whether one is set
         jsonDoc.remove(F("web_password"));
+        jsonDoc[F("web_password_set")] = (heishamonSettings->webPassword[0] != 0);
 #ifdef TLS_SUPPORT
         jsonDoc[F("mqtt_ca_cert")] = LittleFS.exists("/ca.pem") ? F("CA certificate stored in filesystem") : F("No CA certificate found");
 #endif   
