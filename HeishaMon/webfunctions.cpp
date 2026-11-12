@@ -551,6 +551,45 @@ void webAuthLogout(uint32_t ip) {
   }
 }
 
+// Takes the host out of an Origin header ("http://heishamon.local:80" -> "heishamon.local"), in lower case.
+// false when there is none, for example "null".
+bool webOriginHost(const char *value, size_t length, char *host, size_t size) {
+  size_t start = 0;
+  for (size_t i = 0; i + 2 < length; i++) {
+    if (value[i] == ':' && value[i + 1] == '/' && value[i + 2] == '/') {
+      start = i + 3;
+      break;
+    }
+  }
+  if (start == 0 || size == 0) return false;
+  size_t n = 0;
+  for (size_t i = start; i < length && value[i] != ':' && value[i] != '/' && value[i] != ' '; i++) {
+    if (n + 1 >= size) return false;
+    char c = value[i];
+    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    host[n++] = c;
+  }
+  host[n] = 0;
+  return n > 0;
+}
+
+// The first web password needs somebody at the device: a short press on the boot button opens a window
+// of WEB_FIRST_PASSWORD_MS. Not needed at first setup (no WiFi configured), the device is in hand then.
+#define WEB_FIRST_PASSWORD_MS 300000UL
+static bool webButtonPressed = false;
+static unsigned long webButtonAt = 0;
+
+void webFirstPasswordButton() {
+  webButtonPressed = true;
+  webButtonAt = millis();
+}
+
+bool webFirstPasswordAllowed(settingsStruct *heishamonSettings) {
+  if (heishamonSettings->wifi_ssid[0] == 0) return true;
+  if (webButtonPressed && (unsigned long)(millis() - webButtonAt) >= WEB_FIRST_PASSWORD_MS) webButtonPressed = false;
+  return webButtonPressed;
+}
+
 int handleLogin(struct webserver_t *client, bool failed) {
   switch (client->content) {
     case 0: {
@@ -570,7 +609,7 @@ int handleLogin(struct webserver_t *client, bool failed) {
 
 // The page "Secure this device": sets the web password (asked twice) and switches the login on in one
 // step. Offered in the menu and at first setup; nothing changes until it is saved.
-int handleSecure(struct webserver_t *client, bool failed) {
+int handleSecure(struct webserver_t *client, uint8_t failed) {
   switch (client->content) {
     case 0: {
         webserver_send(client, 200, (char *)"text/html", 0);
@@ -579,7 +618,8 @@ int handleSecure(struct webserver_t *client, bool failed) {
       } break;
     case 1: {
         webserver_send_content_P(client, webBodySecure1, strlen_P(webBodySecure1));
-        if (failed) webserver_send_content_P(client, webBodySecureFailed, strlen_P(webBodySecureFailed));
+        if (failed == 1) webserver_send_content_P(client, webBodySecureFailed, strlen_P(webBodySecureFailed));
+        if (failed == 2) webserver_send_content_P(client, webBodySecureButton, strlen_P(webBodySecureButton));
         webserver_send_content_P(client, webBodySecure2, strlen_P(webBodySecure2));
         webserver_send_content_P(client, webFooter, strlen_P(webFooter));
       } break;
@@ -589,7 +629,8 @@ int handleSecure(struct webserver_t *client, bool failed) {
 
 // Saves what the page above posted (collected by cacheSettings). Only the login settings are touched.
 // The browser that set the password is logged in right away.
-bool saveWebLogin(struct webserver_t *client, uint32_t ip, settingsStruct *heishamonSettings) {
+// Returns 0 when saved, 1 when the two entries differ, 2 when the button on the device has to be pressed first.
+uint8_t saveWebLogin(struct webserver_t *client, uint32_t ip, settingsStruct *heishamonSettings) {
   String password, repeat, trusted;
   bool hasRepeat = false;
   while (client->userdata) {
@@ -606,8 +647,13 @@ bool saveWebLogin(struct webserver_t *client, uint32_t ip, settingsStruct *heish
     delete tmp;
   }
   if (password.length() == 0 || password.length() >= sizeof(heishamonSettings->webPassword) || !hasRepeat || password != repeat) {
-    return false;
+    return 1;
   }
+  if (heishamonSettings->webPassword[0] == 0 && !webFirstPasswordAllowed(heishamonSettings)) {
+    log_message(_F("Web password not set: press the boot button on the device first"));
+    return 2;
+  }
+  webButtonPressed = false;
   strlcpy(heishamonSettings->webPassword, password.c_str(), sizeof(heishamonSettings->webPassword));
   if (trusted.length() > 0) strlcpy(heishamonSettings->webTrusted, trusted.c_str(), sizeof(heishamonSettings->webTrusted));
   heishamonSettings->webLogin = true;
@@ -616,7 +662,7 @@ bool saveWebLogin(struct webserver_t *client, uint32_t ip, settingsStruct *heish
   saveJsonToFile(jsonDoc, "/config.json");
   log_message(_F("Web login switched on"));
   webAuthLogin(ip, password.c_str(), password.length(), heishamonSettings);
-  return true;
+  return 0;
 }
 
 int handleReboot(struct webserver_t *client) {
@@ -1039,8 +1085,11 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   }
   if (new_web_password != NULL && strlen(new_web_password) > 0) {
     // the page checks this too; a typo here would lock the user out
-    if (repeat_web_password != NULL && strcmp(new_web_password, repeat_web_password) == 0) {
+    if (heishamonSettings->webPassword[0] == 0 && !webFirstPasswordAllowed(heishamonSettings)) {
+      log_message(_F("Web password not set: press the boot button on the device first"));
+    } else if (repeat_web_password != NULL && strcmp(new_web_password, repeat_web_password) == 0) {
       jsonDoc[F("web_password")] = new_web_password;
+      webButtonPressed = false;
     } else {
       log_message(_F("Web password not changed: the two entries are not the same"));
     }

@@ -30,6 +30,7 @@ struct IPAddress {
   operator uint32_t() const { return value; }
 };
 struct settingsStruct {
+  char wifi_ssid[33] = "";
   char webPassword[40] = "";
   bool webLogin = false;
   char webTrusted[64] = "";
@@ -95,6 +96,25 @@ int main() {
   assert(webAuthLogin(200, "secret-1", 8, &s));
   assert(webAuthAllowed(200, &s) && webAuthAllowed(100, &s) && !webAuthAllowed(101, &s));
   assert(webAuthAllowed(102, &s) && webAuthAllowed(103, &s));
+
+  // host of an Origin header
+  char host[32];
+  assert(webOriginHost("http://HeishaMon.local", 22, host, sizeof(host)) && strcmp(host, "heishamon.local") == 0);
+  assert(webOriginHost("http://192.168.1.50:80", 22, host, sizeof(host)) && strcmp(host, "192.168.1.50") == 0);
+  assert(webOriginHost("https://evil.example/x", 22, host, sizeof(host)) && strcmp(host, "evil.example") == 0);
+  assert(!webOriginHost("null", 4, host, sizeof(host)));
+  assert(!webOriginHost("http://", 7, host, sizeof(host)));
+  assert(!webOriginHost("http://a-very-long-host-name-that-does-not-fit.example", 53, host, sizeof(host)));
+
+  // first web password: allowed at first setup, otherwise only for five minutes after the button
+  assert(webFirstPasswordAllowed(&s));               // no WiFi configured
+  strcpy(s.wifi_ssid, "home");
+  assert(!webFirstPasswordAllowed(&s));
+  webFirstPasswordButton();
+  assert(webFirstPasswordAllowed(&s));
+  fake_millis += 299999; assert(webFirstPasswordAllowed(&s));
+  fake_millis += 1; assert(!webFirstPasswordAllowed(&s));
+  assert(!webFirstPasswordAllowed(&s));
 
   // millis() wraps: a session survives the wrap
   fake_millis = 0xFFFFFF00u;

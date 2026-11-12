@@ -1463,6 +1463,29 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
       } break;
     case WEBSERVER_CLIENT_HEADER: {
         struct arguments_t *args = (struct arguments_t *)dat;
+        // Saving settings must come from a page of this device. A browser sends "Origin" with a form post,
+        // so a foreign web page is recognised and refused; scripts send no Origin and are not affected.
+        if ((client->route == 110 || client->route == 221) && args->value != NULL && strcasecmp((char *)args->name, "Origin") == 0) {
+          char host[64];
+          bool own = webOriginHost((char *)args->value, args->len, host, sizeof(host));
+          if (own && strcmp(host, "0.0.0.0") == 0) own = false; // an interface that is down
+          if (own) {
+            own = (strcasecmp(host, heishamonSettings.wifi_hostname) == 0) ||
+                  (strcmp(host, WiFi.localIP().toString().c_str()) == 0) ||
+                  (strcmp(host, WiFi.softAPIP().toString().c_str()) == 0);
+            if (!own) {
+              const size_t n = strlen(heishamonSettings.wifi_hostname);
+              own = (strncasecmp(host, heishamonSettings.wifi_hostname, n) == 0) && (strcmp(host + n, ".local") == 0);
+            }
+#ifdef ESP32
+            if (!own) own = (strcmp(host, ETH.localIP().toString().c_str()) == 0);
+#endif
+          }
+          if (!own) {
+            log_message(_F("Refused: request to save settings came from another web site"));
+            client->route = 225;
+          }
+        }
         return 0;
       } break;
     case WEBSERVER_CLIENT_WRITE: {
@@ -1604,21 +1627,33 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               webserver_send(client, 303, (char *)"text/plain", 0); // not cached by browsers, unlike 301
               return -1;
             } break;
+          case 225: {
+              if (client->content == 0) {
+                static const char refused[] PROGMEM = "Refused: open the web interface by its IP address or by its hostname (also with .local) to save settings";
+                webserver_send(client, 403, (char *)"text/plain", strlen_P(refused));
+                webserver_send_content_P(client, refused, strlen_P(refused));
+              }
+              return 0;
+            } break;
           case 220: {
-              return handleSecure(client, false);
+              return handleSecure(client, 0);
             } break;
           case 221: {
               const uint32_t remote = (client->client != NULL) ? (uint32_t)client->client->remoteIP() : 0;
-              if (saveWebLogin(client, remote, &heishamonSettings)) {
+              const uint8_t failed = saveWebLogin(client, remote, &heishamonSettings);
+              if (failed == 0) {
                 client->route = 222;
                 webserver_send(client, 303, (char *)"text/plain", 0);
                 return -1;
               }
-              client->route = 223;
-              return handleSecure(client, true);
+              client->route = 222 + failed; // 223: entries differ, 224: button first
+              return handleSecure(client, failed);
             } break;
           case 223: {
-              return handleSecure(client, true);
+              return handleSecure(client, 1);
+            } break;
+          case 224: {
+              return handleSecure(client, 2);
             } break;
           case 212: {
               return handleLogin(client, false);
@@ -2275,9 +2310,17 @@ void readHeatpump() {
 }
 
 void checkBootButton() {
+  static bool bootButtonWasPressed = false;
   if (digitalRead(BOOTPIN)) { //true = 1, not pressed
+    // released after a short press: allow setting the first web password for a few minutes
+    if (bootButtonWasPressed && (unsigned long)(millis() - bootButtonNotPressed) >= 50) {
+      webFirstPasswordButton();
+      log_message(_F("Boot button pressed: the first web password can be set for 5 minutes"));
+    }
+    bootButtonWasPressed = false;
     bootButtonNotPressed = millis();
   } else {
+      bootButtonWasPressed = true;
       if ((unsigned long)(millis() - bootButtonNotPressed) > 10000) {
         //initiate factory reset
         factoryReset();

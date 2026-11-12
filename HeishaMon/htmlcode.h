@@ -1631,7 +1631,7 @@ static const char settingsForm1[] FLASHPROG = R"====(
       <label class='setting-label'>New web password</label>
       <div style='display:flex;align-items:center;gap:10px'>
         <input type='password' name='new_web_password' maxlength='39' class='setting-input' value='' autocomplete='new-password'>
-        <span class='setting-hint'>needed when the login is switched on; later leave empty to keep it. Not the update password</span>
+        <span class='setting-hint'>needed when the login is switched on; later leave empty to keep it. Not the update password. The first one needs a short press on the boot button of the board, then save within 5 minutes</span>
       </div>
     </div>
     <div class='setting-row'>
@@ -2619,11 +2619,16 @@ static const char webBodySecure1[] FLASHPROG = R"====(
 <div class='msg-box'>
   <h2>Secure this device</h2>
   <p>Without a login every device in your network can open this web interface, send commands to the heat pump and upload firmware.<br><br>
-  Set a web password here to switch the login on. Nothing changes until you save.</p>
+  Set a web password here to switch the login on. Nothing changes until you save.<br><br>
+  The first web password needs somebody at the device: press the boot button on the HeishaMon board briefly, then save within 5 minutes. This is not needed at first setup.</p>
 )====";
 
 static const char webBodySecureFailed[] FLASHPROG = R"====(
   <p style='color:var(--red)'>Not saved: enter the same web password twice.</p>
+)====";
+
+static const char webBodySecureButton[] FLASHPROG = R"====(
+  <p style='color:var(--red)'>Not saved: press the boot button on the HeishaMon board briefly, then save again within 5 minutes.</p>
 )====";
 
 static const char webBodySecure2[] FLASHPROG = R"====(
