@@ -568,6 +568,57 @@ int handleLogin(struct webserver_t *client, bool failed) {
   return 0;
 }
 
+// The page "Secure this device": sets the web password (asked twice) and switches the login on in one
+// step. Offered in the menu and at first setup; nothing changes until it is saved.
+int handleSecure(struct webserver_t *client, bool failed) {
+  switch (client->content) {
+    case 0: {
+        webserver_send(client, 200, (char *)"text/html", 0);
+        webserver_send_content_P(client, webHeader, strlen_P(webHeader));
+        webserver_send_content_P(client, webCSS, strlen_P(webCSS));
+      } break;
+    case 1: {
+        webserver_send_content_P(client, webBodySecure1, strlen_P(webBodySecure1));
+        if (failed) webserver_send_content_P(client, webBodySecureFailed, strlen_P(webBodySecureFailed));
+        webserver_send_content_P(client, webBodySecure2, strlen_P(webBodySecure2));
+        webserver_send_content_P(client, webFooter, strlen_P(webFooter));
+      } break;
+  }
+  return 0;
+}
+
+// Saves what the page above posted (collected by cacheSettings). Only the login settings are touched.
+// The browser that set the password is logged in right away.
+bool saveWebLogin(struct webserver_t *client, uint32_t ip, settingsStruct *heishamonSettings) {
+  String password, repeat, trusted;
+  bool hasRepeat = false;
+  while (client->userdata) {
+    struct websettings_t *tmp = (struct websettings_t *)client->userdata;
+    client->userdata = tmp->next;
+    if (strcmp(tmp->name.c_str(), "new_web_password") == 0) {
+      password = tmp->value;
+    } else if (strcmp(tmp->name.c_str(), "repeat_web_password") == 0) {
+      repeat = tmp->value;
+      hasRepeat = true;
+    } else if (strcmp(tmp->name.c_str(), "web_trusted") == 0) {
+      trusted = tmp->value;
+    }
+    delete tmp;
+  }
+  if (password.length() == 0 || password.length() >= sizeof(heishamonSettings->webPassword) || !hasRepeat || password != repeat) {
+    return false;
+  }
+  strlcpy(heishamonSettings->webPassword, password.c_str(), sizeof(heishamonSettings->webPassword));
+  if (trusted.length() > 0) strlcpy(heishamonSettings->webTrusted, trusted.c_str(), sizeof(heishamonSettings->webTrusted));
+  heishamonSettings->webLogin = true;
+  JsonDocument jsonDoc;
+  settingsToJson(jsonDoc, heishamonSettings);
+  saveJsonToFile(jsonDoc, "/config.json");
+  log_message(_F("Web login switched on"));
+  webAuthLogin(ip, password.c_str(), password.length(), heishamonSettings);
+  return true;
+}
+
 int handleReboot(struct webserver_t *client) {
   switch (client->content) {
     case 0: {

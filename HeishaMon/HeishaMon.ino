@@ -1168,11 +1168,13 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           if (strcmp_P((char *)dat, PSTR("/ws")) == 0) return -1; // live log
           const bool page = !isPost && (strcmp_P((char *)dat, PSTR("/")) == 0 || strcmp_P((char *)dat, PSTR("/settings")) == 0 ||
                                         strcmp_P((char *)dat, PSTR("/rules")) == 0 || strcmp_P((char *)dat, PSTR("/firmware")) == 0 ||
-                                        strcmp_P((char *)dat, PSTR("/modbus")) == 0);
+                                        strcmp_P((char *)dat, PSTR("/modbus")) == 0 || strcmp_P((char *)dat, PSTR("/secure")) == 0);
           client->route = page ? 210 : 211; // pages go to the login page, everything else gets 403
           return 0;
         }
-        if (strcmp_P((char *)dat, PSTR("/")) == 0) {
+        if (strcmp_P((char *)dat, PSTR("/secure")) == 0) {
+          client->route = isPost ? 221 : 220; // page "Secure this device"
+        } else if (strcmp_P((char *)dat, PSTR("/")) == 0) {
           client->route = 1;
 #ifdef ESP32
         } else if (strcmp_P((char *)dat, PSTR("/modbus")) == 0) {
@@ -1373,7 +1375,8 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                 }
               }
             } break;
-          case 110: {
+          case 110:
+          case 221: {
               return cacheSettings(client, args);
             } break;
           case 213: {
@@ -1522,7 +1525,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                   "<META name='viewport' content='width=device-width,initial-scale=1'>"
                   "</HEAD><BODY>"
                   "<h2>HeishaMon Setup</h2>"
-                  "<p><a href='http://192.168.4.1/settings'>Open Settings</a></p>"
+                  "<p><a href='http://192.168.4.1/redirect'>Open Settings</a></p>"
                   "</BODY></HTML>";
                 webserver_send(client, 200, (char *)"text/html", strlen(body));
                 webserver_send_content_P(client, body, strlen(body));
@@ -1596,9 +1599,26 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 210:
           case 214:
-          case 217: {
+          case 217:
+          case 222: {
               webserver_send(client, 303, (char *)"text/plain", 0); // not cached by browsers, unlike 301
               return -1;
+            } break;
+          case 220: {
+              return handleSecure(client, false);
+            } break;
+          case 221: {
+              const uint32_t remote = (client->client != NULL) ? (uint32_t)client->client->remoteIP() : 0;
+              if (saveWebLogin(client, remote, &heishamonSettings)) {
+                client->route = 222;
+                webserver_send(client, 303, (char *)"text/plain", 0);
+                return -1;
+              }
+              client->route = 223;
+              return handleSecure(client, true);
+            } break;
+          case 223: {
+              return handleSecure(client, true);
             } break;
           case 212: {
               return handleLogin(client, false);
@@ -1718,7 +1738,9 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 80: {
               header->ptr += sprintf_P((char *)header->buffer, 
-              PSTR("Location: http://192.168.4.1/settings"));
+              // first setup: offer the page "Secure this device" before the settings, as long as no web password is set
+              PSTR("Location: http://192.168.4.1/%s"),
+              (heishamonSettings.wifi_ssid[0] == '\0' && heishamonSettings.webPassword[0] == '\0') ? "secure" : "settings");
               return -1;
             } break;            
           case 170: {
@@ -1731,6 +1753,10 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 214: { // logged in; the cookie is only a hint for the menu (log out link)
               header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /\r\nSet-Cookie: hmlogin=1; Path=/\r\n"));
+              return -1;
+            } break;
+          case 222: { // web password saved and logged in
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /settings\r\nSet-Cookie: hmlogin=1; Path=/\r\n"));
               return -1;
             } break;
           case 217: { // logged out
@@ -1752,7 +1778,8 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                 free(client->userdata);
               }
             } break;
-          case 110: {
+          case 110:
+          case 221: {
               struct websettings_t *tmp = NULL;
               while (client->userdata) {
                 tmp = (struct websettings_t *)client->userdata;

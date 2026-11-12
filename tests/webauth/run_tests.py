@@ -122,6 +122,7 @@ def main():
     assert uri.index("webAuthAllowed(remote, &heishamonSettings)") < uri.index('"/togglelog"')
     assert uri.index("webAuthAllowed(remote, &heishamonSettings)") < uri.index('PSTR("/command")')
     assert uri.index("webAuthAllowed(remote, &heishamonSettings)") < uri.index("} else if (client->route == 110)")
+    assert uri.index("webAuthAllowed(remote, &heishamonSettings)") < uri.index('if (strcmp_P((char *)dat, PSTR("/secure")) == 0) {')
     assert uri.count("webAuthAllowed(") == 1
     print("PASS: web login logic (sessions, lock, trusted addresses) and position of the check")
 

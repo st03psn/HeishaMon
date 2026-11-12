@@ -752,6 +752,7 @@ static const char webBodyStart[] FLASHPROG = R"====(
     <a href="/reboot" onclick="return confirm('Reboot the device?')"><span class="nav-icon" aria-hidden="true">&#8635;</span> Reboot</a>
     <a href="/rules"><span class="nav-icon" aria-hidden="true">&#8881;</span> Rules</a>
     <a href="/settings"><span class="nav-icon" aria-hidden="true">&#9881;</span> Settings</a>
+    <a href="/secure"><span class="nav-icon" aria-hidden="true">&#128274;</span> Web login</a>
 )===="
 #ifdef ESP32
 R"====(    <a href="/modbus"><span class="nav-icon" aria-hidden="true">&#9432;</span> Modbus registers</a>
@@ -2594,6 +2595,30 @@ static const char webBodyFactoryResetWarning[] FLASHPROG = R"====(
 <div class='msg-box danger'>
   <h2>Factory Reset</h2>
   <p>All configuration has been erased.<br>Connect to the <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> WiFi hotspot to reconfigure.</p>
+</div>
+)====";
+
+static const char webBodySecure1[] FLASHPROG = R"====(
+</head>
+<body>
+<div class='msg-box'>
+  <h2>Secure this device</h2>
+  <p>Without a login every device in your network can open this web interface, send commands to the heat pump and upload firmware.<br><br>
+  Set a web password here to switch the login on. Nothing changes until you save.</p>
+)====";
+
+static const char webBodySecureFailed[] FLASHPROG = R"====(
+  <p style='color:var(--red)'>Not saved: enter the same web password twice.</p>
+)====";
+
+static const char webBodySecure2[] FLASHPROG = R"====(
+  <form method='POST' action='/secure' onsubmit="if(this.new_web_password.value==''||this.new_web_password.value!=this.repeat_web_password.value){alert('Enter the same web password twice.');return false;}return true;">
+    <p><input type='password' name='new_web_password' maxlength='39' class='setting-input' placeholder='Web password' autocomplete='new-password' autofocus></p>
+    <p><input type='password' name='repeat_web_password' maxlength='39' class='setting-input' placeholder='Repeat web password' autocomplete='new-password'></p>
+    <p><input type='text' name='web_trusted' maxlength='63' class='setting-input' placeholder='Addresses without login (optional)'></p>
+    <p style='font-size:12.5px;color:var(--text-muted)'>Devices that have to reach HeishaMon without a login, for example Home Assistant, go into the address list (IPv4, comma separated). You can change it later in the settings.</p>
+    <p><button type='submit' class='btn btn-primary'>Save and switch on login</button> &nbsp; <a href='/settings'>Skip</a></p>
+  </form>
 </div>
 )====";
 
