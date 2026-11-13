@@ -551,28 +551,6 @@ void webAuthLogout(uint32_t ip) {
   }
 }
 
-// Takes the host out of an Origin header ("http://heishamon.local:80" -> "heishamon.local"), in lower case.
-// false when there is none, for example "null".
-bool webOriginHost(const char *value, size_t length, char *host, size_t size) {
-  size_t start = 0;
-  for (size_t i = 0; i + 2 < length; i++) {
-    if (value[i] == ':' && value[i + 1] == '/' && value[i + 2] == '/') {
-      start = i + 3;
-      break;
-    }
-  }
-  if (start == 0 || size == 0) return false;
-  size_t n = 0;
-  for (size_t i = start; i < length && value[i] != ':' && value[i] != '/' && value[i] != ' '; i++) {
-    if (n + 1 >= size) return false;
-    char c = value[i];
-    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-    host[n++] = c;
-  }
-  host[n] = 0;
-  return n > 0;
-}
-
 int handleLogin(struct webserver_t *client, bool failed) {
   switch (client->content) {
     case 0: {
