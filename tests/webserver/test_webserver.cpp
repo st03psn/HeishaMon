@@ -513,6 +513,16 @@ int main() {
       current_cb = callback;
     }
 
+    // a Firefox boundary (dashes and digits, longer than the WebKit one)
+    {
+      const std::string fb = "---------------------------3164735861216357893416587031";
+      std::string body = "--" + fb + "\r\nContent-Disposition: form-data; name=\"md5\"\r\n\r\nabc\r\n--" + fb +
+                         "\r\nContent-Disposition: form-data; name=\"firmware\"; filename=\"f.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n" +
+                         std::string(400, 'Z') + "\r\n--" + fb + "--\r\n";
+      r = run_split("firefox", with_length("POST /firmware HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=" + fb + "\r\n", body));
+      CHECK(contains(r.events, "ARG md5=abc;ARG firmware=") && contains(r.events, "WRITE;CLOSE;"), "%s", r.events.c_str());
+    }
+
     // the field name comes from name=, not from filename=
     r = run(replaced(multipart("/cacert", part("cert", "PEM", "; filename=\"ca.pem\"")), "name=\"cert\"; filename=\"ca.pem\"", "filename=\"ca.pem\"; name=\"cert\""));
     CHECK(contains(r.events, "ARG cert=PEM;"), "%s", r.events.c_str());
