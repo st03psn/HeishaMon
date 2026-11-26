@@ -684,7 +684,17 @@ bool webauth_lock_check(uint32_t ip) {
   if(bucket == WEBAUTH_BUCKET_SIZE - 1) {
     bucket_time = now;
   }
+  // counted as a failure right away: a try whose connection ends before the
+  // password came still counts; a success clears it, webauth_lock_refund() gives it back
+  webauth_lock_failed(ip);
   return true;
+}
+
+void webauth_lock_refund(uint32_t ip) {
+  struct webauth_lock_t *l = lock_find(ip, now_ms());
+  if(l != NULL && l->fails > 0) {
+    l->fails--;
+  }
 }
 
 void webauth_lock_failed(uint32_t ip) {
@@ -728,6 +738,7 @@ struct webauth_form_t {
   int8_t session;               // session of the request, -1: none (API key or login off)
   uint8_t result;
   uint8_t overflow;             // a field was longer than its buffer
+  uint8_t counted;              // webauth_lock_check() counted this request as a try
   uint8_t token[WEBAUTH_TOKEN_BYTES];  // new session for the Set-Cookie header
   uint8_t new_session;
   char action[16];
@@ -849,6 +860,7 @@ int8_t webauth_request(struct webserver_t *client, const struct webserver_reques
     memset(f, 0, sizeof(*f));
     f->ip = env->ip;
     f->session = session;
+    f->counted = webauth_login_on();  // both form routes went through webauth_lock_check() then
     client->userdata = f;
   }
   return WEBSERVER_ACCEPT;
@@ -922,8 +934,7 @@ uint8_t webauth_process_form(struct webserver_t *client) {
       new_session(f);
       result = WEBAUTH_RESULT_LOGGED_IN;
     } else {
-      webauth_lock_failed(ip);
-      result = WEBAUTH_RESULT_WRONG;
+      result = WEBAUTH_RESULT_WRONG;  // counted by webauth_lock_check() already
     }
   } else if(strcmp_P(f->action, PSTR("password")) == 0) {
     // first password or a change: decided now, not when the request came in
@@ -933,7 +944,6 @@ uint8_t webauth_process_form(struct webserver_t *client) {
     } else if(len < WEBAUTH_PASSWORD_MIN || len > WEBAUTH_PASSWORD_MAX) {
       result = WEBAUTH_RESULT_LENGTH;
     } else if(webauth_login_on() && !webauth_check_password(f->current)) {
-      webauth_lock_failed(ip);
       result = WEBAUTH_RESULT_WRONG;
     } else {
       if(webauth_login_on()) {
@@ -948,7 +958,6 @@ uint8_t webauth_process_form(struct webserver_t *client) {
     if(!webauth_login_on()) {
       result = WEBAUTH_RESULT_NO_PASSWORD;
     } else if(!webauth_check_password(f->current)) {
-      webauth_lock_failed(ip);
       result = WEBAUTH_RESULT_WRONG;
     } else {
       webauth_lock_success(ip);
@@ -956,6 +965,8 @@ uint8_t webauth_process_form(struct webserver_t *client) {
       webauth_platform_close_others(client);
       result = WEBAUTH_RESULT_REMOVED;
     }
+  } else if(strcmp_P(f->action, PSTR("apikey")) == 0 && !webauth_login_on()) {
+    result = WEBAUTH_RESULT_NO_PASSWORD;  // a key made while everything is open would outlive the first password
   } else if(strcmp_P(f->action, PSTR("apikey")) == 0) {
     webauth_new_apikey(f->apikey);
     webauth_platform_close_others(client);
@@ -966,6 +977,10 @@ uint8_t webauth_process_form(struct webserver_t *client) {
     result = WEBAUTH_RESULT_APIKEY_DELETED;
   } else if(strcmp_P(f->action, PSTR("hosts")) == 0) {
     result = webauth_set_hosts(f->hosts) ? WEBAUTH_RESULT_HOSTS : WEBAUTH_RESULT_INVALID;
+  }
+  if(f->counted && result != WEBAUTH_RESULT_WRONG && result != WEBAUTH_RESULT_LOGGED_IN &&
+     result != WEBAUTH_RESULT_PASSWORD_SET && result != WEBAUTH_RESULT_REMOVED) {
+    webauth_lock_refund(ip);  // no password was checked
   }
   wipe(f->current, sizeof(f->current));
   wipe(f->password, sizeof(f->password));
@@ -1052,6 +1067,11 @@ int webauth_create_header(struct webserver_t *client, struct header_t *header) {
       cookie[0] = 0;
       if(f && f->new_session) {
         to_hex(f->token, WEBAUTH_TOKEN_BYTES, cookie);
+      }
+      if(result == WEBAUTH_RESULT_APIKEY) {  // the page with the key (200), no redirect
+        n = snprintf_P(b, room, PSTR("Cache-Control: no-store\r\n"));
+        header->ptr += n;
+        return 0;
       }
       if(client->route == WEBAUTH_ROUTE_LOGIN_POST) {
         if(result == WEBAUTH_RESULT_LOGGED_IN) {

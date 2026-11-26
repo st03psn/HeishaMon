@@ -172,8 +172,9 @@ int8_t webauth_cookie_session(const char *cookie);  // valid session of the Cook
 bool webauth_host_allowed(const char *host, const char *device_hosts);
 bool webauth_origin_matches(const char *origin, const char *host);
 
-bool webauth_lock_check(uint32_t ip);     // 1: this address may try a password now (no backoff, budget left); takes one try
+bool webauth_lock_check(uint32_t ip);     // 1: this address may try a password now (no backoff, budget left); takes one try and counts it as a failure until webauth_lock_success()
 void webauth_lock_failed(uint32_t ip);
 void webauth_lock_success(uint32_t ip);
+void webauth_lock_refund(uint32_t ip);  // a counted try that checked no password
 
 #endif

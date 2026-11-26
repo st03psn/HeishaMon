@@ -520,6 +520,16 @@ static void test_sessions() {
   }
   CHECK(webauth_cookie_session(("hmsession=" + upper).c_str()) == s, "hex in capitals");
 
+  // a try that checked no password is given back
+  {
+    uint32_t r = 0x0f000001;
+    for(int i = 0; i < 10; i++) {
+      webauth_lock_check(r);
+      webauth_lock_refund(r);
+      auth_now += WEBAUTH_BUCKET_REFILL_MS;
+    }
+    CHECK(webauth_lock_wait_ms(r) == 0, "refund");
+  }
   // the clock wraps (unsigned long): sessions still end on time
   auth_now = ULONG_MAX - 1000;
   s = webauth_session_new(t[1]);
@@ -575,8 +585,7 @@ static void test_lockout() {
   uint32_t ip = 0x0a000001;
   // the first failures are free
   for(int i = 0; i < WEBAUTH_LOCK_FREE; i++) {
-    CHECK(webauth_lock_check(ip), "try %d", i);
-    webauth_lock_failed(ip);
+    CHECK(webauth_lock_check(ip), "try %d", i);  // counts as a failure until a success
   }
   // then the backoff doubles, up to the cap
   unsigned long expect = 1000;
@@ -588,7 +597,6 @@ static void test_lockout() {
     CHECK(webauth_lock_wait_ms(ip) == wait, "refused try counted");
     auth_now += wait;
     CHECK(webauth_lock_check(ip), "allowed again after %lu ms", wait);
-    webauth_lock_failed(ip);
     expect = expect * 2 > WEBAUTH_LOCK_MAX_MS ? WEBAUTH_LOCK_MAX_MS : expect * 2;
   }
   CHECK(webauth_lock_wait_ms(ip) == WEBAUTH_LOCK_MAX_MS, "cap %lu", webauth_lock_wait_ms(ip));
@@ -618,7 +626,7 @@ static void test_lockout() {
   CHECK(!webauth_lock_check(0x0c000002), "and only one");
   auth_now += WEBAUTH_BUCKET_REFILL_MS * WEBAUTH_BUCKET_SIZE * 3;
   int n = 0;
-  while(webauth_lock_check(0x0d000000)) {
+  while(n < 100 && webauth_lock_check(0x0d000000 + n)) {
     n++;
   }
   CHECK(n == WEBAUTH_BUCKET_SIZE, "refilled to %d", n);
@@ -1014,6 +1022,44 @@ static void test_api_key() {
   CHECK(!contains(std::string((const char *)&webauth_store, sizeof(webauth_store)), key2), "stored");
 }
 
+/* review findings: a key planted while the login is off, dropped login tries, the key page */
+static void test_findings() {
+  // nobody can make an API key while there is no password (it would outlive the first password)
+  fresh(false);
+  result_t r = run(post("/security", "action=apikey", origin()));
+  CHECK(r.header("Location") == "/security?m=4" && !webauth_store.apikey_set && !contains(r.body(), "KEY "), "%s", r.output.c_str());
+  run(post("/security", PASSWORD_FORM, origin()));
+  CHECK(webauth_login_on() && !webauth_store.apikey_set, "no key after the first password");
+
+  // login POSTs that end before the body: each counts against its address, the owner is not locked out
+  fresh(true);
+  client_ip = 0x1401a8c0;
+  int refused = 0;
+  for(int i = 0; i < 40; i++) {
+    r = run(std::vector<std::string>{ "POST /login HTTP/1.1\r\nHost: 192.168.1.5\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\n" });
+    if(contains(r.events, "REJECT r=223;")) {
+      refused++;
+    }
+    auth_now += 100;
+  }
+  CHECK(refused >= 35, "dropped tries are not counted: %d refused", refused);
+  client_ip = 0x1501a8c0;
+  CHECK(!run(post("/login", "password=correct+horse+battery", origin())).cookie().empty(), "owner after the dropped tries");
+  client_ip = 0x0501a8c0;
+
+  // the page with the new key: a 200 with a Content-Type, no redirect, not cached
+  std::string tok = login();
+  r = run(post("/security", "action=apikey", cookie_hdr(tok) + origin()));
+  CHECK(r.status == 200 && r.header("Location").empty() && r.header("Content-Type") == "text/plain" &&
+        r.header("Transfer-Encoding") == "chunked" && r.header("Cache-Control") == "no-store", "%s", r.output.c_str());
+  // a form that checked no password does not count as a failed try
+  for(int i = 0; i < 10; i++) {
+    run(post("/security", "action=hosts&hosts=heishamon.lan", cookie_hdr(tok) + origin()));
+    auth_now += WEBAUTH_BUCKET_REFILL_MS;
+  }
+  CHECK(webauth_lock_wait_ms(client_ip) == 0, "hosts changes counted as failures");
+}
+
 static void test_uploads() {
   fresh(true);
   // a large rejected upload is closed at once, not read to the end
@@ -1137,6 +1183,7 @@ int main(int argc, char **argv) {
   test_websocket();
   test_api_key();
   test_uploads();
+  test_findings();
   test_security_forms();
   test_login_lockout();
   printf("%d checks, %d failed\n", checks, failed);
