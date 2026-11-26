@@ -158,6 +158,12 @@ need(wf, r"strcmp\(tmp->name\.c_str\(\), \"wifi_hostname\"\) == 0\) \{\s*if \(we
 need(wf, r"strlcpy\(heishamonSettings->wifi_hostname, jsonDoc\[F\(\"wifi_hostname\"\)\].*?webauth_hostname_valid\(heishamonSettings->wifi_hostname\)",
      "loadSettings() must validate the stored hostname")
 need(wf, r"webauth_load_failed\(\);", "a damaged /webauth.bin must keep the login on")
+if re.search(r"strlcpy\(heishamonSettings->wifi_hostname, \"HeishaMon\"", wf):
+    sys.exit("FAIL: a stored hostname must be kept (MQTT client id, DHCP, mDNS), only left out of the Host allowlist")
+need(wf, r"webauth_hostname_valid\(heishamonSettings->wifi_hostname\) \? heishamonSettings->wifi_hostname : \"heishamon\"",
+     "the reconnect page must only print a valid hostname")
+need(wf, r"WEBAUTH_LOAD_NEWER\) \{\s*//[^\n]*\n\s*webauth_load_failed\(\);", "a /webauth.bin of a newer firmware must keep the login on")
+need(wf, r"WEBAUTH_LOAD_MIGRATED\) \{.*?webauth_save\(\);", "a migrated /webauth.bin must be saved in the current format")
 need(wf, r"LittleFS\.rename\(WEBAUTH_FILE_TMP, WEBAUTH_FILE\)", "/webauth.bin must be written through a temporary file")
 print("PASS: firmware glue (OTA, hostname, escaping, persistence)")
 

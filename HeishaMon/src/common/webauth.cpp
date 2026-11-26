@@ -328,7 +328,10 @@ struct webauth_lock_t {
 
 static struct webauth_session_t sessions[WEBAUTH_SESSIONS];
 static struct webauth_lock_t locks[WEBAUTH_LOCK_ENTRIES];
-static struct webauth_lock_t overflow;  // shared by all new addresses while the table is full
+// every address that failed lately, also after its entry made room for another one (Bloom filter):
+// such an address never counts as "without failures" and cannot use the reserve of the budget
+static uint8_t failed_seen[WEBAUTH_FAILED_BITS / 8];
+static unsigned long failed_last = 0;
 struct webauth_known_t {
   uint32_t ip;
   unsigned long last;           // last login
@@ -342,20 +345,43 @@ static unsigned long sweep_time = 0;
 static uint8_t broken = 0;
 static uint8_t save_ok = 1;
 
-static void store_check(const webauth_store_t *st, uint8_t out[8]) {
+/* layout of version 1, only to take it over */
+typedef struct webauth_store_v1_t {
+  uint32_t magic;
+  uint32_t iterations;
+  uint8_t password_set;
+  uint8_t apikey_set;
+  uint8_t reserved[2];
+  uint8_t check[8];
+  uint8_t salt[WEBAUTH_SALT_BYTES];
+  uint8_t password_hash[WEBAUTH_HASH_BYTES];
+  uint8_t apikey_hash[WEBAUTH_HASH_BYTES];
+  char hosts[WEBAUTH_HOSTS_MAX];
+} webauth_store_v1_t;
+
+static_assert(sizeof(webauth_store_t) <= WEBAUTH_STORE_MAX_SIZE && sizeof(webauth_store_v1_t) <= WEBAUTH_STORE_MAX_SIZE, "WEBAUTH_STORE_MAX_SIZE");
+
+/* SHA-256 (first 8 bytes) of a record without its check field */
+static void check_of(const void *rec, size_t len, size_t at, uint8_t out[8]) {
   uint8_t h[32];
-  webauth_platform_sha256((const uint8_t *)st, offsetof(webauth_store_t, check), (const uint8_t *)st + offsetof(webauth_store_t, check) + 8,
-                          sizeof(*st) - offsetof(webauth_store_t, check) - 8, h);
+  const uint8_t *p = (const uint8_t *)rec;
+  webauth_platform_sha256(p, at, p + at + 8, len - at - 8, h);
   memcpy(out, h, 8);
+}
+
+static void store_check(const webauth_store_t *st, uint8_t out[8]) {
+  check_of(st, sizeof(*st), offsetof(webauth_store_t, check), out);
 }
 
 void webauth_reset(void) {
   memset(&webauth_store, 0, sizeof(webauth_store));
   webauth_store.magic = WEBAUTH_STORE_MAGIC;
+  webauth_store.version = WEBAUTH_STORE_VERSION;
   memset(sessions, 0, sizeof(sessions));
   memset(locks, 0, sizeof(locks));
-  memset(&overflow, 0, sizeof(overflow));
   memset(known, 0, sizeof(known));
+  memset(failed_seen, 0, sizeof(failed_seen));
+  failed_last = now_ms();
   bucket = WEBAUTH_BUCKET_SIZE;
   bucket_time = now_ms();
   sweep_time = bucket_time;
@@ -373,28 +399,73 @@ static bool hosts_chars_ok(const char *hosts) {
   return true;
 }
 
-uint8_t webauth_load(const void *data, size_t len) {
-  webauth_store_t tmp;
-  if(data == NULL || len != sizeof(tmp)) {
-    return 0;
-  }
-  memcpy(&tmp, data, sizeof(tmp));
-  uint8_t check[8];
-  store_check(&tmp, check);
-  bool ok = tmp.magic == WEBAUTH_STORE_MAGIC && webauth_equal(check, tmp.check, 8) &&
-            tmp.password_set <= 1 && tmp.apikey_set <= 1 &&
-            memchr(tmp.hosts, 0, sizeof(tmp.hosts)) != NULL && hosts_chars_ok(tmp.hosts);
-  if(ok && tmp.password_set) {
-    ok = tmp.iterations >= WEBAUTH_ITERATIONS_MIN && tmp.iterations <= WEBAUTH_ITERATIONS_MAX;
+static bool store_valid(const webauth_store_t *st) {
+  bool ok = st->password_set <= 1 && st->apikey_set <= 1 && memchr(st->hosts, 0, sizeof(st->hosts)) != NULL && hosts_chars_ok(st->hosts);
+  if(ok && st->password_set) {
+    ok = st->iterations >= WEBAUTH_ITERATIONS_MIN && st->iterations <= WEBAUTH_ITERATIONS_MAX;
   } else if(ok) {
-    ok = tmp.iterations == 0 && !tmp.apikey_set;  // no key without a password
+    ok = st->iterations == 0 && !st->apikey_set;  // no key without a password
   }
+  return ok;
+}
+
+/* version 1 -> current: the same fields */
+static bool migrate_v1(const uint8_t *data, size_t len, webauth_store_t *out) {
+  webauth_store_v1_t v1;
+  if(len != sizeof(v1)) {
+    return false;
+  }
+  memcpy(&v1, data, sizeof(v1));
+  uint8_t check[8];
+  check_of(&v1, sizeof(v1), offsetof(webauth_store_v1_t, check), check);
+  bool ok = webauth_equal(check, v1.check, 8);
   if(ok) {
+    memset(out, 0, sizeof(*out));
+    out->magic = WEBAUTH_STORE_MAGIC;
+    out->version = WEBAUTH_STORE_VERSION;
+    out->password_set = v1.password_set;
+    out->apikey_set = v1.apikey_set;
+    out->iterations = v1.iterations;
+    memcpy(out->salt, v1.salt, sizeof(out->salt));
+    memcpy(out->password_hash, v1.password_hash, sizeof(out->password_hash));
+    memcpy(out->apikey_hash, v1.apikey_hash, sizeof(out->apikey_hash));
+    memcpy(out->hosts, v1.hosts, sizeof(out->hosts));
+  }
+  wipe(&v1, sizeof(v1));
+  return ok;
+}
+
+uint8_t webauth_load(const void *data, size_t len) {
+  if(data == NULL || len < 8) {
+    return WEBAUTH_LOAD_INVALID;
+  }
+  const uint8_t *d = (const uint8_t *)data;
+  uint32_t magic;
+  memcpy(&magic, d, 4);
+  webauth_store_t tmp;
+  uint8_t result = WEBAUTH_LOAD_INVALID;
+  if(magic == WEBAUTH_STORE_MAGIC_V1) {
+    result = migrate_v1(d, len, &tmp) && store_valid(&tmp) ? WEBAUTH_LOAD_MIGRATED : WEBAUTH_LOAD_INVALID;
+  } else if(magic == WEBAUTH_STORE_MAGIC) {
+    uint8_t version = d[4];
+    if(version > WEBAUTH_STORE_VERSION) {
+      result = WEBAUTH_LOAD_NEWER;  // unknown layout: never read as "no password"
+    } else if(version == WEBAUTH_STORE_VERSION && len == sizeof(tmp)) {
+      memcpy(&tmp, d, sizeof(tmp));
+      uint8_t check[8];
+      store_check(&tmp, check);
+      if(webauth_equal(check, tmp.check, 8) && store_valid(&tmp)) {
+        result = WEBAUTH_LOAD_OK;
+      }
+    }
+    // an older version with this magic: add its migration here (none yet)
+  }
+  if(result == WEBAUTH_LOAD_OK || result == WEBAUTH_LOAD_MIGRATED) {
     memcpy(&webauth_store, &tmp, sizeof(tmp));
     broken = 0;
   }
   wipe(&tmp, sizeof(tmp));
-  return ok ? 1 : 0;
+  return result;
 }
 
 /*
@@ -423,9 +494,14 @@ bool webauth_last_save_ok(void) {
 
 static bool save(void) {
   webauth_store.magic = WEBAUTH_STORE_MAGIC;
+  webauth_store.version = WEBAUTH_STORE_VERSION;
   store_check(&webauth_store, webauth_store.check);
   save_ok = webauth_platform_save(&webauth_store) ? 1 : 0;
   return save_ok;
+}
+
+bool webauth_save(void) {
+  return save();
 }
 
 bool webauth_ota_allowed(const char *ota_password) {
@@ -847,9 +923,10 @@ static struct webauth_lock_t *lock_free(void) {
 
 
 /*
- * The entry that counts for an address: its own, or while the table is
- * full the one shared by all new addresses (nobody is pushed out, so
- * rotating addresses gain nothing). NULL: a new address, table not full.
+ * The entry that counts for an address: its own (in the table, or with
+ * its known-address record). NULL: no failures of its own. Addresses are
+ * never pooled, so a new address (the owner's new phone) is never held
+ * back by the failures of others.
  */
 static struct webauth_lock_t *lock_of(uint32_t ip, unsigned long now) {
   struct webauth_lock_t *l = lock_find(ip, now);
@@ -859,10 +936,6 @@ static struct webauth_lock_t *lock_of(uint32_t ip, unsigned long now) {
   struct webauth_known_t *k = known_find(ip, now);
   if(k != NULL) {
     return &k->lock;
-  }
-  if(lock_free() == NULL) {
-    lock_expire(&overflow, now);
-    return &overflow;
   }
   return NULL;
 }
@@ -887,10 +960,39 @@ static unsigned long ip_wait(uint32_t ip, unsigned long now) {
   return since < d ? d - since : 0;
 }
 
+static void seen_bits(uint32_t ip, uint16_t *a, uint16_t *b) {
+  // murmur3 finalizer: every bit of the address moves every bit of the hash
+  uint32_t h = ip;
+  h ^= h >> 16;
+  h *= 0x85ebca6bUL;
+  h ^= h >> 13;
+  h *= 0xc2b2ae35UL;
+  h ^= h >> 16;
+  *a = (uint16_t)(h % WEBAUTH_FAILED_BITS);
+  *b = (uint16_t)((h >> 16) % WEBAUTH_FAILED_BITS);
+}
+
+static void seen_add(uint32_t ip, unsigned long now) {
+  uint16_t a, b;
+  seen_bits(ip, &a, &b);
+  failed_seen[a >> 3] |= (uint8_t)(1 << (a & 7));
+  failed_seen[b >> 3] |= (uint8_t)(1 << (b & 7));
+  failed_last = now;
+}
+
+static bool seen_has(uint32_t ip) {
+  uint16_t a, b;
+  seen_bits(ip, &a, &b);
+  return (failed_seen[a >> 3] & (1 << (a & 7))) && (failed_seen[b >> 3] & (1 << (b & 7)));
+}
+
 /* an address without recent failures (may use the reserve of the budget) */
 static bool ip_clean(uint32_t ip, unsigned long now) {
   struct webauth_lock_t *l = lock_of(ip, now);
-  return l == NULL || l->fails == 0;
+  if(l != NULL) {
+    return l->fails == 0;  // its own entry decides (a success cleared it)
+  }
+  return !seen_has(ip);
 }
 
 unsigned long webauth_lock_wait_ms(uint32_t ip) {
@@ -936,27 +1038,42 @@ void webauth_lock_failed(uint32_t ip) {
   unsigned long now = now_ms();
   struct webauth_lock_t *l = lock_of(ip, now);
   if(l == NULL) {
-    l = lock_free();  // not NULL: lock_of() gives the shared entry when the table is full
+    l = lock_free();
+    if(l == NULL) {
+      // table full: the entry whose last failure is oldest among those not backing off
+      // now goes; if all back off, the one with the oldest failure (it waits the longest
+      // anyway). Its address only gets its free tries back, and the global budget still
+      // keeps its reserve for addresses without failures.
+      struct webauth_lock_t *idle = NULL, *oldest = &locks[0];
+      for(uint8_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
+        struct webauth_lock_t *c = &locks[i];
+        unsigned long since = (unsigned long)(now - c->last);
+        if(since >= lock_delay(c) && (idle == NULL || since > (unsigned long)(now - idle->last))) {
+          idle = c;
+        }
+        if(since > (unsigned long)(now - oldest->last)) {
+          oldest = c;
+        }
+      }
+      l = idle != NULL ? idle : oldest;
+    }
     memset(l, 0, sizeof(*l));
     l->ip = ip;
     l->used = 1;
   } else {
-    l->used = 1;  // the shared entry or the one of a known address
+    l->used = 1;  // the one of a known address
   }
   if(l->fails < 255) {
     l->fails++;
   }
   l->last = now;
+  seen_add(ip, now);
 }
 
 void webauth_lock_success(uint32_t ip) {
   unsigned long now = now_ms();
   struct webauth_lock_t *l = lock_of(ip, now);
-  if(l == &overflow) {
-    if(overflow.fails > 0) {
-      overflow.fails--;  // only its own counted try: a success never clears the shared entry
-    }
-  } else if(l != NULL) {
+  if(l != NULL) {
     memset(l, 0, sizeof(*l));
   }
   remember(ip, now);  // from now on its failures are its own  // from now on it never shares the entry of new addresses
@@ -980,8 +1097,11 @@ void webauth_tick(void) {
   for(uint8_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
     lock_expire(&locks[i], now);
   }
-  lock_expire(&overflow, now);
   known_find(0, now);  // drops the expired ones
+  if((unsigned long)(now - failed_last) >= WEBAUTH_LOCK_FORGET_MS) {
+    memset(failed_seen, 0, sizeof(failed_seen));  // no failure for a while: forget all
+    failed_last = now;
+  }
   bucket_refill(now);
 }
 
@@ -1057,9 +1177,22 @@ static int8_t reject_host(struct webserver_t *client, const struct webserver_req
   return r;
 }
 
-static bool cross_site(const struct webserver_request_t *req) {
+/*
+ * Sec-Fetch-Site, when the browser sends it: only "same-origin" (a page of
+ * this device) and "none" (typed address, bookmark) may change something.
+ * "same-site" is refused too: evil.fritz.box is the same site as
+ * heishamon.fritz.box. A cut value is refused. No header (programs, old
+ * browsers): decided by Host and Origin only.
+ */
+static bool foreign_site(const struct webserver_request_t *req) {
   const char *sfs = req->header[WEBSERVER_HEADER_SEC_FETCH_SITE];
-  return sfs != NULL && strcasecmp_P(sfs, PSTR("cross-site")) == 0;
+  if(sfs == NULL) {
+    return false;
+  }
+  if(req->truncated & (1 << WEBSERVER_HEADER_SEC_FETCH_SITE)) {
+    return true;
+  }
+  return strcasecmp_P(sfs, PSTR("same-origin")) != 0 && strcasecmp_P(sfs, PSTR("none")) != 0;
 }
 
 int8_t webauth_request(struct webserver_t *client, const struct webserver_request_t *req, const webauth_env_t *env) {
@@ -1083,7 +1216,7 @@ int8_t webauth_request(struct webserver_t *client, const struct webserver_reques
 
   // a page of another site (browsers send Sec-Fetch-Site): never changes anything, in both modes;
   // without it an <img src="http://<device>/reboot"> would reboot a device without a password
-  if((flags & (WEBAUTH_STATE | WEBAUTH_WS)) && cross_site(req)) {
+  if((flags & (WEBAUTH_STATE | WEBAUTH_WS)) && foreign_site(req)) {
     return reject(client, req, WEBAUTH_ROUTE_FORBIDDEN, 0);
   }
 
@@ -1217,7 +1350,8 @@ int webauth_args(struct webserver_t *client, struct arguments_t *args) {
   } else if(strcmp_P(name, PSTR("action")) == 0) {
     append(f->action, sizeof(f->action), args->value, args->len, &f->overflow);
   } else if(strcmp_P(name, PSTR("keep_apikey")) == 0) {
-    f->keep_apikey = 1;
+    // only an explicit yes keeps it ("0", "" or anything else: the key goes)
+    f->keep_apikey = (args->len == 1 && args->value[0] == '1') || (args->len == 2 && strncasecmp_P((const char *)args->value, PSTR("on"), 2) == 0);
   }
   return 0;
 }

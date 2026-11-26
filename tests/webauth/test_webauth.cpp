@@ -642,7 +642,7 @@ static void test_lockout() {
   }
   CHECK(n == WEBAUTH_BUCKET_SIZE, "refilled to %d", n);
 
-  // bounded table: nobody is pushed out; while it is full all new addresses share one entry with backoff
+  // bounded table: addresses are never pooled; when it is full the entry that waits longest goes
   fresh(true);
   for(uint32_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
     for(int k = 0; k < WEBAUTH_LOCK_FREE + 1; k++) {
@@ -650,17 +650,18 @@ static void test_lockout() {
     }
     auth_now += 1;
   }
-  CHECK(webauth_lock_wait_ms(0x0e000000) > 0, "oldest kept");
-  CHECK(webauth_lock_wait_ms(0x0f000000) == 0, "a new address starts on the shared entry");
-  for(int k = 0; k < WEBAUTH_LOCK_FREE + 1; k++) {
-    webauth_lock_failed(0x0f000000 + k);  // rotating new addresses
-  }
-  CHECK(webauth_lock_wait_ms(0x0f0000ff) > 0 && !webauth_lock_check(0x0f0000fe), "rotating addresses share the backoff");
-  webauth_lock_success(0x0f000001);
-  CHECK(webauth_lock_wait_ms(0x0f0000ff) > 0, "a success never clears the shared entry");
+  CHECK(webauth_lock_wait_ms(0x0e000000) > 0 && webauth_lock_wait_ms(0x0e000000 + WEBAUTH_LOCK_ENTRIES - 1) > 0, "all kept");
+  CHECK(webauth_lock_wait_ms(0x0f000000) == 0 && webauth_lock_check(0x0f000000), "a new address is not held back by others");
+  CHECK(webauth_lock_wait_ms(0x0e000000) == 0, "the oldest entry made room");
+  CHECK(webauth_lock_wait_ms(0x0e000001) > 0, "the others are kept");
+  // an entry whose backoff is over goes before one that still backs off
+  auth_now += 3000;  // the first ones (2 s backoff) are over
+  webauth_lock_failed(0x0e000002);  // 0x0e000002 fails again: backs off, newest
+  webauth_lock_failed(0x0f000001);  // a new one needs room
+  CHECK(webauth_lock_wait_ms(0x0e000002) > 0, "a backing-off entry was pushed out before an idle one");
   auth_now += WEBAUTH_LOCK_FORGET_MS;
   webauth_tick();
-  CHECK(webauth_lock_wait_ms(0x0f0000ff) == 0 && webauth_lock_wait_ms(0x0e000000) == 0, "forgotten");
+  CHECK(webauth_lock_wait_ms(0x0f000000) == 0 && webauth_lock_wait_ms(0x0e000001) == 0, "forgotten");
 
   // backoff across the wrap of the clock
   fresh(true);
@@ -1503,9 +1504,25 @@ static void test_r10_cross_site() {
   CHECK(r.status == 403, "login on, cross-site GET with cookie");
   r = run(post("/login", "password=correct+horse+battery", XS));
   CHECK(r.status == 403 && r.cookie().empty(), "cross-site login");
-  // a cut value is never "cross-site" by accident, nor taken for anything else
+  // only same-origin and none: same-site (evil.fritz.box next to heishamon.fritz.box), unknown and cut values are refused
+  const char *refused[] = { "same-site", "cross-site", "Same-Site", "something", "" };
+  for(const char *v : refused) {
+    r = run(get("/reboot", cookie_hdr(tok) + "Sec-Fetch-Site: " + v + "\r\n"));
+    CHECK(r.status == 403, "Sec-Fetch-Site '%s' with a cookie: %s", v, r.events.c_str());
+    r = run(post("/command", "a=b", cookie_hdr(tok) + origin() + "Sec-Fetch-Site: " + v + "\r\n"));
+    CHECK(r.status == 403, "POST, Sec-Fetch-Site '%s': %s", v, r.events.c_str());
+  }
   r = run(get("/reboot", cookie_hdr(tok) + "Sec-Fetch-Site: " + std::string(40, 'x') + "\r\n"));
-  CHECK(r.status == 200, "%s", r.events.c_str());
+  CHECK(r.status == 403, "cut value: %s", r.events.c_str());
+  r = run(get("/ws", WS + cookie_hdr(tok) + origin() + "Sec-Fetch-Site: same-site\r\n"));
+  CHECK(r.status == 403 && r.websocket == 0, "same-site websocket");
+  const char *allowed[] = { "same-origin", "none", "Same-Origin" };
+  for(const char *v : allowed) {
+    r = run(get("/reboot", cookie_hdr(tok) + "Sec-Fetch-Site: " + v + "\r\n"));
+    CHECK(r.status == 200, "Sec-Fetch-Site '%s': %s", v, r.events.c_str());
+  }
+  r = run(get("/json", cookie_hdr(tok) + "Sec-Fetch-Site: cross-site\r\n"));
+  CHECK(r.status == 200, "reading is not changed by it: %s", r.events.c_str());
 }
 
 // 11. an unknown Host (router DNS name) gets a page that says what to do
@@ -1580,6 +1597,146 @@ static void test_r_enumeration() {
   CHECK(contains(r.events, "ACCEPT r=100;"), "the good one: %s", r.events.c_str());
 }
 
+
+/* ---- third round ---- */
+
+// N1: an owner on a NEW address gets in quickly during a flood from 20 addresses (10/s)
+static void test_n1_new_address() {
+  for(int bearer_flood = 0; bearer_flood < 2; bearer_flood++) {
+    fresh(true);
+    uint32_t owner = 0x0a01a8c0;
+    unsigned long start = auth_now, first = 0;
+    int attacker = 0;
+    for(int t = 0; t < 18000; t++) {  // 100 ms steps, 30 min
+      auth_now += 100;
+      client_ip = 0x6401a8c0u + ((uint32_t)(t % 20) << 24);
+      result_t a = bearer_flood ? run(get("/json", bearer(std::string(32, '0')))) : run(post("/login", "password=g", origin()));
+      if(a.status != 429) {
+        attacker++;
+      }
+      if(t % 100 == 37 && first == 0) {
+        client_ip = owner;
+        if(!run(post("/login", "password=correct+horse+battery", origin())).cookie().empty()) {
+          first = auth_now - start;
+        }
+      }
+      if(first != 0 && t > 6000) {
+        break;
+      }
+    }
+    client_ip = 0x0501a8c0;
+    printf("  %s from 20 addresses: owner on a new address in after %lu s; %d attacker requests not refused in %lu s\n",
+           bearer_flood ? "wrong API keys" : "wrong passwords", first / 1000, attacker, (auth_now - start) / 1000);
+    CHECK(first > 0 && first <= 60000, "owner on a new address: %lu ms", first);
+  }
+  // with more addresses than the table holds: slower, but never locked out
+  {
+    fresh(true);
+    unsigned long start = auth_now, first = 0;
+    for(int t = 0; t < 18000 && first == 0; t++) {
+      auth_now += 100;
+      client_ip = 0x6401a8c0u + ((uint32_t)(t % 100) << 24);
+      run(post("/login", "password=g", origin()));
+      if(t % 100 == 37) {
+        client_ip = 0x0b01a8c0;
+        if(!run(post("/login", "password=correct+horse+battery", origin())).cookie().empty()) {
+          first = auth_now - start;
+        }
+      }
+    }
+    client_ip = 0x0501a8c0;
+    printf("  wrong passwords from 100 addresses: owner on a new address in after %lu s\n", first / 1000);
+    CHECK(first > 0 && first <= WEBAUTH_LOCK_MAX_MS, "owner on a new address, 100 attackers: %lu ms", first);
+  }
+  // the attacker still gets only few password checks with 20 and with 100 addresses
+  for(int n : { 20, 100 }) {
+    fresh(true);
+    int checks = 0;
+    for(int t = 0; t < 18000; t++) {
+      auth_now += 100;
+      client_ip = 0x6401a8c0u + ((uint32_t)(t % n) << 24);
+      if(run(post("/login", "password=g", origin())).status != 429) {
+        checks++;
+      }
+    }
+    client_ip = 0x0501a8c0;
+    printf("  %d rotating addresses for 30 min: %d password checks\n", n, checks);
+    CHECK(checks <= (int)(30 * 60 / (WEBAUTH_BUCKET_REFILL_MS / 1000) + WEBAUTH_BUCKET_SIZE), "%d addresses: %d checks", n, checks);
+  }
+}
+
+// N3: keep the API key only for an explicit yes
+static void test_n3_keep_apikey() {
+  const char *values[][2] = { { "0", "revoked" }, { "", "revoked" }, { "no", "revoked" }, { "1", "kept" }, { "on", "kept" } };
+  for(auto &v : values) {
+    fresh(true);
+    std::string tok = login();
+    std::string key = apikey_of_owner(tok);
+    result_t r = run(post("/security", "action=password&current=correct+horse+battery&password=newpass12&repeat=newpass12&keep_apikey=" +
+                                           std::string(v[0]), cookie_hdr(tok) + origin()));
+    bool kept = run(get("/json", bearer(key))).status == 200;
+    CHECK(r.header("Location") == "/security?m=5" && kept == (strcmp(v[1], "kept") == 0), "keep_apikey=%s: %s", v[0], kept ? "kept" : "revoked");
+  }
+}
+
+// format versions of /webauth.bin
+static void test_store_versions() {
+  fresh(false);
+  webauth_set_password(PASSWORD.c_str());
+  char key[33];
+  webauth_new_apikey(key);
+  webauth_store_t cur = webauth_store;
+  CHECK(cur.version == WEBAUTH_STORE_VERSION && cur.magic == WEBAUTH_STORE_MAGIC, "version");
+  // version 1 (alpha builds): taken over
+  struct {
+    uint32_t magic, iterations;
+    uint8_t password_set, apikey_set, reserved[2], check[8], salt[16], hash[32], apikey[32];
+    char hosts[WEBAUTH_HOSTS_MAX];
+  } v1;
+  memset(&v1, 0, sizeof(v1));
+  v1.magic = WEBAUTH_STORE_MAGIC_V1;
+  v1.iterations = cur.iterations;
+  v1.password_set = 1;
+  v1.apikey_set = 1;
+  memcpy(v1.salt, cur.salt, 16);
+  memcpy(v1.hash, cur.password_hash, 32);
+  memcpy(v1.apikey, cur.apikey_hash, 32);
+  strcpy(v1.hosts, "proxy.example.com");
+  {
+    uint8_t h[32];
+    size_t at = offsetof(decltype(v1), check);
+    webauth_platform_sha256((const uint8_t *)&v1, at, (const uint8_t *)&v1 + at + 8, sizeof(v1) - at - 8, h);
+    memcpy(v1.check, h, 8);
+  }
+  webauth_reset();
+  CHECK(webauth_load(&v1, sizeof(v1)) == WEBAUTH_LOAD_MIGRATED, "v1 migrated");
+  CHECK(webauth_check_password(PASSWORD.c_str()) && webauth_check_apikey(key, 32) && std::string(webauth_store.hosts) == "proxy.example.com",
+        "v1 content");
+  CHECK(webauth_save() && webauth_store.version == WEBAUTH_STORE_VERSION, "saved in the current format");
+  webauth_store_t resaved = webauth_store;
+  webauth_reset();
+  CHECK(webauth_load(&resaved, sizeof(resaved)) == WEBAUTH_LOAD_OK, "current after the migration");
+  v1.hash[0] ^= 1;
+  webauth_reset();
+  CHECK(webauth_load(&v1, sizeof(v1)) == WEBAUTH_LOAD_INVALID, "damaged v1");
+  // a newer version: never "no password"
+  webauth_store_t newer = cur;
+  newer.version = WEBAUTH_STORE_VERSION + 1;
+  webauth_reset();
+  CHECK(webauth_load(&newer, sizeof(newer)) == WEBAUTH_LOAD_NEWER && !webauth_login_on(), "newer");
+  std::vector<uint8_t> bigger((uint8_t *)&newer, (uint8_t *)&newer + sizeof(newer));
+  bigger.resize(sizeof(newer) + 40, 0);
+  CHECK(webauth_load(bigger.data(), bigger.size()) == WEBAUTH_LOAD_NEWER, "newer and longer");
+  webauth_load_failed();
+  CHECK(webauth_login_on() && !webauth_check_password(PASSWORD.c_str()), "a newer file keeps the login on");
+  // the current magic with an older version number than any migration: invalid
+  webauth_store_t old = cur;
+  old.version = 1;
+  webauth_reset();
+  CHECK(webauth_load(&old, sizeof(old)) == WEBAUTH_LOAD_INVALID, "unknown older version");
+  CHECK(webauth_load(&cur, 7) == WEBAUTH_LOAD_INVALID && webauth_load(NULL, 0) == WEBAUTH_LOAD_INVALID, "short");
+}
+
 int main(int argc, char **argv) {
   if(argc > 1 && strcmp(argv[1], "--routes") == 0) {
     for(uint8_t i = 0; i < webauth_routes_count; i++) {
@@ -1615,6 +1772,9 @@ int main(int argc, char **argv) {
   test_r10_cross_site();
   test_r11_bad_host_page();
   test_r_enumeration();
+  test_n1_new_address();
+  test_n3_keep_apikey();
+  test_store_versions();
   test_security_forms();
   test_login_lockout();
   printf("%d checks, %d failed\n", checks, failed);

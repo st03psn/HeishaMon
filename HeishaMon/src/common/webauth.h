@@ -42,7 +42,8 @@
 #define WEBAUTH_PASSWORD_MIN 8
 #define WEBAUTH_PASSWORD_MAX 64
 #define WEBAUTH_HOSTS_MAX 96                  // extra allowed host names (reverse proxy), comma separated
-#define WEBAUTH_LOCK_ENTRIES 8                // addresses with failed attempts that are remembered
+#define WEBAUTH_LOCK_ENTRIES 16               // addresses with failed attempts that are remembered (12 bytes each)
+#define WEBAUTH_FAILED_BITS 2048              // Bloom filter of all addresses that failed lately (256 bytes)
 #define WEBAUTH_LOCK_FREE 3                   // failed attempts of one address before the backoff starts
 #define WEBAUTH_LOCK_MAX_MS (5UL * 60UL * 1000UL)     // longest backoff of one address
 #define WEBAUTH_LOCK_FORGET_MS (15UL * 60UL * 1000UL) // failures of an address are forgotten after this
@@ -93,13 +94,24 @@ uint8_t webauth_route_flags(uint8_t route);   // policy of a route, unknown: log
 int16_t webauth_find_route(const struct webserver_request_t *req);  // -1: close (unknown POST)
 
 /* ---- stored credentials (the device keeps them in /webauth.bin) ---- */
-#define WEBAUTH_STORE_MAGIC 0x48415731UL /* "HAW1" */
+/*
+ * Format of /webauth.bin. Every layout change gets a new version and a
+ * migration in webauth_load(); a file of a newer, unknown version keeps the
+ * login on (no password matches) instead of switching it off.
+ *   version 1: magic "HAW1", no version field (alpha builds of the web login)
+ *   version 2: magic "HAWS" + version byte (this layout)
+ */
+#define WEBAUTH_STORE_MAGIC 0x53574148UL    /* "HAWS" in the file */
+#define WEBAUTH_STORE_VERSION 2
+#define WEBAUTH_STORE_MAGIC_V1 0x48415731UL /* "HAW1" */
+#define WEBAUTH_STORE_MAX_SIZE 256          // the largest file of any known version
 typedef struct webauth_store_t {
   uint32_t magic;
-  uint32_t iterations;
+  uint8_t version;
   uint8_t password_set;
   uint8_t apikey_set;
-  uint8_t reserved[2];
+  uint8_t reserved;
+  uint32_t iterations;
   uint8_t check[8];                           // first bytes of the SHA-256 of everything else (bit rot, cut writes)
   uint8_t salt[WEBAUTH_SALT_BYTES];
   uint8_t password_hash[WEBAUTH_HASH_BYTES];  // PBKDF2-HMAC-SHA256(password, salt, iterations)
@@ -110,7 +122,14 @@ typedef struct webauth_store_t {
 extern webauth_store_t webauth_store;
 
 void webauth_reset(void);            // forget everything (RAM): no password, no sessions, no lockouts
-uint8_t webauth_load(const void *data, size_t len); // 1: valid stored credentials taken over, 0: invalid (nothing changed)
+enum {
+  WEBAUTH_LOAD_INVALID = 0,   // damaged: call webauth_load_failed()
+  WEBAUTH_LOAD_OK,
+  WEBAUTH_LOAD_MIGRATED,      // an older version, taken over: save it again in the current format
+  WEBAUTH_LOAD_NEWER,         // made by a newer firmware: call webauth_load_failed() (login stays on)
+};
+uint8_t webauth_load(const void *data, size_t len);
+bool webauth_save(void);             // write the current credentials (after a migration)
 void webauth_load_failed(void);      // the stored file exists but is not valid: login on, no password matches (until a factory reset)
 bool webauth_broken(void);           // webauth_load_failed() was called
 bool webauth_login_on(void);         // a web password is set (or the stored one is damaged)

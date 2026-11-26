@@ -132,19 +132,28 @@ void loadWebAuth(void) {
     }
     if (LittleFS.exists(WEBAUTH_FILE)) {
       File f = LittleFS.open(WEBAUTH_FILE, "r");
-      webauth_store_t tmp;
+      uint8_t buf[WEBAUTH_STORE_MAX_SIZE];
       size_t size = f ? f.size() : 0;
-      size_t len = f ? f.read((uint8_t *)&tmp, sizeof(tmp)) : 0;
+      size_t len = (f && size <= sizeof(buf)) ? f.read(buf, size) : 0;
       if (f) {
         f.close();
       }
-      if (!webauth_load(&tmp, (len == sizeof(tmp) && size == sizeof(tmp)) ? sizeof(tmp) : 0)) {
+      uint8_t result = webauth_load(buf, (len == size) ? len : 0);
+      if (result == WEBAUTH_LOAD_MIGRATED) {
+        log_message(_F("Web login: " WEBAUTH_FILE " of an older version taken over"));
+        webauth_save();
+      } else if (result == WEBAUTH_LOAD_NEWER) {
+        // a newer firmware wrote it: not "no password", the login stays on
+        webauth_load_failed();
+        log_message(_F("Web login: " WEBAUTH_FILE " was written by a newer firmware. The login stays on and no password works: "
+                       "install that firmware again, or hold the boot button for more than 10 seconds (factory reset)."));
+      } else if (result != WEBAUTH_LOAD_OK) {
         // not "no password": the login stays on and nothing matches until the factory reset
         webauth_load_failed();
         log_message(_F("Web login: " WEBAUTH_FILE " is damaged (size or check value wrong). The login stays on and no password works: "
                        "hold the boot button for more than 10 seconds (factory reset) to recover."));
       }
-      memset(&tmp, 0, sizeof(tmp));
+      memset(buf, 0, sizeof(buf));
     }
   }
   log_message(webauth_login_on() ? _F("Web login is on") : _F("Web login is off (no web password set)"));
@@ -519,9 +528,9 @@ void loadSettings(settingsStruct *heishamonSettings) {
           if ( jsonDoc[F("wifi_password")] ) strlcpy(heishamonSettings->wifi_password, jsonDoc[F("wifi_password")], sizeof(heishamonSettings->wifi_password));
           if ( jsonDoc[F("wifi_hostname")] ) strlcpy(heishamonSettings->wifi_hostname, jsonDoc[F("wifi_hostname")], sizeof(heishamonSettings->wifi_hostname));
           if (!webauth_hostname_valid(heishamonSettings->wifi_hostname)) {
-            // it goes into pages, mDNS and the Host allowlist of the web login: only [A-Za-z0-9-]
-            log_message(_F("Hostname in config.json is not valid (only letters, digits and '-', 1 to 32), using HeishaMon"));
-            strlcpy(heishamonSettings->wifi_hostname, "HeishaMon", sizeof(heishamonSettings->wifi_hostname));
+            // kept as it is for MQTT (client id), DHCP and mDNS, so nothing changes for an existing
+            // install; it is only left out of the Host allowlist and escaped where pages show it
+            log_message(_F("Hostname in config.json has characters other than letters, digits and '-': it is not accepted as a Host name by the web interface"));
           }
           if ( jsonDoc[F("description")] ) strlcpy(heishamonSettings->description, jsonDoc[F("description")], sizeof(heishamonSettings->description));
           if ( jsonDoc[F("ota_password")] ) strlcpy(heishamonSettings->ota_password, jsonDoc[F("ota_password")], sizeof(heishamonSettings->ota_password));
@@ -1281,8 +1290,9 @@ int settingsReconnectWifi(struct webserver_t *client, settingsStruct *heishamonS
     webserver_send_content_P(client, menuJS, strlen_P(menuJS));
     webserver_send_content_P(client, webBodySettingsNewWifiWarning, strlen_P(webBodySettingsNewWifiWarning));
     char meta[96];
+    // a stored hostname from before the check on save can have any characters: only a valid one goes into the page
     snprintf(meta, sizeof(meta), "<meta http-equiv='refresh' content='5; url=http://%s.local/' />",
-             heishamonSettings->wifi_hostname[0] != '\0' ? heishamonSettings->wifi_hostname : "heishamon");
+             webauth_hostname_valid(heishamonSettings->wifi_hostname) ? heishamonSettings->wifi_hostname : "heishamon");
     webserver_send_content(client, meta, strlen(meta));
     webserver_send_content_P(client, webFooter, strlen_P(webFooter));
     timerqueue_insert(5, 0, -3); //handle wifi reconnect after 5 sec to make sure all above data is sent to client so no memory leak is introduced
