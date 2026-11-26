@@ -152,7 +152,7 @@ void webauthDeviceHosts(char *out, size_t size, settingsStruct *heishamonSetting
   if ((uint32_t)WiFi.localIP() != 0) {
     add(WiFi.localIP().toString().c_str());
   }
-  if (WiFi.getMode() & WIFI_MODE_AP) {
+  if (WiFi.getMode() & WIFI_AP) { // WIFI_AP: 2 on both cores (ESP32: WIFI_MODE_AP)
     add(WiFi.softAPIP().toString().c_str());
   }
 #ifdef ESP32
