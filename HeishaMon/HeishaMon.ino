@@ -1305,7 +1305,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               return handleJsonArgs(client, args, &heishamonSettings);
             } break;
           case 60: {
-              sprintf_P(log_msg, PSTR("Dallas alias changed address %s to alias %s"), args->name, args->value);
+              snprintf_P(log_msg, LOG_MSG_SIZE, PSTR("Dallas alias changed address %s to alias %s"), args->name, args->value);
               log_message(log_msg);
               changeDallasAlias((char *)args->name, (char *)args->value);
               return 0;
@@ -1322,12 +1322,14 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 100: {
               unsigned char cmd[256] = { 0 };
-              char cpy[args->len + 1];
               char log_msg[256] = { 0 };
               unsigned int len = 0;
-
-              memset(&cpy, 0, args->len + 1);
-              snprintf((char *)&cpy, args->len + 1, "%.*s", args->len, args->value);
+              // a query argument can be up to WEBSERVER_MAX_QUERY long (SetCurves JSON): keep it off the stack
+              char *cpy = (char *)malloc(args->len + 1);
+              if (cpy == NULL) {
+                return -1;
+              }
+              snprintf(cpy, args->len + 1, "%.*s", (int)args->len, (char *)args->value);
 
 #ifdef ESP32
               if (strcmp((char *)args->name, "SetRelayOne") == 0 || strcmp((char *)args->name, "SetRelayTwo") == 0) {
@@ -1341,6 +1343,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                 }
                 strcat((char *)client->userdata, log_msg);
                 strcat((char *)client->userdata, "\n");
+                free(cpy);
                 return 0;
               }
 #endif
@@ -1386,6 +1389,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                   }
                 }
               }
+              free(cpy);
             } break;
           case 110: {
               return cacheSettings(client, args);
@@ -1416,12 +1420,12 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case 150: {
               if (Update.isRunning() && (!Update.hasError())) {
                 if ((strcmp((char *)args->name, "md5") == 0) && (args->len > 0)) {
-                  char md5[args->len + 1];
-                  memset(&md5, 0, args->len + 1);
-                  snprintf((char *)&md5, args->len + 1, "%.*s", args->len, args->value);
-                  sprintf_P(log_msg, PSTR("Firmware MD5 expected: %s"), md5);
+                  // an MD5 is 32 hex digits; any other length is refused below
+                  char md5[33];
+                  snprintf(md5, sizeof(md5), "%.*s", (int)args->len, (char *)args->value);
+                  snprintf_P(log_msg, LOG_MSG_SIZE, PSTR("Firmware MD5 expected: %s"), md5);
                   log_message(log_msg);
-                  if (!Update.setMD5(md5)) {
+                  if (args->len != 32 || !Update.setMD5(md5)) {
                     log_message(_F("Failed to set expected update file MD5!"));
                     Update.end(false);
                   }
