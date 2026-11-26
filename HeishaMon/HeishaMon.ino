@@ -1157,99 +1157,27 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
     case WEBSERVER_CLIENT_REQUEST: {
         // The whole request line and the headers are in; nothing of the request was handled yet.
         struct webserver_request_t *req = (struct webserver_request_t *)dat;
-        const char *path = req->path;
-        bool post = (req->method == WEBSERVER_METHOD_POST);
 
-        // 1. Find the route, without doing anything yet.
-        if (req->websocket) {
-          client->route = 210; // websocket upgrade on WEBSERVER_WEBSOCKET_PATH, done by the webserver after an accept
-        } else if (strcmp_P(path, PSTR("/")) == 0) {
-          client->route = 1;
-#ifdef ESP32
-        } else if (strcmp_P(path, PSTR("/modbus")) == 0) {
-          client->route = 200;
-#endif
-        } else if (strcmp_P(path, PSTR("/json")) == 0) {
-          client->route = 20;
-        } else if (strcmp_P(path, PSTR("/reboot")) == 0) {
-          client->route = 30;
-        } else if (strcmp_P(path, PSTR("/debug")) == 0) {
-          client->route = 40;
-        } else if (strcmp_P(path, PSTR("/wifiscan")) == 0) {
-          client->route = 50;
-        } else if (strcmp_P(path, PSTR("/dallasalias")) == 0) {
-          client->route = 60;
-        } else if (strcmp_P(path, PSTR("/removedallas")) == 0) {
-          client->route = 190;
-        } else if (strcmp_P(path, PSTR("/dallasoffset")) == 0) {
-          client->route = 195;
-        } else if (strcmp_P(path, PSTR("/togglelog")) == 0 ||
-                   strcmp_P(path, PSTR("/togglehexdump")) == 0) {
-          client->route = 1;
-        } else if (strcmp_P(path, PSTR("/connecttest.txt")) == 0 ||
-                   strcmp_P(path, PSTR("/ncsi.txt")) == 0 ||
-                   strcmp_P(path, PSTR("/redirect")) == 0 ||
-                   strcmp_P(path, PSTR("/fwlink")) == 0 ||
-                   strcmp_P(path, PSTR("/generate_204")) == 0 ||
-                   strcmp_P(path, PSTR("/gen_204")) == 0 ||
-                   strcmp_P(path, PSTR("/popup")) == 0) {
-          client->route = 80; //for Android/Windows devices
-        } else if (strcmp_P(path, PSTR("/hotspot-detect.html")) == 0 ) {
-          client->route = 81;  //for Apple devices
-        } else if (strcmp_P(path, PSTR("/factoryreset")) == 0) {
-          client->route = 90;
-        } else if (strcmp_P(path, PSTR("/gpio")) == 0) {
-          client->route = 191;
-        } else if (strcmp_P(path, PSTR("/command")) == 0) {
-          client->route = 100;
-        } else if (post) {
-          // Only accept settings POST requests
-          if (strcmp_P(path, PSTR("/savesettings")) == 0) {
-            client->route = 110;
-          } else if (strcmp_P(path, PSTR("/saverules")) == 0) {
-            client->route = 170;
-#ifdef TLS_SUPPORT
-          } else if (strcmp_P(path, PSTR("/cacert")) == 0) {
-            client->route = 165;
-#endif
-          } else if (strcmp_P(path, PSTR("/firmware")) == 0) {
-            client->route = 150;
-          } else {
-            return -1;
-          }
-        } else if (strcmp_P(path, PSTR("/settings")) == 0) {
-          client->route = 120;
-        } else if (strcmp_P(path, PSTR("/getsettings")) == 0) {
-          client->route = 130;
-        } else if (strcmp_P(path, PSTR("/firmware")) == 0) {
-          client->route = 140;
-        } else if (strcmp_P(path, PSTR("/rules")) == 0) {
-          client->route = 160;
-#ifdef TLS_SUPPORT
-        } else if (strcmp_P(path, PSTR("/cacert")) == 0) {
-          client->route = 166;
-#endif
-        } else if (strcmp_P(path, PSTR("/scandallas")) == 0) {
-          client->route = 180;
-        } else {
-          client->route = 0;
+        // 1. Find the route and decide (src/common/webauth.cpp: route table, login, Host, Origin, lockout).
+        //    A rejected request gets an answer route (login redirect, 401, 403, 429); the webserver then
+        //    skips the query arguments, the body and a websocket upgrade.
+        char hosts[WEBAUTH_DEVICE_HOSTS_LEN];
+        webauthDeviceHosts(hosts, sizeof(hosts), &heishamonSettings);
+        webauth_env_t env = { (uint32_t)client->client->remoteIP(), hosts };
+        int8_t decision = webauth_request(client, req, &env);
+        if (decision != WEBSERVER_ACCEPT) {
+          return decision;
         }
 
-        // 2. The decision. Everything is accepted (there is no login yet). A check of the
-        //    request (req->header[WEBSERVER_HEADER_COOKIE], ...) belongs here: set a route
-        //    that answers it (with client->userdata left NULL) and return WEBSERVER_REJECT,
-        //    then the webserver skips the query arguments, the body and a websocket upgrade.
-
-        // 3. Accepted: only now start what the route does.
+        // 2. Accepted: only now start what the route does.
         switch (client->route) {
-          case 1: {
-              if (strcmp_P(path, PSTR("/togglelog")) == 0) {
-                log_message(_F("Toggled mqtt log flag"));
-                heishamonSettings.logMqtt ^= true;
-              } else if (strcmp_P(path, PSTR("/togglehexdump")) == 0) {
-                log_message(_F("Toggled hexdump log flag"));
-                heishamonSettings.logHexdump ^= true;
-              }
+          case 2: {
+              log_message(_F("Toggled mqtt log flag"));
+              heishamonSettings.logMqtt ^= true;
+            } break;
+          case 3: {
+              log_message(_F("Toggled hexdump log flag"));
+              heishamonSettings.logHexdump ^= true;
             } break;
           case 40: {
               log_message(_F("Debug URL requested"));
@@ -1301,6 +1229,12 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
     case WEBSERVER_CLIENT_ARGS: {
         struct arguments_t *args = (struct arguments_t *)dat;
         switch (client->route) {
+          case WEBAUTH_ROUTE_LOGIN_PAGE:
+          case WEBAUTH_ROUTE_LOGIN_POST:
+          case WEBAUTH_ROUTE_SECURITY_PAGE:
+          case WEBAUTH_ROUTE_SECURITY_POST: {
+              return webauth_args(client, args);
+            } break;
           case 20: {
               return handleJsonArgs(client, args, &heishamonSettings);
             } break;
@@ -1473,8 +1407,31 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               }
               return 0;
             } break;
-          case 1: {
+          case 1:
+          case 2:
+          case 3: {
               return handleRoot(client, readpercentage, mqttReconnects, &heishamonSettings);
+            } break;
+          case WEBAUTH_ROUTE_LOGIN_PAGE: {
+              return handleLogin(client, webauth_query_message(client));
+            } break;
+          case WEBAUTH_ROUTE_SECURITY_PAGE: {
+              return handleSecurity(client, webauth_query_message(client));
+            } break;
+          case WEBAUTH_ROUTE_SECURITY_POST: {
+              if (webauth_write_answer(client) == 1) {
+                showApiKey(client, webauth_form_apikey(client)); // shown once, then wiped
+                webauth_close(client);
+              }
+              return 0;
+            } break;
+          case WEBAUTH_ROUTE_LOGIN_POST:
+          case WEBAUTH_ROUTE_LOGOUT:
+          case WEBAUTH_ROUTE_TO_LOGIN:
+          case WEBAUTH_ROUTE_UNAUTHORIZED:
+          case WEBAUTH_ROUTE_FORBIDDEN:
+          case WEBAUTH_ROUTE_TOO_MANY: {
+              return webauth_write_answer(client);
             } break;
 #ifdef ESP32
           case 200: {
@@ -1692,7 +1649,6 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               return -1;
             } break;
           case 60:
-          case 70:
           case 190:
           case 195: {
               header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /"));
@@ -1707,11 +1663,24 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /rules"));
               return -1;
             } break;
+          case WEBAUTH_ROUTE_LOGIN_POST:
+          case WEBAUTH_ROUTE_LOGOUT:
+          case WEBAUTH_ROUTE_SECURITY_POST:
+          case WEBAUTH_ROUTE_TO_LOGIN:
+          case WEBAUTH_ROUTE_UNAUTHORIZED:
+          case WEBAUTH_ROUTE_FORBIDDEN:
+          case WEBAUTH_ROUTE_TOO_MANY: {
+              return webauth_create_header(client, header);
+            } break;
         }
         return 0;
       } break;
     case WEBSERVER_CLIENT_CLOSE: {
         switch (client->route) {
+          case WEBAUTH_ROUTE_LOGIN_POST:
+          case WEBAUTH_ROUTE_SECURITY_POST: {
+              webauth_close(client); // frees the form (and wipes the passwords in it)
+            } break;
           case 100: {
               if (client->userdata != NULL) {
                 free(client->userdata);
@@ -2077,6 +2046,7 @@ void setup() {
 
   loggingSerial.println(F("Loading config from flash..."));
   loadSettings(&heishamonSettings);
+  loadWebAuth(); // web login: password hash and API key hash from /webauth.bin
 
   loggingSerial.println(F("Setup wifi..."));
   setupWifi(&heishamonSettings);

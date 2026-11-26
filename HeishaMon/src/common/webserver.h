@@ -272,6 +272,7 @@ void webserver_loop(void);
 int16_t urldecode(const unsigned char *src, int src_len, unsigned char *dst, int dst_len, int is_form_url_encoded);
 int8_t webserver_send(struct webserver_t *client, uint16_t code, char *mimetype, uint16_t data_len);
 void webserver_client_stop(struct webserver_t *client);
+void webserver_close_others(struct webserver_t *keep);
 void webserver_reset_client(struct webserver_t *client);
 
 #endif

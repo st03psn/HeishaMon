@@ -9,6 +9,14 @@
 #include "src/common/progmem.h"
 #include "src/common/webserver.h"
 #include "src/common/timerqueue.h"
+#include "src/common/webauth.h"
+
+#if defined(ESP8266)
+#include <bearssl/bearssl_hash.h> // SHA-256 of the ESP8266 core (BearSSL)
+#elif defined(ESP32)
+#include <esp_random.h>           // esp_fill_random() of ESP-IDF
+#include <mbedtls/sha256.h>       // SHA-256 of ESP-IDF (mbedtls)
+#endif
 
 #include "lwip/apps/sntp.h"
 #include "lwip/dns.h"
@@ -45,6 +53,231 @@ static void sendBodyStart(struct webserver_t *client) {
     webserver_send_content(client, html, p - html);
   }
   webserver_send_content_P(client, webBodyStart2, strlen_P(webBodyStart2));
+  if (webauth_login_on()) {
+    webserver_send_content_P(client, webBodyStartLogout, strlen_P(webBodyStartLogout));
+  }
+  webserver_send_content_P(client, webBodyStart3, strlen_P(webBodyStart3));
+}
+
+/* ---- web login: what src/common/webauth.cpp needs of the device ---- */
+
+#define WEBAUTH_FILE "/webauth.bin"
+
+void webauth_platform_random(uint8_t *buf, size_t len) {
+#if defined(ESP8266)
+  ESP.random(buf, len);    // reads the hardware RNG register (RANDOM_REG32), Esp.h of the core
+#else
+  esp_fill_random(buf, len); // hardware RNG, esp_random.h of ESP-IDF
+#endif
+}
+
+void webauth_platform_sha256(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, uint8_t out[32]) {
+#if defined(ESP8266)
+  br_sha256_context ctx;
+  br_sha256_init(&ctx);
+  br_sha256_update(&ctx, a, alen);
+  if (blen > 0) {
+    br_sha256_update(&ctx, b, blen);
+  }
+  br_sha256_out(&ctx, out);
+#else
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts(&ctx, 0);
+  mbedtls_sha256_update(&ctx, a, alen);
+  if (blen > 0) {
+    mbedtls_sha256_update(&ctx, b, blen);
+  }
+  mbedtls_sha256_finish(&ctx, out);
+  mbedtls_sha256_free(&ctx);
+#endif
+}
+
+void webauth_platform_yield(void) {
+  yield();
+}
+
+unsigned long webauth_platform_millis(void) {
+  return millis();
+}
+
+void webauth_platform_close_others(struct webserver_t *keep) {
+  webserver_close_others(keep);
+}
+
+void webauth_platform_save(const webauth_store_t *store) {
+  File f = LittleFS.open(WEBAUTH_FILE, "w");
+  if (f) {
+    f.write((const uint8_t *)store, sizeof(*store));
+    f.close();
+  } else {
+    log_message(_F("Web login: could not save " WEBAUTH_FILE));
+  }
+}
+
+void loadWebAuth(void) {
+  webauth_reset();
+  if (LittleFS.begin() && LittleFS.exists(WEBAUTH_FILE)) {
+    File f = LittleFS.open(WEBAUTH_FILE, "r");
+    if (f) {
+      webauth_store_t tmp;
+      size_t size = f.size();
+      size_t len = f.read((uint8_t *)&tmp, sizeof(tmp));
+      f.close();
+      if (!webauth_load(&tmp, (len == sizeof(tmp) && size == sizeof(tmp)) ? sizeof(tmp) : 0)) {
+        log_message(_F("Web login: " WEBAUTH_FILE " is not valid, login is off"));
+      }
+      memset(&tmp, 0, sizeof(tmp));
+    }
+  }
+  log_message(webauth_login_on() ? _F("Web login is on") : _F("Web login is off (no web password set)"));
+}
+
+// The Host names of this device, for the DNS rebinding check: its IP addresses, hostname and hostname.local
+void webauthDeviceHosts(char *out, size_t size, settingsStruct *heishamonSettings) {
+  size_t n = 0;
+  out[0] = '\0';
+  auto add = [&](const char *h) {
+    size_t l = strlen(h);
+    if (l == 0 || n + l + 2 > size) {
+      return;
+    }
+    if (n > 0) {
+      out[n++] = ',';
+    }
+    memcpy(out + n, h, l);
+    n += l;
+    out[n] = '\0';
+  };
+  if ((uint32_t)WiFi.localIP() != 0) {
+    add(WiFi.localIP().toString().c_str());
+  }
+  if (WiFi.getMode() & WIFI_MODE_AP) {
+    add(WiFi.softAPIP().toString().c_str());
+  }
+#ifdef ESP32
+  if (ETH.hasIP()) {
+    add(ETH.localIP().toString().c_str());
+  }
+#endif
+  add(heishamonSettings->wifi_hostname);
+  char local[sizeof(heishamonSettings->wifi_hostname) + 8];
+  snprintf_P(local, sizeof(local), PSTR("%s.local"), heishamonSettings->wifi_hostname);
+  if (heishamonSettings->wifi_hostname[0] != '\0') {
+    add(local);
+  }
+}
+
+static void sendMessageP(struct webserver_t *client, PGM_P msg, bool good) {
+  char tmp[48];
+  int n = snprintf_P(tmp, sizeof(tmp), PSTR("<p style='color:var(--%s)'><strong>"), good ? "green" : "red");
+  webserver_send_content(client, tmp, n);
+  webserver_send_content_P(client, msg, strlen_P(msg));
+  webserver_send_content_P(client, PSTR("</strong></p>"), 13);
+}
+
+static PGM_P webauthMessage(uint8_t message, bool *good) {
+  *good = false;
+  switch (message) {
+    case WEBAUTH_RESULT_WRONG: return PSTR("Wrong password.");
+    case WEBAUTH_RESULT_LOCKED: return PSTR("Too many failed attempts, wait a moment.");
+    case WEBAUTH_RESULT_MISMATCH: return PSTR("Not saved: the two new passwords are not the same.");
+    case WEBAUTH_RESULT_LENGTH: return PSTR("Not saved: a password needs 8 to 64 characters.");
+    case WEBAUTH_RESULT_INVALID: return PSTR("Not saved: invalid input (host names: letters, digits, '.', '-', ':', separated by commas).");
+    case WEBAUTH_RESULT_NO_PASSWORD: return PSTR("No web password is set.");
+  }
+  *good = true;
+  switch (message) {
+    case WEBAUTH_RESULT_PASSWORD_SET: return PSTR("Web password saved, the login is on. All other browsers are logged out.");
+    case WEBAUTH_RESULT_REMOVED: return PSTR("Web password removed, the login is off.");
+    case WEBAUTH_RESULT_APIKEY_DELETED: return PSTR("API key deleted.");
+    case WEBAUTH_RESULT_HOSTS: return PSTR("Host names saved.");
+    case WEBAUTH_RESULT_LOGGED_OUT: return PSTR("Logged out.");
+  }
+  return NULL;
+}
+
+int handleLogin(struct webserver_t *client, uint8_t message) {
+  if (client->content == 0) {
+    webserver_send(client, 200, (char *)"text/html", 0);
+    webserver_send_content_P(client, webHeader, strlen_P(webHeader));
+    webserver_send_content_P(client, webCSS, strlen_P(webCSS));
+    webserver_send_content_P(client, webBodyLogin1, strlen_P(webBodyLogin1));
+    bool good = false;
+    PGM_P msg = webauthMessage(message, &good);
+    if (msg != NULL) {
+      sendMessageP(client, msg, good);
+    }
+    if (webauth_login_on()) {
+      webserver_send_content_P(client, webBodyLoginForm, strlen_P(webBodyLoginForm));
+    } else {
+      webserver_send_content_P(client, webBodyLoginNoPassword, strlen_P(webBodyLoginNoPassword));
+    }
+    webserver_send_content_P(client, webFooter, strlen_P(webFooter));
+  }
+  return 0;
+}
+
+int handleSecurity(struct webserver_t *client, uint8_t message) {
+  switch (client->content) {
+    case 0: {
+        webserver_send(client, 200, (char *)"text/html", 0);
+        webserver_send_content_P(client, webHeader, strlen_P(webHeader));
+        webserver_send_content_P(client, webCSS, strlen_P(webCSS));
+        sendBodyStart(client);
+        webserver_send_content_P(client, webBodySecurityOpen, strlen_P(webBodySecurityOpen));
+        bool good = false;
+        PGM_P msg = webauthMessage(message, &good);
+        if (msg != NULL) {
+          sendMessageP(client, msg, good);
+        }
+      } break;
+    case 1: {
+        if (webauth_login_on()) {
+          webserver_send_content_P(client, webBodySecurityChange, strlen_P(webBodySecurityChange));
+        } else {
+          webserver_send_content_P(client, webBodySecurityFirst, strlen_P(webBodySecurityFirst));
+        }
+      } break;
+    case 2: {
+        webserver_send_content_P(client, webBodySecurityApiKey1, strlen_P(webBodySecurityApiKey1));
+        if (webauth_store.apikey_set) {
+          webserver_send_content_P(client, PSTR("set (not shown)"), 15);
+        } else {
+          webserver_send_content_P(client, PSTR("not set"), 7);
+        }
+        webserver_send_content_P(client, webBodySecurityApiKey2, strlen_P(webBodySecurityApiKey2));
+        char hosts[WEBAUTH_DEVICE_HOSTS_LEN];
+        webauthDeviceHosts(hosts, sizeof(hosts), &heishamonSettings);
+        webserver_send_content(client, hosts, strlen(hosts)); // IP addresses and the hostname: no HTML characters
+        webserver_send_content_P(client, webBodySecurityApiKey3, strlen_P(webBodySecurityApiKey3));
+        // only letters, digits, '.', '-', ':', ',' and ' ' are stored (webauth_set_hosts): no escaping needed
+        webserver_send_content(client, webauth_store.hosts, strlen(webauth_store.hosts));
+        webserver_send_content_P(client, webBodySecurityEnd, strlen_P(webBodySecurityEnd));
+        webserver_send_content_P(client, menuJS, strlen_P(menuJS));
+        webserver_send_content_P(client, webFooter, strlen_P(webFooter));
+      } break;
+  }
+  return 0;
+}
+
+int showApiKey(struct webserver_t *client, const char *key) {
+  if (client->content == 0) {
+    webserver_send(client, 200, (char *)"text/html", 0);
+    webserver_send_content_P(client, webHeader, strlen_P(webHeader));
+    webserver_send_content_P(client, webCSS, strlen_P(webCSS));
+    static const char nostore[] PROGMEM = "<meta http-equiv='Cache-Control' content='no-store'>";
+    webserver_send_content_P(client, nostore, strlen_P(nostore));
+    sendBodyStart(client);
+    webserver_send_content_P(client, webBodyApiKey1, strlen_P(webBodyApiKey1));
+    if (key != NULL) {
+      webserver_send_content(client, (char *)key, strlen(key)); // 32 hex digits
+    }
+    webserver_send_content_P(client, webBodyApiKey2, strlen_P(webBodyApiKey2));
+    webserver_send_content_P(client, menuJS, strlen_P(menuJS));
+    webserver_send_content_P(client, webFooter, strlen_P(webFooter));
+  }
+  return 0;
 }
 
 int dBmToQuality(int dBm) {
@@ -1051,6 +1284,9 @@ int getSettings(struct webserver_t *client, settingsStruct *heishamonSettings) {
         jsonDoc[F("mqtt_password")] = masked_mqtt_password;
         //the update password is never needed by the settings page (it has its own "current" and "new" fields)
         jsonDoc.remove(F("ota_password"));
+        //web login: only whether a password and an API key are set, nothing of the stored credentials
+        jsonDoc[F("web_password_set")] = webauth_login_on();
+        jsonDoc[F("web_apikey_set")] = webauth_store.apikey_set != 0;
 #ifdef TLS_SUPPORT
         jsonDoc[F("mqtt_ca_cert")] = LittleFS.exists("/ca.pem") ? F("CA certificate stored in filesystem") : F("No CA certificate found");
 #endif   
@@ -1202,6 +1438,9 @@ int handleRoot(struct webserver_t *client, float readpercentage, int mqttReconne
         webserver_send_content_P(client, webHeader, strlen_P(webHeader));
         webserver_send_content_P(client, webCSS, strlen_P(webCSS));
         sendBodyStart(client);
+        if (!webauth_login_on()) {
+          webserver_send_content_P(client, webBodyRootLoginOff, strlen_P(webBodyRootLoginOff));
+        }
         webserver_send_content_P(client, webBodyRoot1, strlen_P(webBodyRoot1));
       } break;
     case 1: {
