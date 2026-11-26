@@ -1125,7 +1125,20 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+static bool otaRunning = false;
+
 void setupOTA() {
+  // ArduinoOTA can flash firmware without the web login: it only runs while the login is off
+  // and with a password of its own (never the default one). Checked at start and in loop().
+  if (webauth_login_on()) {
+    log_message(_F("ArduinoOTA (port 8266) not started: the web login is on"));
+    return;
+  }
+  if (!webauth_ota_allowed(heishamonSettings.ota_password)) {
+    log_message(_F("ArduinoOTA (port 8266) not started: set an OTA password other than the default 'heisha' in the settings"));
+    return;
+  }
+  otaRunning = true;
   // Port defaults to 8266
   ArduinoOTA.setPort(8266);
 
@@ -1430,6 +1443,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case WEBAUTH_ROUTE_TO_LOGIN:
           case WEBAUTH_ROUTE_UNAUTHORIZED:
           case WEBAUTH_ROUTE_FORBIDDEN:
+          case WEBAUTH_ROUTE_BAD_HOST:
           case WEBAUTH_ROUTE_TOO_MANY: {
               return webauth_write_answer(client);
             } break;
@@ -1669,6 +1683,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case WEBAUTH_ROUTE_TO_LOGIN:
           case WEBAUTH_ROUTE_UNAUTHORIZED:
           case WEBAUTH_ROUTE_FORBIDDEN:
+          case WEBAUTH_ROUTE_BAD_HOST:
           case WEBAUTH_ROUTE_TOO_MANY: {
               return webauth_create_header(client, header);
             } break;
@@ -1678,8 +1693,9 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
     case WEBSERVER_CLIENT_CLOSE: {
         switch (client->route) {
           case WEBAUTH_ROUTE_LOGIN_POST:
-          case WEBAUTH_ROUTE_SECURITY_POST: {
-              webauth_close(client); // frees the form (and wipes the passwords in it)
+          case WEBAUTH_ROUTE_SECURITY_POST:
+          case WEBAUTH_ROUTE_BAD_HOST: {
+              webauth_close(client); // frees the form (and wipes the passwords in it) or the 403 page data
             } break;
           case 100: {
               if (client->userdata != NULL) {
@@ -2203,7 +2219,15 @@ void loop() {
   // check wifi
   check_wifi();
   // Handle OTA first.s
-  ArduinoOTA.handle();
+  if (otaRunning) {
+    if (webauth_ota_allowed(heishamonSettings.ota_password)) {
+      ArduinoOTA.handle();
+    } else {
+      otaRunning = false;  // the login was switched on: no more OTA until a restart with the login off
+      log_message(_F("ArduinoOTA stopped: the web login is on"));
+    }
+  }
+  webauth_tick(); // expired web login sessions and lockouts
 
 #ifdef ESP32
   modbusServer.configure(heishamonSettings.modbus, heishamonSettings.optionalPCB, heishamonSettings.modbusWrites, heishamonSettings.listenonly);

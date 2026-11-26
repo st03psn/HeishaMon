@@ -135,4 +135,30 @@ for name, text in (("webauth.cpp", (COMMON / "webauth.cpp").read_text()),):
         sys.exit(f"FAIL: {name} logs")
 print("PASS: /getsettings and config.json without web login secrets")
 
+# --- firmware glue that cannot run on the host: the calls must be there ---
+def need(text, pattern, what):
+    if not re.search(pattern, text, re.S):
+        sys.exit(f"FAIL: {what}")
+
+
+setup_ota = ino.split("void setupOTA() {", 1)[1].split("\n}", 1)[0]
+need(setup_ota, r"webauth_login_on\(\).*return;.*webauth_ota_allowed\(heishamonSettings\.ota_password\).*return;.*ArduinoOTA\.begin\(\)",
+     "setupOTA() must not start ArduinoOTA with the login on or the default password")
+need(ino, r"if \(otaRunning\) \{\s*if \(webauth_ota_allowed\(heishamonSettings\.ota_password\)\) \{\s*ArduinoOTA\.handle\(\);",
+     "loop() must stop serving ArduinoOTA once the login is on")
+if ino.count("ArduinoOTA.handle()") != 1:
+    sys.exit("FAIL: ArduinoOTA.handle() outside the guarded place")
+need(ino, r"webauth_tick\(\);", "loop() must call webauth_tick()")
+need(wf, r"webauth_device_hosts\(out, size, list, n, heishamonSettings->wifi_hostname\)", "device hosts not built by webauth_device_hosts()")
+sec = wf.split("int handleSecurity(", 1)[1].split("\nint ", 1)[0]
+need(sec, r"sendEscaped\(client, hosts\);.*sendEscaped\(client, webauth_store\.hosts\);", "/security must escape the host names")
+if re.search(r"webserver_send_content\(client, (hosts|webauth_store\.hosts)", sec):
+    sys.exit("FAIL: /security prints host names without escaping")
+need(wf, r"strcmp\(tmp->name\.c_str\(\), \"wifi_hostname\"\) == 0\) \{\s*if \(webauth_hostname_valid\(", "saveSettings() must validate the hostname")
+need(wf, r"strlcpy\(heishamonSettings->wifi_hostname, jsonDoc\[F\(\"wifi_hostname\"\)\].*?webauth_hostname_valid\(heishamonSettings->wifi_hostname\)",
+     "loadSettings() must validate the stored hostname")
+need(wf, r"webauth_load_failed\(\);", "a damaged /webauth.bin must keep the login on")
+need(wf, r"LittleFS\.rename\(WEBAUTH_FILE_TMP, WEBAUTH_FILE\)", "/webauth.bin must be written through a temporary file")
+print("PASS: firmware glue (OTA, hostname, escaping, persistence)")
+
 print("PASS: webauth host tests")

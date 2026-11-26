@@ -60,6 +60,9 @@
 #ifndef WEBSERVER_MAX_HOST
   #define WEBSERVER_MAX_HOST 64
 #endif
+#ifndef WEBSERVER_MAX_SEC_FETCH_SITE
+  #define WEBSERVER_MAX_SEC_FETCH_SITE 16 // "cross-site", "same-site", "same-origin", "none"
+#endif
 #ifndef WEBSERVER_MAX_CONTENT_TYPE
   #define WEBSERVER_MAX_CONTENT_TYPE 128 // a multipart request with a longer one is closed (boundary lost)
 #endif
@@ -139,6 +142,7 @@ enum {
   WEBSERVER_HEADER_COOKIE,
   WEBSERVER_HEADER_AUTHORIZATION,
   WEBSERVER_HEADER_CONTENT_TYPE,
+  WEBSERVER_HEADER_SEC_FETCH_SITE, // sent by browsers: was the request made by a page of another site
   WEBSERVER_HEADER_COUNT
 };
 

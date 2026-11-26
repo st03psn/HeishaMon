@@ -61,7 +61,6 @@ static void sendBodyStart(struct webserver_t *client) {
 
 /* ---- web login: what src/common/webauth.cpp needs of the device ---- */
 
-#define WEBAUTH_FILE "/webauth.bin"
 
 void webauth_platform_random(uint8_t *buf, size_t len) {
 #if defined(ESP8266)
@@ -105,27 +104,45 @@ void webauth_platform_close_others(struct webserver_t *keep) {
   webserver_close_others(keep);
 }
 
-void webauth_platform_save(const webauth_store_t *store) {
-  File f = LittleFS.open(WEBAUTH_FILE, "w");
+// written to a temporary file first, then renamed: a cut write never leaves a half file
+bool webauth_platform_save(const webauth_store_t *store) {
+  bool ok = false;
+  File f = LittleFS.open(WEBAUTH_FILE_TMP, "w");
   if (f) {
-    f.write((const uint8_t *)store, sizeof(*store));
+    ok = f.write((const uint8_t *)store, sizeof(*store)) == sizeof(*store);
     f.close();
-  } else {
-    log_message(_F("Web login: could not save " WEBAUTH_FILE));
+    if (ok) {
+      LittleFS.remove(WEBAUTH_FILE);
+      ok = LittleFS.rename(WEBAUTH_FILE_TMP, WEBAUTH_FILE);
+    } else {
+      LittleFS.remove(WEBAUTH_FILE_TMP);
+    }
   }
+  if (!ok) {
+    log_message(_F("Web login: could not save " WEBAUTH_FILE ", the change is lost on restart"));
+  }
+  return ok;
 }
 
 void loadWebAuth(void) {
   webauth_reset();
-  if (LittleFS.begin() && LittleFS.exists(WEBAUTH_FILE)) {
-    File f = LittleFS.open(WEBAUTH_FILE, "r");
-    if (f) {
+  if (LittleFS.begin()) {
+    if (!LittleFS.exists(WEBAUTH_FILE) && LittleFS.exists(WEBAUTH_FILE_TMP)) {
+      LittleFS.rename(WEBAUTH_FILE_TMP, WEBAUTH_FILE);  // power lost between remove and rename
+    }
+    if (LittleFS.exists(WEBAUTH_FILE)) {
+      File f = LittleFS.open(WEBAUTH_FILE, "r");
       webauth_store_t tmp;
-      size_t size = f.size();
-      size_t len = f.read((uint8_t *)&tmp, sizeof(tmp));
-      f.close();
+      size_t size = f ? f.size() : 0;
+      size_t len = f ? f.read((uint8_t *)&tmp, sizeof(tmp)) : 0;
+      if (f) {
+        f.close();
+      }
       if (!webauth_load(&tmp, (len == sizeof(tmp) && size == sizeof(tmp)) ? sizeof(tmp) : 0)) {
-        log_message(_F("Web login: " WEBAUTH_FILE " is not valid, login is off"));
+        // not "no password": the login stays on and nothing matches until the factory reset
+        webauth_load_failed();
+        log_message(_F("Web login: " WEBAUTH_FILE " is damaged (size or check value wrong). The login stays on and no password works: "
+                       "hold the boot button for more than 10 seconds (factory reset) to recover."));
       }
       memset(&tmp, 0, sizeof(tmp));
     }
@@ -135,37 +152,31 @@ void loadWebAuth(void) {
 
 // The Host names of this device, for the DNS rebinding check: its IP addresses, hostname and hostname.local
 void webauthDeviceHosts(char *out, size_t size, settingsStruct *heishamonSettings) {
-  size_t n = 0;
-  out[0] = '\0';
-  auto add = [&](const char *h) {
-    size_t l = strlen(h);
-    if (l == 0 || n + l + 2 > size) {
-      return;
-    }
-    if (n > 0) {
-      out[n++] = ',';
-    }
-    memcpy(out + n, h, l);
-    n += l;
-    out[n] = '\0';
-  };
+  String ips[3];
+  uint8_t n = 0;
   if ((uint32_t)WiFi.localIP() != 0) {
-    add(WiFi.localIP().toString().c_str());
+    ips[n++] = WiFi.localIP().toString();
   }
   if (WiFi.getMode() & WIFI_AP) { // WIFI_AP: 2 on both cores (ESP32: WIFI_MODE_AP)
-    add(WiFi.softAPIP().toString().c_str());
+    ips[n++] = WiFi.softAPIP().toString();
   }
 #ifdef ESP32
   if (ETH.hasIP()) {
-    add(ETH.localIP().toString().c_str());
+    ips[n++] = ETH.localIP().toString();
   }
 #endif
-  add(heishamonSettings->wifi_hostname);
-  char local[sizeof(heishamonSettings->wifi_hostname) + 8];
-  snprintf_P(local, sizeof(local), PSTR("%s.local"), heishamonSettings->wifi_hostname);
-  if (heishamonSettings->wifi_hostname[0] != '\0') {
-    add(local);
+  const char *list[3];
+  for (uint8_t i = 0; i < n; i++) {
+    list[i] = ips[i].c_str();
   }
+  // only a valid hostname ([A-Za-z0-9-]) goes in: "HeishaMon,evil.com" must not widen the list
+  webauth_device_hosts(out, size, list, n, heishamonSettings->wifi_hostname);
+}
+
+static void sendEscaped(struct webserver_t *client, const char *text) {
+  char buf[WEBAUTH_DEVICE_HOSTS_LEN * 2];
+  size_t n = webauth_html_escape(text, buf, sizeof(buf));
+  webserver_send_content(client, buf, n);
 }
 
 static void sendMessageP(struct webserver_t *client, PGM_P msg, bool good) {
@@ -184,11 +195,12 @@ static PGM_P webauthMessage(uint8_t message, bool *good) {
     case WEBAUTH_RESULT_MISMATCH: return PSTR("Not saved: the two new passwords are not the same.");
     case WEBAUTH_RESULT_LENGTH: return PSTR("Not saved: a password needs 8 to 64 characters.");
     case WEBAUTH_RESULT_INVALID: return PSTR("Not saved: invalid input (host names: letters, digits, '.', '-', ':', separated by commas).");
-    case WEBAUTH_RESULT_NO_PASSWORD: return PSTR("No web password is set.");
+    case WEBAUTH_RESULT_NO_PASSWORD: return PSTR("Not possible while no web password is set (set one first).");
+    case WEBAUTH_RESULT_SAVE_FAILED: return PSTR("Changed, but it could not be written to the flash: the change is lost on restart. Try again.");
   }
   *good = true;
   switch (message) {
-    case WEBAUTH_RESULT_PASSWORD_SET: return PSTR("Web password saved, the login is on. All other browsers are logged out.");
+    case WEBAUTH_RESULT_PASSWORD_SET: return PSTR("Web password saved, the login is on. All other browsers are logged out. Unless you ticked to keep it, the API key was deleted: make a new one and update Home Assistant.");
     case WEBAUTH_RESULT_REMOVED: return PSTR("Web password removed, the login is off.");
     case WEBAUTH_RESULT_APIKEY_DELETED: return PSTR("API key deleted.");
     case WEBAUTH_RESULT_HOSTS: return PSTR("Host names saved.");
@@ -207,6 +219,9 @@ int handleLogin(struct webserver_t *client, uint8_t message) {
     PGM_P msg = webauthMessage(message, &good);
     if (msg != NULL) {
       sendMessageP(client, msg, good);
+    }
+    if (webauth_broken()) {
+      sendMessageP(client, PSTR("The stored login data is damaged, so no password works. Hold the boot button for more than 10 seconds (factory reset) to recover."), false);
     }
     if (webauth_login_on()) {
       webserver_send_content_P(client, webBodyLoginForm, strlen_P(webBodyLoginForm));
@@ -249,10 +264,9 @@ int handleSecurity(struct webserver_t *client, uint8_t message) {
         webserver_send_content_P(client, webBodySecurityApiKey2, strlen_P(webBodySecurityApiKey2));
         char hosts[WEBAUTH_DEVICE_HOSTS_LEN];
         webauthDeviceHosts(hosts, sizeof(hosts), &heishamonSettings);
-        webserver_send_content(client, hosts, strlen(hosts)); // IP addresses and the hostname: no HTML characters
+        sendEscaped(client, hosts);
         webserver_send_content_P(client, webBodySecurityApiKey3, strlen_P(webBodySecurityApiKey3));
-        // only letters, digits, '.', '-', ':', ',' and ' ' are stored (webauth_set_hosts): no escaping needed
-        webserver_send_content(client, webauth_store.hosts, strlen(webauth_store.hosts));
+        sendEscaped(client, webauth_store.hosts);
         webserver_send_content_P(client, webBodySecurityEnd, strlen_P(webBodySecurityEnd));
         webserver_send_content_P(client, menuJS, strlen_P(menuJS));
         webserver_send_content_P(client, webFooter, strlen_P(webFooter));
@@ -272,6 +286,10 @@ int showApiKey(struct webserver_t *client, const char *key) {
     webserver_send_content_P(client, webBodyApiKey1, strlen_P(webBodyApiKey1));
     if (key != NULL) {
       webserver_send_content(client, (char *)key, strlen(key)); // 32 hex digits
+    }
+    if (!webauth_last_save_ok()) {
+      static const char warn[] PROGMEM = "</code></p><p style='color:var(--red)'><strong>The key could not be written to the flash: it is lost on restart. Make a new one.</strong><code>";
+      webserver_send_content_P(client, warn, strlen_P(warn));
     }
     webserver_send_content_P(client, webBodyApiKey2, strlen_P(webBodyApiKey2));
     webserver_send_content_P(client, menuJS, strlen_P(menuJS));
@@ -500,6 +518,11 @@ void loadSettings(settingsStruct *heishamonSettings) {
           if ( jsonDoc[F("wifi_ssid")] ) strlcpy(heishamonSettings->wifi_ssid, jsonDoc[F("wifi_ssid")], sizeof(heishamonSettings->wifi_ssid));
           if ( jsonDoc[F("wifi_password")] ) strlcpy(heishamonSettings->wifi_password, jsonDoc[F("wifi_password")], sizeof(heishamonSettings->wifi_password));
           if ( jsonDoc[F("wifi_hostname")] ) strlcpy(heishamonSettings->wifi_hostname, jsonDoc[F("wifi_hostname")], sizeof(heishamonSettings->wifi_hostname));
+          if (!webauth_hostname_valid(heishamonSettings->wifi_hostname)) {
+            // it goes into pages, mDNS and the Host allowlist of the web login: only [A-Za-z0-9-]
+            log_message(_F("Hostname in config.json is not valid (only letters, digits and '-', 1 to 32), using HeishaMon"));
+            strlcpy(heishamonSettings->wifi_hostname, "HeishaMon", sizeof(heishamonSettings->wifi_hostname));
+          }
           if ( jsonDoc[F("description")] ) strlcpy(heishamonSettings->description, jsonDoc[F("description")], sizeof(heishamonSettings->description));
           if ( jsonDoc[F("ota_password")] ) strlcpy(heishamonSettings->ota_password, jsonDoc[F("ota_password")], sizeof(heishamonSettings->ota_password));
           if ( jsonDoc[F("mqtt_topic_base")] ) strlcpy(heishamonSettings->mqtt_topic_base, jsonDoc[F("mqtt_topic_base")], sizeof(heishamonSettings->mqtt_topic_base));
@@ -1015,7 +1038,11 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   struct websettings_t *tmp = (struct websettings_t *)client->userdata;
   while (tmp) {
     if (strcmp(tmp->name.c_str(), "wifi_hostname") == 0) {
-      jsonDoc[F("wifi_hostname")] = tmp->value;
+      if (webauth_hostname_valid(tmp->value.c_str())) {
+        jsonDoc[F("wifi_hostname")] = tmp->value;
+      } else {
+        log_message(_F("Hostname not changed: only letters, digits and '-' (1 to 32, not at the start or end)"));
+      }
     } else if (strcmp(tmp->name.c_str(), "description") == 0) {
       jsonDoc[F("description")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "mqtt_topic_base") == 0) {

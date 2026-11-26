@@ -1641,8 +1641,8 @@ static const char settingsForm1[] FLASHPROG = R"====(
   <div class='settings-grid'>
     <div class='setting-row'>
       <label class='setting-label'>Hostname</label>
-      <input type='text' name='wifi_hostname' maxlength='39' class='setting-input' value=''>
-      <div class='setting-desc'>Name of this HeishaMon on the network.</div>
+      <input type='text' name='wifi_hostname' maxlength='32' pattern='[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?' class='setting-input' value=''>
+      <div class='setting-desc'>Name of this HeishaMon on the network: letters, digits and '-' (up to 32).</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Description</label>
@@ -1672,7 +1672,7 @@ static const char settingsForm1[] FLASHPROG = R"====(
   <div class='panel' data-tab='system' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Arduino OTA password</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><span class='setting-hint'>Only for firmware updates over the network from the Arduino IDE or arduino-cli (ArduinoOTA, port 8266). The firmware upload of the web interface doesn't use it; it needs the web login (when it is on) or the API key.</span></div>
+    <div class='setting-row'><span class='setting-hint'>Only for firmware updates over the network from the Arduino IDE or arduino-cli (ArduinoOTA, port 8266). ArduinoOTA only runs after a restart while the web login is off and this password is not the default "heisha". The firmware upload of the web interface doesn't use it.</span></div>
     <div class='setting-row'>
       <label class='setting-label'>Current Password</label>
       <div style='display:flex;align-items:center;gap:10px'>
@@ -2828,6 +2828,7 @@ static const char webBodySecurityChange[] FLASHPROG = R"====(
   <div class='setting-row'><label class='setting-label'>Current web password</label><input type='password' name='current' maxlength='64' class='setting-input' autocomplete='current-password' required></div>
   <div class='setting-row'><label class='setting-label'>New web password</label><input type='password' name='password' minlength='8' maxlength='64' class='setting-input' autocomplete='new-password' required></div>
   <div class='setting-row'><label class='setting-label'>Repeat</label><input type='password' name='repeat' minlength='8' maxlength='64' class='setting-input' autocomplete='new-password' required></div>
+  <div class='setting-row'><label class='setting-label'>Keep the API key</label><div class='checkbox-wrap'><input type='checkbox' name='keep_apikey' value='1'></div><div class='setting-desc'>Without the tick the API key is deleted with the change: make a new one and update Home Assistant.</div></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Change password</button><span class='setting-hint'>All browsers are logged out.</span></div>
 </form></div>
 <div class='panel' style='margin-bottom:16px'>
@@ -2848,8 +2849,10 @@ static const char webBodySecurityApiKey1[] FLASHPROG = R"====(
 
 static const char webBodySecurityApiKey2[] FLASHPROG = R"====(</span></div>
   <div class='setting-row'>
-    <form method='POST' action='/security' style='display:inline' onsubmit="return confirm('Make a new API key? The old one stops working.');"><input type='hidden' name='action' value='apikey'><button type='submit' class='btn btn-primary'>Make a new API key</button></form>
-    <form method='POST' action='/security' style='display:inline;margin-left:8px'><input type='hidden' name='action' value='apikey_delete'><button type='submit' class='btn btn-ghost'>Delete the API key</button></form>
+    <form method='POST' action='/security' style='display:inline' onsubmit="return confirm('Make a new API key? The old one stops working.');"><input type='hidden' name='action' value='apikey'><input type='password' name='current' maxlength='64' class='setting-input' placeholder='Current web password' autocomplete='current-password' required> <button type='submit' class='btn btn-primary'>Make a new API key</button></form>
+  </div>
+  <div class='setting-row'>
+    <form method='POST' action='/security' style='display:inline'><input type='hidden' name='action' value='apikey_delete'><input type='password' name='current' maxlength='64' class='setting-input' placeholder='Current web password' autocomplete='current-password' required> <button type='submit' class='btn btn-ghost'>Delete the API key</button></form>
   </div>
 </div></div>
 <div class='panel' style='margin-bottom:16px'>
@@ -2862,6 +2865,7 @@ static const char webBodySecurityApiKey3[] FLASHPROG = R"====(. Add other names 
   <div class='setting-row'><label class='setting-label'>Extra host names</label><input type='text' name='hosts' maxlength='95' class='setting-input' placeholder='heishamon.fritz.box, heatpump.example.com' value=')====";
 
 static const char webBodySecurityEnd[] FLASHPROG = R"====('></div>
+  <div class='setting-row'><label class='setting-label'>Current web password</label><input type='password' name='current' maxlength='64' class='setting-input' autocomplete='current-password' placeholder='(needed while the login is on)'></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Save host names</button></div>
 </form></div>
 <p style='font-size:12px;color:var(--text-muted)'>Forgot the web password? It can only be reset at the device: hold its boot button for more than 10 seconds (factory reset, all settings are lost). No network request can skip the login.</p>

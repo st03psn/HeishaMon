@@ -127,7 +127,8 @@ void webauth_platform_sha256(const uint8_t *a, size_t alen, const uint8_t *b, si
 }
 void webauth_platform_yield(void) { yields++; }
 unsigned long webauth_platform_millis(void) { return auth_now; }
-void webauth_platform_save(const webauth_store_t *) { saves++; }
+static bool save_fails = false;
+bool webauth_platform_save(const webauth_store_t *) { saves++; return !save_fails; }
 void webauth_platform_close_others(struct webserver_t *keep) {
   closes++;
   webserver_close_others(keep);
@@ -190,7 +191,7 @@ static WiFiClient idle_client = { s_write, s_write_P, s_available, f_connected, 
 
 /* ---- the callback: the decision part of webserver_cb() ---- */
 
-static const char *DEVICE_HOSTS = "192.168.1.5,192.168.4.1,heishamon,heishamon.local";
+static const char *DEVICE_HOSTS = "192.168.1.5,192.168.4.1,heishamon,heishamon.local";  // as webauth_device_hosts() builds it
 static uint32_t client_ip = 0x0501a8c0;
 static std::string events;
 
@@ -221,9 +222,9 @@ static int8_t callback(struct webserver_t *client, void *data) {
       if(client->content == 0) {
         events += "WRITE;";
       }
-      switch(client->route) {
-        case WEBAUTH_ROUTE_LOGIN_POST: case WEBAUTH_ROUTE_LOGOUT: case WEBAUTH_ROUTE_SECURITY_POST:
-        case WEBAUTH_ROUTE_TO_LOGIN: case WEBAUTH_ROUTE_UNAUTHORIZED: case WEBAUTH_ROUTE_FORBIDDEN: case WEBAUTH_ROUTE_TOO_MANY: {
+      if(webauth_is_answer_route(client->route) || client->route == WEBAUTH_ROUTE_LOGIN_POST || client->route == WEBAUTH_ROUTE_LOGOUT ||
+         client->route == WEBAUTH_ROUTE_SECURITY_POST) {
+        {
           if(webauth_write_answer(client) == 1) {
             std::string k = std::string("KEY ") + webauth_form_apikey(client);
             webserver_send(client, 200, (char *)"text/plain", 0);
@@ -580,6 +581,8 @@ static void test_hosts() {
   CHECK(!webauth_origin_matches("http://192.168.1.5", NULL), "no Host");
 }
 
+static unsigned long ip_wait_for(uint32_t ip) { return webauth_lock_wait_ms(ip); }
+
 static void test_lockout() {
   fresh(true);
   uint32_t ip = 0x0a000001;
@@ -613,34 +616,51 @@ static void test_lockout() {
   auth_now += WEBAUTH_LOCK_FORGET_MS;
   CHECK(webauth_lock_wait_ms(ip) == 0, "forgotten");
 
-  // the global budget: many addresses slow down, but only for a few seconds
+  // the global budget: an address with failures can only use it down to the reserve,
+  // an address without failures (the owner) also gets the reserve
   fresh(true);
-  for(int i = 0; i < WEBAUTH_BUCKET_SIZE; i++) {
-    CHECK(webauth_lock_check(0x0b000000 + i), "budget %d", i);
+  uint32_t att = 0x0b000001;
+  int used = 0;
+  (void)used;
+  for(int i = 0; i < 200; i++) {
+    auth_now += ip_wait_for(att);
+    if(webauth_lock_check(att)) {
+      used++;
+    } else {
+      break;
+    }
   }
-  CHECK(!webauth_lock_check(0x0c000001), "budget used up");
-  unsigned long wait = webauth_lock_wait_ms(0x0c000001);
-  CHECK(wait > 0 && wait <= WEBAUTH_BUCKET_REFILL_MS, "wait %lu", wait);
-  auth_now += WEBAUTH_BUCKET_REFILL_MS;
-  CHECK(webauth_lock_check(0x0c000001), "one more after the refill");
-  CHECK(!webauth_lock_check(0x0c000002), "and only one");
+  CHECK(!webauth_lock_check(att) && webauth_lock_wait_ms(att) > 0, "attacker refused");
+  CHECK(webauth_lock_check(0x0c000001), "owner gets the reserve");
+  webauth_lock_success(0x0c000001);
+  // a refill brings the budget back
   auth_now += WEBAUTH_BUCKET_REFILL_MS * WEBAUTH_BUCKET_SIZE * 3;
   int n = 0;
   while(n < 100 && webauth_lock_check(0x0d000000 + n)) {
+    webauth_lock_success(0x0d000000 + n);
     n++;
   }
   CHECK(n == WEBAUTH_BUCKET_SIZE, "refilled to %d", n);
 
-  // bounded table: more addresses than entries push out the oldest
+  // bounded table: nobody is pushed out; while it is full all new addresses share one entry with backoff
   fresh(true);
-  for(uint32_t i = 0; i < WEBAUTH_LOCK_ENTRIES + 1; i++) {
+  for(uint32_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
     for(int k = 0; k < WEBAUTH_LOCK_FREE + 1; k++) {
       webauth_lock_failed(0x0e000000 + i);
     }
     auth_now += 1;
   }
-  CHECK(webauth_lock_wait_ms(0x0e000000) == 0, "oldest pushed out");
-  CHECK(webauth_lock_wait_ms(0x0e000000 + WEBAUTH_LOCK_ENTRIES) > 0, "newest kept");
+  CHECK(webauth_lock_wait_ms(0x0e000000) > 0, "oldest kept");
+  CHECK(webauth_lock_wait_ms(0x0f000000) == 0, "a new address starts on the shared entry");
+  for(int k = 0; k < WEBAUTH_LOCK_FREE + 1; k++) {
+    webauth_lock_failed(0x0f000000 + k);  // rotating new addresses
+  }
+  CHECK(webauth_lock_wait_ms(0x0f0000ff) > 0 && !webauth_lock_check(0x0f0000fe), "rotating addresses share the backoff");
+  webauth_lock_success(0x0f000001);
+  CHECK(webauth_lock_wait_ms(0x0f0000ff) > 0, "a success never clears the shared entry");
+  auth_now += WEBAUTH_LOCK_FORGET_MS;
+  webauth_tick();
+  CHECK(webauth_lock_wait_ms(0x0f0000ff) == 0 && webauth_lock_wait_ms(0x0e000000) == 0, "forgotten");
 
   // backoff across the wrap of the clock
   fresh(true);
@@ -648,7 +668,7 @@ static void test_lockout() {
   for(int k = 0; k < WEBAUTH_LOCK_FREE + 1; k++) {
     webauth_lock_failed(ip);
   }
-  wait = webauth_lock_wait_ms(ip);
+  unsigned long wait = webauth_lock_wait_ms(ip);
   CHECK(wait == 2000, "wait %lu", wait);
   auth_now += 1000;  // wrapped
   CHECK(webauth_lock_wait_ms(ip) == 1000 && !webauth_lock_check(ip), "across the wrap");
@@ -696,7 +716,7 @@ static void test_routes() {
       pub.insert(webauth_routes[i].route);
     }
   }
-  CHECK(pub == std::set<int>({ 0, 4, 5, 80, 81, WEBAUTH_ROUTE_TO_LOGIN, WEBAUTH_ROUTE_UNAUTHORIZED, WEBAUTH_ROUTE_FORBIDDEN, WEBAUTH_ROUTE_TOO_MANY }),
+  CHECK(pub == std::set<int>({ 0, 4, 5, 80, 81, WEBAUTH_ROUTE_TO_LOGIN, WEBAUTH_ROUTE_UNAUTHORIZED, WEBAUTH_ROUTE_FORBIDDEN, WEBAUTH_ROUTE_TOO_MANY, WEBAUTH_ROUTE_BAD_HOST }),
         "public routes changed");
   // state changing: every POST route and the GET routes that change something
   int state[] = { 2, 3, 6, 8, 30, 60, 90, 100, 110, 111, 112, 113, 150, 165, 170, 180, 190, 191, 195 };
@@ -940,7 +960,7 @@ static void test_websocket() {
   r = run(get("/ws", WS + cookie_hdr(tok) + origin()));
   CHECK(r.websocket == 1 && contains(r.output, "101 Switching Protocols"), "%s", r.events.c_str());
   // the API key (no Origin, a program)
-  r = run(post("/security", "action=apikey", cookie_hdr(tok) + origin()));
+  r = run(post("/security", "action=apikey&current=correct+horse+battery", cookie_hdr(tok) + origin()));
   std::string key = r.body().size() > 4 ? r.body().substr(r.body().find("KEY ") + 4, 32) : "";
   r = run(get("/ws", WS + bearer(key)));
   CHECK(r.websocket == 1, "bearer websocket: %s", r.events.c_str());
@@ -964,7 +984,7 @@ static std::string request_for(const webauth_route_t &rt, const std::string &hea
 static void test_api_key() {
   fresh(true);
   std::string tok = login();
-  result_t r = run(post("/security", "action=apikey", cookie_hdr(tok) + origin()));
+  result_t r = run(post("/security", "action=apikey&current=correct+horse+battery", cookie_hdr(tok) + origin()));
   CHECK(r.status == 200 && contains(r.body(), "KEY ") && webauth_store.apikey_set, "%s", r.output.c_str());
   std::string key = r.body().substr(r.body().find("KEY ") + 4, 32);
   CHECK(key.size() == 32, "key %s", key.c_str());
@@ -1001,22 +1021,25 @@ static void test_api_key() {
   // a wrong key does not fall back to the cookie
   r = run(get("/json", bearer(std::string(32, 'b')) + cookie_hdr(tok)));
   CHECK(r.status == 401, "%s", r.events.c_str());
-  // guessing keys: the address backs off, even the right key waits; others are not affected
+  // guessing keys: the address backs off for wrong keys, but the right key always works
+  // (Home Assistant may share its address with the guesser: NAT, proxy, same host)
   fresh(true);
   tok = login();
-  key = key_of(run(post("/security", "action=apikey", cookie_hdr(tok) + origin())));
+  key = key_of(run(post("/security", "action=apikey&current=correct+horse+battery", cookie_hdr(tok) + origin())));
   client_ip = 0x6401a8c0;
   for(int i = 0; i < WEBAUTH_LOCK_FREE + 1; i++) {
     run(get("/json", bearer(std::string(32, 'c'))));
   }
-  r = run(get("/json", bearer(key)));
-  CHECK(r.status == 429 && !r.header("Retry-After").empty(), "%s", r.output.c_str());
+  r = run(get("/json", bearer(std::string(32, 'c'))));
+  CHECK(r.status == 429 && !r.header("Retry-After").empty(), "wrong key backs off: %s", r.output.c_str());
+  r = run(get("/reboot", bearer(key)));
+  CHECK(r.status == 200 && contains(r.events, "ACCEPT r=30;"), "right key from the same address: %s", r.output.c_str());
   client_ip = 0x0501a8c0;
   CHECK(run(get("/json", bearer(key))).status == 200, "other address");
   // a new key: the old one stops working; delete
-  std::string key2 = key_of(run(post("/security", "action=apikey", cookie_hdr(tok) + origin())));
+  std::string key2 = key_of(run(post("/security", "action=apikey&current=correct+horse+battery", cookie_hdr(tok) + origin())));
   CHECK(key2 != key && run(get("/json", bearer(key))).status == 401 && run(get("/json", bearer(key2))).status == 200, "regenerate");
-  r = run(post("/security", "action=apikey_delete", cookie_hdr(tok) + origin()));
+  r = run(post("/security", "action=apikey_delete&current=correct+horse+battery", cookie_hdr(tok) + origin()));
   CHECK(r.header("Location") == "/security?m=10" && run(get("/json", bearer(key2))).status == 401, "delete");
   // the key itself is never in the stored record
   CHECK(!contains(std::string((const char *)&webauth_store, sizeof(webauth_store)), key2), "stored");
@@ -1049,12 +1072,12 @@ static void test_findings() {
 
   // the page with the new key: a 200 with a Content-Type, no redirect, not cached
   std::string tok = login();
-  r = run(post("/security", "action=apikey", cookie_hdr(tok) + origin()));
+  r = run(post("/security", "action=apikey&current=correct+horse+battery", cookie_hdr(tok) + origin()));
   CHECK(r.status == 200 && r.header("Location").empty() && r.header("Content-Type") == "text/plain" &&
         r.header("Transfer-Encoding") == "chunked" && r.header("Cache-Control") == "no-store", "%s", r.output.c_str());
   // a form that checked no password does not count as a failed try
   for(int i = 0; i < 10; i++) {
-    run(post("/security", "action=hosts&hosts=heishamon.lan", cookie_hdr(tok) + origin()));
+    run(post("/security", "action=hosts&hosts=heishamon.lan&current=correct+horse+battery", cookie_hdr(tok) + origin()));
     auth_now += WEBAUTH_BUCKET_REFILL_MS;
   }
   CHECK(webauth_lock_wait_ms(client_ip) == 0, "hosts changes counted as failures");
@@ -1105,10 +1128,10 @@ static void test_security_forms() {
 
   // extra host names
   tok = r.cookie();
-  r = run(post("/security", "action=hosts&hosts=proxy.example.com", cookie_hdr(tok) + origin()));
+  r = run(post("/security", "action=hosts&hosts=proxy.example.com&current=new+password+1", cookie_hdr(tok) + origin()));
   CHECK(r.header("Location") == "/security?m=11", "%s", r.output.c_str());
   CHECK(run(get("/login", "", "proxy.example.com")).status == 200, "proxy name");
-  r = run(post("/security", "action=hosts&hosts=%3Cscript%3E", cookie_hdr(tok) + origin()));
+  r = run(post("/security", "action=hosts&hosts=%3Cscript%3E&current=new+password+1", cookie_hdr(tok) + origin()));
   CHECK(r.header("Location") == "/security?m=12", "%s", r.output.c_str());
   // an overlong field is not cut and used
   r = run(post("/security", "action=password&current=" + std::string(100, 'a') + "&password=new+password+1&repeat=new+password+1", cookie_hdr(tok) + origin()));
@@ -1161,6 +1184,402 @@ static void test_login_lockout() {
   client_ip = 0x0501a8c0;
 }
 
+
+/* ---- second review: the attacks of the adversarial review, as permanent tests ---- */
+
+static std::string apikey_of_owner(const std::string &tok, const std::string &current = "correct+horse+battery") {
+  return key_of(run(post("/security", "action=apikey&current=" + current, cookie_hdr(tok) + origin())));
+}
+
+// 1. stored XSS / allowlist widening through the hostname
+static void test_r1_hostname() {
+  std::string longest(WEBAUTH_HOSTNAME_MAX, 'h');
+  const char *good[] = { "HeishaMon", "heishamon-2", "a", "A1", longest.c_str() };
+  for(const char *g : good) {
+    CHECK(webauth_hostname_valid(g), "%s", g);
+  }
+  std::string toolong(WEBAUTH_HOSTNAME_MAX + 1, 'h');
+  const char *bad[] = { "", "-heisha", "heisha-", "Heisha,evil.com", "heisha mon", "heisha.local", "<script>", "h'x", "h\"x", "h_x",
+                        toolong.c_str(), "ü" };
+  for(const char *b : bad) {
+    CHECK(!webauth_hostname_valid(b), "%s", b);
+  }
+  char out[192];
+  const char *ips[] = { "192.168.1.5", "0.0.0.0", "", "192.168.4.1", "1.2.3.4<x" };
+  webauth_device_hosts(out, sizeof(out), ips, 5, "HeishaMon");
+  CHECK(std::string(out) == "192.168.1.5,192.168.4.1,HeishaMon,HeishaMon.local", "%s", out);
+  // the hostname "HeishaMon,evil.com" from /savesettings must not let Host evil.com in
+  webauth_device_hosts(out, sizeof(out), ips, 2, "HeishaMon,evil.com");
+  CHECK(std::string(out) == "192.168.1.5", "%s", out);
+  CHECK(!webauth_host_allowed("evil.com", out), "comma hostname widened the allowlist");
+  webauth_device_hosts(out, sizeof(out), ips, 1, "x'><script>alert(1)</script>");
+  CHECK(std::string(out) == "192.168.1.5", "%s", out);
+  // a short buffer is never overrun
+  char small[16];
+  webauth_device_hosts(small, sizeof(small), ips, 4, "HeishaMon");
+  CHECK(std::string(small) == "192.168.1.5", "%s", small);
+  // HTML escaping of what pages print
+  char esc[64];
+  webauth_html_escape("<a href='x'>\"&</a>", esc, sizeof(esc));
+  CHECK(std::string(esc) == "&lt;a href=&#39;x&#39;&gt;&quot;&amp;&lt;/a&gt;", "%s", esc);
+  webauth_html_escape(std::string(100, '<').c_str(), esc, sizeof(esc));
+  CHECK(strlen(esc) < sizeof(esc) && strlen(esc) % 4 == 0, "cut at a whole entity: %zu", strlen(esc));
+}
+
+// 2. nothing of an earlier login (attacker or owner) outlives removing the password
+static void test_r2_apikey_persistence() {
+  fresh(false);
+  result_t r = run(post("/security", "action=password&password=attacker123&repeat=attacker123", origin()));
+  std::string tok = r.cookie();
+  std::string key = apikey_of_owner(tok, "attacker123");
+  CHECK(key.size() == 32, "attacker key");
+  r = run(post("/security", "action=hosts&hosts=evil.com&current=attacker123", cookie_hdr(tok) + origin()));
+  CHECK(std::string(webauth_store.hosts) == "evil.com", "%s", webauth_store.hosts);
+  r = run(post("/security", "action=remove&current=attacker123", cookie_hdr(tok) + origin()));
+  CHECK(!webauth_login_on() && !webauth_store.apikey_set && webauth_store.hosts[0] == 0, "remove clears key and hosts");
+  // the owner sets a password later: the planted key is worthless
+  run(post("/security", "action=password&password=owner-pass-1&repeat=owner-pass-1", origin()));
+  CHECK(webauth_login_on(), "owner");
+  CHECK(run(get("/reboot", bearer(key))).status == 401 && run(get("/getsettings", bearer(key))).status == 401, "planted key");
+  // extra host names set while everything is open do not survive the first password
+  fresh(false);
+  run(post("/security", "action=hosts&hosts=evil.com", origin()));
+  CHECK(std::string(webauth_store.hosts) == "evil.com", "hosts while open: %s", webauth_store.hosts);
+  run(post("/security", PASSWORD_FORM, origin()));
+  CHECK(webauth_login_on() && webauth_store.hosts[0] == 0 && !webauth_store.apikey_set, "first password clears");
+  CHECK(run(get("/login", "", "evil.com")).status == 403, "evil.com allowed");
+}
+
+// 3. ArduinoOTA only with the login off and a password of its own
+static void test_r3_ota() {
+  fresh(false);
+  CHECK(!webauth_ota_allowed("heisha") && !webauth_ota_allowed("") && !webauth_ota_allowed(NULL), "default password");
+  CHECK(webauth_ota_allowed("my-ota-pass"), "own password, login off");
+  fresh(true);
+  CHECK(!webauth_ota_allowed("my-ota-pass"), "login on");
+}
+
+// 4. the right key is never blocked by the backoff of its address
+static void test_r4_bearer_backoff() {
+  fresh(true);
+  std::string key = apikey_of_owner(login());
+  for(int i = 0; i < 12; i++) {
+    run(get("/json", bearer(std::string(32, '0'))));
+  }
+  CHECK(run(get("/json", bearer(std::string(32, '0')))).status == 429, "wrong key backs off");
+  result_t r = run(get("/reboot", bearer(key)));
+  CHECK(r.status == 200, "valid key after 12 wrong keys from the same address: %s", r.output.c_str());
+  // wrong keys spaced so that the backoff is always over
+  fresh(true);
+  key = apikey_of_owner(login());
+  for(int i = 0; i < 14; i++) {
+    auth_now += webauth_lock_wait_ms(client_ip) + 1;
+    CHECK(run(get("/json", bearer(std::string(32, '0')))).status == 401, "spaced wrong key %d", i);
+  }
+  CHECK(run(get("/reboot", bearer(key))).status == 200, "valid key after spaced wrong keys");
+}
+
+// 5. key, host names and removing need the current password; a password change revokes the key
+static void test_r5_current_password() {
+  fresh(true);
+  std::string tok = login();
+  result_t r = run(post("/security", "action=apikey", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=2" && !webauth_store.apikey_set, "apikey with the session only: %s", r.output.c_str());
+  r = run(post("/security", "action=hosts&hosts=evil.com", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=2" && webauth_store.hosts[0] == 0, "hosts with the session only");
+  auth_now += WEBAUTH_LOCK_MAX_MS;  // each wrong current password counts
+  r = run(post("/security", "action=hosts&hosts=evil.com&current=wrong", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=2" && webauth_store.hosts[0] == 0, "hosts with a wrong password");
+  auth_now += WEBAUTH_LOCK_MAX_MS;  // each wrong current password counts
+  std::string key = apikey_of_owner(tok);
+  r = run(post("/security", "action=apikey_delete", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=2" && webauth_store.apikey_set, "delete with the session only");
+  auth_now += WEBAUTH_LOCK_MAX_MS;  // each wrong current password counts
+  r = run(post("/security", "action=password&password=zzzzzzzz&repeat=zzzzzzzz", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=2", "change without current");
+  auth_now += WEBAUTH_LOCK_MAX_MS;  // each wrong current password counts
+  // a password change revokes the key by default
+  r = run(post("/security", "action=password&current=correct+horse+battery&password=newpass12&repeat=newpass12", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=5" && !webauth_store.apikey_set, "key revoked");
+  CHECK(run(get("/getsettings", bearer(key))).status == 401, "old key after the change");
+  // unless asked to keep it
+  tok = r.cookie();
+  key = apikey_of_owner(tok, "newpass12");
+  r = run(post("/security", "action=password&current=newpass12&password=newpass13&repeat=newpass13&keep_apikey=1", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=5" && run(get("/getsettings", bearer(key))).status == 200, "kept");
+  // the old sessions end with every change
+  CHECK(run(get("/json", cookie_hdr(tok))).status == 401, "old session");
+}
+
+// 6. lockout: the owner is never locked out by others
+static void test_r6_lockout() {
+  // a session or the key is never rate limited, also during a flood of wrong logins
+  fresh(true);
+  client_ip = 0x0a01a8c0;
+  std::string tok = login();
+  std::string key = apikey_of_owner(tok);
+  for(int i = 0; i < 40; i++) {
+    client_ip = 0x6401a8c0 + ((i % 9) << 24);
+    run(post("/login", "password=x", origin()));
+  }
+  client_ip = 0x0a01a8c0;
+  CHECK(run(get("/json", cookie_hdr(tok))).status == 200, "session during the flood");
+  CHECK(run(get("/json", bearer(key))).status == 200, "key during the flood");
+  result_t r = run(post("/security", "action=hosts&hosts=heishamon.lan&current=correct+horse+battery", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=11", "hosts change during the flood: %s", r.output.c_str());
+  r = run(post("/security", "action=password&current=correct+horse+battery&password=newpass12&repeat=newpass12&keep_apikey=1", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=5", "password change during the flood: %s", r.output.c_str());
+
+  // one address alone: few password checks in 10 minutes
+  fresh(true);
+  client_ip = 0x6401a8c0;
+  int single = 0;
+  for(int t = 0; t < 600; t++) {
+    auth_now += 1000;
+    if(run(post("/login", "password=x" + std::to_string(t), origin())).status != 429) {
+      single++;
+    }
+  }
+  CHECK(single <= 15, "single address: %d password checks in 600 s", single);
+
+  // 9 rotating addresses (more than the table): bounded, and the owner gets in again and again
+  fresh(true);
+  int attacker = 0, owner_ok = 0;
+  unsigned long longest = 0, since_ok = 0, first = 0;
+  for(int t = 0; t < 1800; t++) {
+    auth_now += 1000;
+    since_ok += 1000;
+    for(int k = 0; k < 3; k++) {
+      client_ip = 0x6401a8c0 + (((t * 3 + k) % 9) << 24);
+      if(run(post("/login", "password=guess", origin())).status != 429) {
+        attacker++;
+      }
+    }
+    if(t % 10 == 5) {
+      client_ip = 0x0a01a8c0;
+      if(!run(post("/login", "password=correct+horse+battery", origin())).cookie().empty()) {
+        owner_ok++;
+        if(owner_ok == 1) {
+          first = since_ok;
+        }
+        longest = since_ok > longest ? since_ok : longest;
+        since_ok = 0;
+      }
+    }
+  }
+  client_ip = 0x0501a8c0;
+  longest = since_ok > longest ? since_ok : longest;
+  printf("  9 rotating addresses for 30 min: %d password checks; owner (a try every 10 s) %d logins, first after %lu s, longest gap %lu s\n",
+         attacker, owner_ok, first / 1000, longest / 1000);
+  CHECK(attacker <= 200, "9 rotating addresses: %d password checks in 30 min", attacker);
+  CHECK(first <= WEBAUTH_LOCK_MAX_MS + 60000 && longest <= WEBAUTH_LOCK_MAX_MS + 60000 && owner_ok >= 100,
+        "owner %d logins, first after %lu ms, longest gap %lu ms", owner_ok, first, longest);
+}
+
+// 7. the live log while the login is off: not for a rebinding name
+static void test_r7_ws_rebinding() {
+  fresh(false);
+  result_t r = run(get("/ws", WS + origin("http://evil.com"), "evil.com"));
+  CHECK(r.status == 403 && r.websocket == 0, "%s", r.events.c_str());
+  r = run(get("/ws", WS, "evil.com"));
+  CHECK(r.status == 403 && r.websocket == 0, "no Origin: %s", r.events.c_str());
+  r = run(get("/ws", WS + origin()));
+  CHECK(r.websocket == 1, "%s", r.events.c_str());
+}
+
+// 8. stored credentials: damaged file keeps the login on, save failures are reported
+static void test_r8_persistence() {
+  fresh(false);
+  webauth_set_password(PASSWORD.c_str());
+  char key[33];
+  webauth_new_apikey(key);
+  webauth_store_t good = webauth_store, c;
+  webauth_reset();
+  CHECK(webauth_load(&good, sizeof(good)) == 1 && webauth_check_password(PASSWORD.c_str()) && webauth_check_apikey(key, 32), "good");
+  struct { const char *name; std::function<void(webauth_store_t &)> f; } bad[] = {
+    { "magic", [](webauth_store_t &x) { x.magic ^= 1; } },
+    { "bit flip password_set (checksum)", [](webauth_store_t &x) { x.password_set = 0; } },
+    { "bit flip in the hash", [](webauth_store_t &x) { x.password_hash[3] ^= 4; } },
+    { "password_set 0xff", [](webauth_store_t &x) { x.password_set = 0xff; } },
+    { "iterations 1", [](webauth_store_t &x) { x.iterations = 1; } },
+    { "iterations 1e6", [](webauth_store_t &x) { x.iterations = 1000000; } },
+    { "hosts unterminated", [](webauth_store_t &x) { memset(x.hosts, 'a', sizeof(x.hosts)); } },
+    { "hosts characters", [](webauth_store_t &x) { strcpy(x.hosts, "<b>"); } },
+  };
+  for(auto &b : bad) {
+    c = good;
+    b.f(c);
+    webauth_reset();
+    CHECK(webauth_load(&c, sizeof(c)) == 0 && !webauth_login_on(), "%s accepted", b.name);
+  }
+  // with a valid check value, a key without a password is still refused
+  webauth_reset();
+  webauth_store.apikey_set = 1;
+  webauth_store_t nokey;
+  {
+    // build it through the real save (it computes the check value)
+    webauth_delete_apikey();
+    webauth_store.apikey_set = 1;
+    webauth_set_hosts("");  // saves
+    nokey = webauth_store;
+  }
+  webauth_reset();
+  CHECK(webauth_load(&nokey, sizeof(nokey)) == 0, "key without password");
+  webauth_reset();
+  CHECK(webauth_load(&good, sizeof(good) - 1) == 0, "short file");
+
+  // a file that exists but is not valid: login on, nothing matches, no "first password"
+  fresh(false);
+  webauth_load_failed();
+  CHECK(webauth_login_on() && webauth_broken() && !webauth_check_password("") && !webauth_check_password(PASSWORD.c_str()), "broken");
+  result_t r = run(post("/security", PASSWORD_FORM, origin()));
+  CHECK(r.status == 401 && webauth_broken(), "first password on a broken store: %s", r.output.c_str());
+  r = run(post("/login", "password=", origin()));
+  CHECK(r.cookie().empty(), "login on a broken store");
+  CHECK(run(get("/json")).status == 401, "API closed");
+
+  // a failed write is reported
+  fresh(true);
+  std::string tok = login();
+  save_fails = true;
+  r = run(post("/security", "action=hosts&hosts=heishamon.lan&current=correct+horse+battery", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=14" && !webauth_last_save_ok(), "%s", r.output.c_str());
+  save_fails = false;
+  r = run(post("/security", "action=hosts&hosts=heishamon.lan&current=correct+horse+battery", cookie_hdr(tok) + origin()));
+  CHECK(r.header("Location") == "/security?m=11" && webauth_last_save_ok(), "%s", r.output.c_str());
+}
+
+// 9. expired sessions are swept, so a wrapped clock cannot revive them
+static void test_r9_sweep() {
+  fresh(true);
+  uint8_t t[WEBAUTH_TOKEN_BYTES];
+  unsigned long start = auth_now;
+  int8_t s = webauth_session_new(t);
+  CHECK(s >= 0, "session");
+  for(unsigned long m = 0; m < WEBAUTH_SESSION_IDLE_MS / 60000 + 2; m++) {
+    auth_now += 60000;
+    webauth_tick();  // loop(), no requests
+  }
+  auth_now = start + 1000;  // as if millis() had wrapped all the way round
+  CHECK(webauth_session_find(t) == -1, "revived after the wrap");
+  // the lockout too
+  fresh(true);
+  start = auth_now;
+  for(int k = 0; k < WEBAUTH_LOCK_FREE + 3; k++) {
+    webauth_lock_failed(0x01020304);
+  }
+  for(unsigned long m = 0; m < WEBAUTH_LOCK_FORGET_MS / 60000 + 2; m++) {
+    auth_now += 60000;
+    webauth_tick();
+  }
+  auth_now = start + 1000;
+  CHECK(webauth_lock_wait_ms(0x01020304) == 0, "lockout revived");
+  auth_now = 300000000UL;
+}
+
+// 10. a page of another site (Sec-Fetch-Site: cross-site) changes nothing, also without a password
+static void test_r10_cross_site() {
+  const char *ps[] = { "/factoryreset", "/reboot", "/command?SetHeatpump=0", "/gpio?pin=5&value=1", "/removedallas?x", "/togglelog",
+                       "/togglehexdump", "/scandallas", "/dallasalias?a=b", "/dallasoffset?a=1", "/logout" };
+  const std::string XS = "Sec-Fetch-Site: cross-site\r\n";
+  fresh(false);
+  for(const char *p : ps) {
+    result_t r = run(get(p, XS));
+    CHECK(r.status == 403 && !contains(r.events, "ACCEPT"), "login off, <img> %s: %s", p, r.events.c_str());
+    r = run(get(p));  // Home Assistant, scripts: no Sec-Fetch-Site
+    CHECK(contains(r.events, "ACCEPT"), "login off, script %s: %s", p, r.events.c_str());
+    r = run(get(p, "Sec-Fetch-Site: same-origin\r\n"));
+    CHECK(contains(r.events, "ACCEPT"), "login off, own page %s: %s", p, r.events.c_str());
+  }
+  result_t r = run(post("/security", PASSWORD_FORM, XS));
+  CHECK(r.status == 403 && !webauth_login_on(), "cross-site first password");
+  r = run(get("/ws", WS + origin() + XS));
+  CHECK(r.status == 403 && r.websocket == 0, "cross-site ws");
+  r = run(get("/json", XS));
+  CHECK(r.status == 200, "reading stays open with the login off");
+  fresh(true);
+  std::string tok = login();
+  r = run(get("/reboot", cookie_hdr(tok) + XS));
+  CHECK(r.status == 403, "login on, cross-site GET with cookie");
+  r = run(post("/login", "password=correct+horse+battery", XS));
+  CHECK(r.status == 403 && r.cookie().empty(), "cross-site login");
+  // a cut value is never "cross-site" by accident, nor taken for anything else
+  r = run(get("/reboot", cookie_hdr(tok) + "Sec-Fetch-Site: " + std::string(40, 'x') + "\r\n"));
+  CHECK(r.status == 200, "%s", r.events.c_str());
+}
+
+// 11. an unknown Host (router DNS name) gets a page that says what to do
+static void test_r11_bad_host_page() {
+  fresh(false);
+  result_t r = run(get("/reboot", "", "heishamon.fritz.box"));
+  CHECK(r.status == 403 && r.header("Content-Type") == "text/html", "%s", r.output.c_str());
+  CHECK(contains(r.body(), "heishamon.fritz.box") && contains(r.body(), "http://192.168.1.5/security") && contains(r.body(), "Host names"),
+        "%s", r.body().c_str());
+  fresh(true);
+  r = run(get("/login", "", "evil<script>x"));
+  CHECK(r.status == 403 && !contains(r.body(), "<script>") && contains(r.body(), "evil?script?x"), "%s", r.body().c_str());
+  r = run(get("/login", "", ""));
+  CHECK(r.status == 403, "no Host");
+  // big rejected uploads are still closed, without the page
+  r = run(multipart_fw(10000, "", "evil.com"));
+  CHECK(r.output.empty() && contains(r.events, "CLOSE-REQ"), "%s", r.events.c_str());
+}
+
+// the review's path enumeration and Host/Origin variants: nothing reaches a login route
+static void test_r_enumeration() {
+  int leaks = 0, n = 0;
+  std::vector<std::string> paths;
+  for(uint8_t i = 0; i < webauth_routes_count; i++) {
+    if(webauth_routes[i].path) {
+      paths.push_back(webauth_routes[i].path);
+    }
+  }
+  paths.push_back("/ws");
+  for(auto &p : paths) {
+    std::string up = p;
+    if(up.size() > 1) {
+      up[1] = (char)toupper(up[1]);
+    }
+    std::vector<std::string> vars = { p, p + "/", "/" + p, p + "?a=b", p + "%20", p + ".", p + "/.", "/." + p, p + ";x", up,
+                                      "%2f" + p.substr(1), p + "%00", p + "\\", "http://192.168.1.5" + p, "*" };
+    for(auto &v : vars) {
+      for(int m = 0; m < 2; m++) {
+        for(int ws = 0; ws < 2; ws++) {
+          fresh(true);
+          std::string h = (ws ? WS : "") + origin();
+          result_t r = run(m ? post(v, "action=hosts&hosts=evil.com", h) : get(v, h));
+          n++;
+          if(contains(r.events, "ACCEPT")) {
+            int route = atoi(r.events.c_str() + r.events.find("r=") + 2);
+            if(!(route == 0 || route == 4 || route == 5 || route == 80 || route == 81)) {
+              leaks++;
+              printf("  LEAK %s %s ws=%d -> %s\n", m ? "POST" : "GET", v.c_str(), ws, r.events.c_str());
+            }
+          }
+        }
+      }
+    }
+  }
+  CHECK(leaks == 0 && n > 1000, "%d of %d requests reached a login route", leaks, n);
+
+  fresh(true);
+  std::string tok = login();
+  struct { const char *host; const char *orig; } v[] = {
+    { "192.168.1.5.", "http://192.168.1.5." }, { "[::1]", "http://[::1]" }, { "", "http://192.168.1.5" }, { "192.168.1.5", "null" },
+    { "192.168.1.5", "http://192.168.1.5/" }, { "192.168.1.5", "http://192.168.1.5, http://evil" }, { "evil.192.168.1.5", "http://evil.192.168.1.5" },
+    { "heishamon.local.", "http://heishamon.local." }, { "192.168.1.5:", "http://192.168.1.5:" }, { "192.168.1.5 evil", "http://192.168.1.5 evil" },
+    { "heishamon,evil", "http://heishamon,evil" }, { "192.168.1.5:80", "http://192.168.1.5" },
+  };
+  for(auto &x : v) {
+    result_t r = run(post("/command", "a=b", cookie_hdr(tok) + "Origin: " + x.orig + "\r\n", x.host));
+    CHECK(!contains(r.events, "ACCEPT"), "Host '%s' Origin '%s': %s", x.host, x.orig, r.events.c_str());
+  }
+  result_t r = run("POST /command HTTP/1.1\r\nHost: evil.com\r\nHost: 192.168.1.5\r\n" + cookie_hdr(tok) + "Origin: http://evil.com\r\nContent-Length: 0\r\n\r\n");
+  CHECK(!contains(r.events, "ACCEPT"), "duplicate Host, foreign first: %s", r.events.c_str());
+  r = run(post("/command", "a=b", cookie_hdr(tok) + origin(), "192.168.1.5"));
+  CHECK(contains(r.events, "ACCEPT r=100;"), "the good one: %s", r.events.c_str());
+}
+
 int main(int argc, char **argv) {
   if(argc > 1 && strcmp(argv[1], "--routes") == 0) {
     for(uint8_t i = 0; i < webauth_routes_count; i++) {
@@ -1184,6 +1603,18 @@ int main(int argc, char **argv) {
   test_api_key();
   test_uploads();
   test_findings();
+  test_r1_hostname();
+  test_r2_apikey_persistence();
+  test_r3_ota();
+  test_r4_bearer_backoff();
+  test_r5_current_password();
+  test_r6_lockout();
+  test_r7_ws_rebinding();
+  test_r8_persistence();
+  test_r9_sweep();
+  test_r10_cross_site();
+  test_r11_bad_host_page();
+  test_r_enumeration();
   test_security_forms();
   test_login_lockout();
   printf("%d checks, %d failed\n", checks, failed);

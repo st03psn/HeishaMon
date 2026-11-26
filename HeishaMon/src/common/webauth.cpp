@@ -131,6 +131,7 @@ const webauth_route_t webauth_routes[] PROGMEM = {
   { WEBAUTH_ROUTE_UNAUTHORIZED, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
   { WEBAUTH_ROUTE_FORBIDDEN, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
   { WEBAUTH_ROUTE_TOO_MANY, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
+  { WEBAUTH_ROUTE_BAD_HOST, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
 };
 const uint8_t webauth_routes_count = sizeof(webauth_routes) / sizeof(webauth_routes[0]);
 
@@ -327,16 +328,49 @@ struct webauth_lock_t {
 
 static struct webauth_session_t sessions[WEBAUTH_SESSIONS];
 static struct webauth_lock_t locks[WEBAUTH_LOCK_ENTRIES];
+static struct webauth_lock_t overflow;  // shared by all new addresses while the table is full
+struct webauth_known_t {
+  uint32_t ip;
+  unsigned long last;           // last login
+  uint8_t used;
+  struct webauth_lock_t lock;   // its own failures (never in the table or the shared entry)
+};
+static struct webauth_known_t known[WEBAUTH_KNOWN_ENTRIES];  // addresses that logged in lately (the owner's devices)
 static uint8_t bucket = WEBAUTH_BUCKET_SIZE;
 static unsigned long bucket_time = 0;
+static unsigned long sweep_time = 0;
+static uint8_t broken = 0;
+static uint8_t save_ok = 1;
+
+static void store_check(const webauth_store_t *st, uint8_t out[8]) {
+  uint8_t h[32];
+  webauth_platform_sha256((const uint8_t *)st, offsetof(webauth_store_t, check), (const uint8_t *)st + offsetof(webauth_store_t, check) + 8,
+                          sizeof(*st) - offsetof(webauth_store_t, check) - 8, h);
+  memcpy(out, h, 8);
+}
 
 void webauth_reset(void) {
   memset(&webauth_store, 0, sizeof(webauth_store));
   webauth_store.magic = WEBAUTH_STORE_MAGIC;
   memset(sessions, 0, sizeof(sessions));
   memset(locks, 0, sizeof(locks));
+  memset(&overflow, 0, sizeof(overflow));
+  memset(known, 0, sizeof(known));
   bucket = WEBAUTH_BUCKET_SIZE;
   bucket_time = now_ms();
+  sweep_time = bucket_time;
+  broken = 0;
+  save_ok = 1;
+}
+
+static bool hosts_chars_ok(const char *hosts) {
+  for(const char *p = hosts; *p; p++) {
+    char c = *p;
+    if(!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ',' || c == ' ' || c == ':')) {
+      return false;
+    }
+  }
+  return true;
 }
 
 uint8_t webauth_load(const void *data, size_t len) {
@@ -345,22 +379,141 @@ uint8_t webauth_load(const void *data, size_t len) {
     return 0;
   }
   memcpy(&tmp, data, sizeof(tmp));
-  if(tmp.magic != WEBAUTH_STORE_MAGIC || (tmp.password_set && (tmp.iterations == 0 || tmp.iterations > 1000000UL))) {
-    return 0;
+  uint8_t check[8];
+  store_check(&tmp, check);
+  bool ok = tmp.magic == WEBAUTH_STORE_MAGIC && webauth_equal(check, tmp.check, 8) &&
+            tmp.password_set <= 1 && tmp.apikey_set <= 1 &&
+            memchr(tmp.hosts, 0, sizeof(tmp.hosts)) != NULL && hosts_chars_ok(tmp.hosts);
+  if(ok && tmp.password_set) {
+    ok = tmp.iterations >= WEBAUTH_ITERATIONS_MIN && tmp.iterations <= WEBAUTH_ITERATIONS_MAX;
+  } else if(ok) {
+    ok = tmp.iterations == 0 && !tmp.apikey_set;  // no key without a password
   }
-  tmp.hosts[sizeof(tmp.hosts) - 1] = 0;
-  memcpy(&webauth_store, &tmp, sizeof(tmp));
+  if(ok) {
+    memcpy(&webauth_store, &tmp, sizeof(tmp));
+    broken = 0;
+  }
   wipe(&tmp, sizeof(tmp));
-  return 1;
+  return ok ? 1 : 0;
+}
+
+/*
+ * A stored file that is not valid is not "no password": the login stays
+ * on and no password matches, until the physical factory reset.
+ */
+void webauth_load_failed(void) {
+  memset(&webauth_store, 0, sizeof(webauth_store));
+  webauth_store.magic = WEBAUTH_STORE_MAGIC;
+  webauth_store.password_set = 1;  // iterations 0: webauth_check_password() never matches
+  webauth_sessions_clear();
+  broken = 1;
+}
+
+bool webauth_broken(void) {
+  return broken != 0;
 }
 
 bool webauth_login_on(void) {
   return webauth_store.password_set != 0;
 }
 
-static void save(void) {
+bool webauth_last_save_ok(void) {
+  return save_ok != 0;
+}
+
+static bool save(void) {
   webauth_store.magic = WEBAUTH_STORE_MAGIC;
-  webauth_platform_save(&webauth_store);
+  store_check(&webauth_store, webauth_store.check);
+  save_ok = webauth_platform_save(&webauth_store) ? 1 : 0;
+  return save_ok;
+}
+
+bool webauth_ota_allowed(const char *ota_password) {
+  return !webauth_login_on() && ota_password != NULL && ota_password[0] != 0 && strcmp_P(ota_password, PSTR("heisha")) != 0;
+}
+
+bool webauth_hostname_valid(const char *name) {
+  size_t len = name ? strlen(name) : 0;
+  if(len == 0 || len > WEBAUTH_HOSTNAME_MAX || name[0] == '-' || name[len - 1] == '-') {
+    return false;
+  }
+  for(size_t i = 0; i < len; i++) {
+    char c = name[i];
+    if(!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool ipv4_text(const char *ip) {
+  if(ip == NULL || *ip == 0 || strcmp(ip, "0.0.0.0") == 0) {
+    return false;
+  }
+  for(const char *p = ip; *p; p++) {
+    if(!((*p >= '0' && *p <= '9') || *p == '.')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/* The Host names of this device: its IP addresses, hostname and hostname.local (only valid ones) */
+void webauth_device_hosts(char *out, size_t size, const char *const *ips, uint8_t nips, const char *hostname) {
+  size_t n = 0;
+  out[0] = 0;
+  char local[WEBAUTH_HOSTNAME_MAX + 8];
+  const char *names[8];
+  uint8_t count = 0;
+  for(uint8_t i = 0; i < nips && count < 5; i++) {
+    if(ipv4_text(ips[i])) {
+      names[count++] = ips[i];
+    }
+  }
+  if(webauth_hostname_valid(hostname)) {
+    names[count++] = hostname;
+    snprintf_P(local, sizeof(local), PSTR("%s.local"), hostname);
+    names[count++] = local;
+  }
+  for(uint8_t i = 0; i < count; i++) {
+    size_t l = strlen(names[i]);
+    if(n + l + 2 > size) {
+      break;
+    }
+    if(n > 0) {
+      out[n++] = ',';
+    }
+    memcpy(out + n, names[i], l);
+    n += l;
+    out[n] = 0;
+  }
+}
+
+size_t webauth_html_escape(const char *in, char *out, size_t size) {
+  size_t n = 0;
+  if(size == 0) {
+    return 0;
+  }
+  for(const char *p = in; p && *p; p++) {
+    const char *rep = NULL;
+    char one[2] = { *p, 0 };
+    switch(*p) {
+      case '&': rep = "&amp;"; break;
+      case '<': rep = "&lt;"; break;
+      case '>': rep = "&gt;"; break;
+      case '"': rep = "&quot;"; break;
+      case '\'': rep = "&#39;"; break;
+      default: rep = one;
+    }
+    size_t l = strlen(rep);
+    if(n + l >= size) {
+      break;
+    }
+    memcpy(out + n, rep, l);
+    n += l;
+  }
+  out[n] = 0;
+  return n;
 }
 
 bool webauth_set_password(const char *password) {
@@ -372,13 +525,14 @@ bool webauth_set_password(const char *password) {
   webauth_store.iterations = WEBAUTH_ITERATIONS;
   webauth_pbkdf2_sha256(password, len, webauth_store.salt, sizeof(webauth_store.salt), webauth_store.iterations, webauth_store.password_hash);
   webauth_store.password_set = 1;
+  broken = 0;
   webauth_sessions_clear();
   save();
   return true;
 }
 
 bool webauth_check_password(const char *password) {
-  if(!webauth_store.password_set) {
+  if(!webauth_store.password_set || webauth_store.iterations == 0) {
     return false;
   }
   uint8_t hash[WEBAUTH_HASH_BYTES];
@@ -393,6 +547,10 @@ void webauth_remove_password(void) {
   webauth_store.iterations = 0;
   wipe(webauth_store.salt, sizeof(webauth_store.salt));
   wipe(webauth_store.password_hash, sizeof(webauth_store.password_hash));
+  // the API key and the extra host names go with it: nothing set while the login was on outlives it
+  webauth_store.apikey_set = 0;
+  wipe(webauth_store.apikey_hash, sizeof(webauth_store.apikey_hash));
+  wipe(webauth_store.hosts, sizeof(webauth_store.hosts));
   webauth_sessions_clear();
   save();
 }
@@ -426,14 +584,8 @@ bool webauth_check_apikey(const char *key, size_t len) {
 
 bool webauth_set_hosts(const char *hosts) {
   size_t len = strlen(hosts);
-  if(len >= sizeof(webauth_store.hosts)) {
+  if(len >= sizeof(webauth_store.hosts) || !hosts_chars_ok(hosts)) {
     return false;
-  }
-  for(size_t i = 0; i < len; i++) {
-    char c = hosts[i];
-    if(!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ',' || c == ' ' || c == ':')) {
-      return false;
-    }
   }
   strcpy(webauth_store.hosts, hosts);
   save();
@@ -631,14 +783,86 @@ static void bucket_refill(unsigned long now) {
   }
 }
 
+static void lock_expire(struct webauth_lock_t *l, unsigned long now) {
+  if(l->used && (unsigned long)(now - l->last) >= WEBAUTH_LOCK_FORGET_MS) {
+    memset(l, 0, sizeof(*l));
+  }
+}
+
 static struct webauth_lock_t *lock_find(uint32_t ip, unsigned long now) {
   for(uint8_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
-    if(locks[i].used && (unsigned long)(now - locks[i].last) >= WEBAUTH_LOCK_FORGET_MS) {
-      memset(&locks[i], 0, sizeof(locks[i]));
-    }
+    lock_expire(&locks[i], now);
     if(locks[i].used && locks[i].ip == ip) {
       return &locks[i];
     }
+  }
+  return NULL;
+}
+
+static struct webauth_known_t *known_find(uint32_t ip, unsigned long now) {
+  struct webauth_known_t *found = NULL;
+  for(uint8_t i = 0; i < WEBAUTH_KNOWN_ENTRIES; i++) {
+    if(known[i].used && (unsigned long)(now - known[i].last) >= WEBAUTH_KNOWN_MS) {
+      memset(&known[i], 0, sizeof(known[i]));
+    }
+    if(known[i].used) {
+      lock_expire(&known[i].lock, now);
+      if(known[i].ip == ip) {
+        found = &known[i];
+      }
+    }
+  }
+  return found;
+}
+
+static void remember(uint32_t ip, unsigned long now) {
+  struct webauth_known_t *k = known_find(ip, now);
+  if(k == NULL) {
+    k = &known[0];
+    for(uint8_t i = 0; i < WEBAUTH_KNOWN_ENTRIES; i++) {
+      if(!known[i].used || (unsigned long)(now - known[i].last) > (unsigned long)(now - k->last)) {
+        k = &known[i];
+        if(!known[i].used) {
+          break;
+        }
+      }
+    }
+    memset(k, 0, sizeof(*k));
+  }
+  k->ip = ip;
+  k->last = now;
+  k->used = 1;
+  memset(&k->lock, 0, sizeof(k->lock));
+}
+
+static struct webauth_lock_t *lock_free(void) {
+  for(uint8_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
+    if(!locks[i].used) {
+      return &locks[i];
+    }
+  }
+  return NULL;
+}
+
+
+
+/*
+ * The entry that counts for an address: its own, or while the table is
+ * full the one shared by all new addresses (nobody is pushed out, so
+ * rotating addresses gain nothing). NULL: a new address, table not full.
+ */
+static struct webauth_lock_t *lock_of(uint32_t ip, unsigned long now) {
+  struct webauth_lock_t *l = lock_find(ip, now);
+  if(l != NULL) {
+    return l;
+  }
+  struct webauth_known_t *k = known_find(ip, now);
+  if(k != NULL) {
+    return &k->lock;
+  }
+  if(lock_free() == NULL) {
+    lock_expire(&overflow, now);
+    return &overflow;
   }
   return NULL;
 }
@@ -657,19 +881,26 @@ static unsigned long lock_delay(const struct webauth_lock_t *l) {
 
 /* remaining backoff of this address, 0: none */
 static unsigned long ip_wait(uint32_t ip, unsigned long now) {
-  struct webauth_lock_t *l = lock_find(ip, now);
+  struct webauth_lock_t *l = lock_of(ip, now);
   unsigned long d = lock_delay(l);
   unsigned long since = l ? (unsigned long)(now - l->last) : 0;
   return since < d ? d - since : 0;
+}
+
+/* an address without recent failures (may use the reserve of the budget) */
+static bool ip_clean(uint32_t ip, unsigned long now) {
+  struct webauth_lock_t *l = lock_of(ip, now);
+  return l == NULL || l->fails == 0;
 }
 
 unsigned long webauth_lock_wait_ms(uint32_t ip) {
   unsigned long now = now_ms();
   unsigned long w = ip_wait(ip, now);
   bucket_refill(now);
-  if(w == 0 && bucket == 0) {
+  uint8_t need = ip_clean(ip, now) ? 1 : WEBAUTH_BUCKET_RESERVE + 1;
+  if(w == 0 && bucket < need) {
     unsigned long since = (unsigned long)(now - bucket_time);
-    w = since < WEBAUTH_BUCKET_REFILL_MS ? WEBAUTH_BUCKET_REFILL_MS - since : 1;
+    w = (unsigned long)(need - bucket - 1) * WEBAUTH_BUCKET_REFILL_MS + (since < WEBAUTH_BUCKET_REFILL_MS ? WEBAUTH_BUCKET_REFILL_MS - since : 1);
   }
   return w;
 }
@@ -680,7 +911,8 @@ bool webauth_lock_check(uint32_t ip) {
     return false;  // refused tries do not count as failures
   }
   bucket_refill(now);
-  if(bucket == 0) {
+  // the last tokens are kept for addresses without recent failures (the owner)
+  if(bucket < (ip_clean(ip, now) ? 1 : WEBAUTH_BUCKET_RESERVE + 1)) {
     return false;
   }
   bucket--;
@@ -694,7 +926,7 @@ bool webauth_lock_check(uint32_t ip) {
 }
 
 void webauth_lock_refund(uint32_t ip) {
-  struct webauth_lock_t *l = lock_find(ip, now_ms());
+  struct webauth_lock_t *l = lock_of(ip, now_ms());
   if(l != NULL && l->fails > 0) {
     l->fails--;
   }
@@ -702,21 +934,14 @@ void webauth_lock_refund(uint32_t ip) {
 
 void webauth_lock_failed(uint32_t ip) {
   unsigned long now = now_ms();
-  struct webauth_lock_t *l = lock_find(ip, now);
+  struct webauth_lock_t *l = lock_of(ip, now);
   if(l == NULL) {
-    l = &locks[0];
-    for(uint8_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
-      if(!locks[i].used) {
-        l = &locks[i];
-        break;
-      }
-      if((unsigned long)(now - locks[i].last) > (unsigned long)(now - l->last)) {
-        l = &locks[i];
-      }
-    }
+    l = lock_free();  // not NULL: lock_of() gives the shared entry when the table is full
     memset(l, 0, sizeof(*l));
     l->ip = ip;
     l->used = 1;
+  } else {
+    l->used = 1;  // the shared entry or the one of a known address
   }
   if(l->fails < 255) {
     l->fails++;
@@ -725,10 +950,39 @@ void webauth_lock_failed(uint32_t ip) {
 }
 
 void webauth_lock_success(uint32_t ip) {
-  struct webauth_lock_t *l = lock_find(ip, now_ms());
-  if(l != NULL) {
+  unsigned long now = now_ms();
+  struct webauth_lock_t *l = lock_of(ip, now);
+  if(l == &overflow) {
+    if(overflow.fails > 0) {
+      overflow.fails--;  // only its own counted try: a success never clears the shared entry
+    }
+  } else if(l != NULL) {
     memset(l, 0, sizeof(*l));
   }
+  remember(ip, now);  // from now on its failures are its own  // from now on it never shares the entry of new addresses
+}
+
+/*
+ * Drops expired sessions and lockouts; called from loop() (and with every
+ * request), so nothing can look valid again after millis() wrapped.
+ */
+void webauth_tick(void) {
+  unsigned long now = now_ms();
+  if((unsigned long)(now - sweep_time) < WEBAUTH_SWEEP_MS) {
+    return;
+  }
+  sweep_time = now;
+  for(int8_t i = 0; i < WEBAUTH_SESSIONS; i++) {
+    if(sessions[i].used && !session_valid(&sessions[i], now)) {
+      wipe(&sessions[i], sizeof(sessions[i]));
+    }
+  }
+  for(uint8_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
+    lock_expire(&locks[i], now);
+  }
+  lock_expire(&overflow, now);
+  known_find(0, now);  // drops the expired ones
+  bucket_refill(now);
 }
 
 /* ------------------------------------------------------------------ */
@@ -744,6 +998,7 @@ struct webauth_form_t {
   uint8_t counted;              // webauth_lock_check() counted this request as a try
   uint8_t token[WEBAUTH_TOKEN_BYTES];  // new session for the Set-Cookie header
   uint8_t new_session;
+  uint8_t keep_apikey;          // password change: keep the API key (default: it is deleted)
   char action[16];
   char current[FORM_FIELD];
   char password[FORM_FIELD];
@@ -758,8 +1013,14 @@ static bool is_form_route(uint8_t route) {
 
 bool webauth_is_answer_route(uint8_t route) {
   return route == WEBAUTH_ROUTE_TO_LOGIN || route == WEBAUTH_ROUTE_UNAUTHORIZED ||
-         route == WEBAUTH_ROUTE_FORBIDDEN || route == WEBAUTH_ROUTE_TOO_MANY;
+         route == WEBAUTH_ROUTE_FORBIDDEN || route == WEBAUTH_ROUTE_TOO_MANY || route == WEBAUTH_ROUTE_BAD_HOST;
 }
+
+/* what the 403 page of an unknown Host shows */
+struct webauth_bad_host_t {
+  char host[WEBSERVER_MAX_HOST + 1];
+  char ip[16];
+};
 
 static int8_t reject(struct webserver_t *client, const struct webserver_request_t *req, uint8_t answer, unsigned long wait) {
   client->route = answer;
@@ -770,7 +1031,39 @@ static int8_t reject(struct webserver_t *client, const struct webserver_request_
   return WEBSERVER_REJECT;
 }
 
+/* 403 for a Host name this device does not know: a page that says which name to add */
+static int8_t reject_host(struct webserver_t *client, const struct webserver_request_t *req, const char *host, const char *device_hosts) {
+  int8_t r = reject(client, req, WEBAUTH_ROUTE_BAD_HOST, 0);
+  if(r != WEBSERVER_REJECT) {
+    return r;
+  }
+  struct webauth_bad_host_t *b = (struct webauth_bad_host_t *)malloc(sizeof(struct webauth_bad_host_t));
+  if(b == NULL) {
+    client->route = WEBAUTH_ROUTE_FORBIDDEN;
+    return r;
+  }
+  memset(b, 0, sizeof(*b));
+  // only the characters of a host name (the page shows it), the port is cut
+  size_t n = 0;
+  for(const char *p = host ? host : ""; *p && *p != ':' && n < sizeof(b->host) - 1; p++) {
+    char c = *p;
+    b->host[n++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-') ? c : '?';
+  }
+  n = 0;
+  for(const char *p = device_hosts ? device_hosts : ""; *p && *p != ',' && n < sizeof(b->ip) - 1; p++) {
+    b->ip[n++] = *p;  // the first entry: the IP address (webauth_device_hosts: only digits and dots)
+  }
+  client->userdata = b;
+  return r;
+}
+
+static bool cross_site(const struct webserver_request_t *req) {
+  const char *sfs = req->header[WEBSERVER_HEADER_SEC_FETCH_SITE];
+  return sfs != NULL && strcasecmp_P(sfs, PSTR("cross-site")) == 0;
+}
+
 int8_t webauth_request(struct webserver_t *client, const struct webserver_request_t *req, const webauth_env_t *env) {
+  webauth_tick();
   int16_t found = webauth_find_route(req);
   if(found < 0) {
     return -1;
@@ -788,17 +1081,26 @@ int8_t webauth_request(struct webserver_t *client, const struct webserver_reques
   bool host_ok = webauth_host_allowed(host, env->hosts);
   int8_t session = -1;
 
+  // a page of another site (browsers send Sec-Fetch-Site): never changes anything, in both modes;
+  // without it an <img src="http://<device>/reboot"> would reboot a device without a password
+  if((flags & (WEBAUTH_STATE | WEBAUTH_WS)) && cross_site(req)) {
+    return reject(client, req, WEBAUTH_ROUTE_FORBIDDEN, 0);
+  }
+
   if(!webauth_login_on()) {
-    // no password: everything as before, but nothing is changed for a page of another site
-    if((flags & WEBAUTH_STATE) && !(host_ok && origin_ok)) {
-      return reject(client, req, WEBAUTH_ROUTE_FORBIDDEN, 0);
-    }
-    if((flags & WEBAUTH_WS) && !origin_ok) {
-      return reject(client, req, WEBAUTH_ROUTE_FORBIDDEN, 0);
+    // no password: reading stays open as before; changing something and the live log need
+    // a Host of this device (DNS rebinding) and, when the browser sends one, the same Origin
+    if(flags & (WEBAUTH_STATE | WEBAUTH_WS)) {
+      if(!host_ok) {
+        return reject_host(client, req, host, env->hosts);
+      }
+      if(!origin_ok) {
+        return reject(client, req, WEBAUTH_ROUTE_FORBIDDEN, 0);
+      }
     }
   } else {
     if(!(flags & WEBAUTH_ANYHOST) && !host_ok) {
-      return reject(client, req, WEBAUTH_ROUTE_FORBIDDEN, 0);
+      return reject_host(client, req, host, env->hosts);
     }
     if(flags & WEBAUTH_PUBLIC) {
       if((flags & WEBAUTH_STATE) && !origin_ok) {
@@ -819,11 +1121,13 @@ int8_t webauth_request(struct webserver_t *client, const struct webserver_reques
         while(klen > 0 && key[klen - 1] == ' ') {
           klen--;
         }
-        unsigned long wait = ip_wait(env->ip, now_ms());
-        if(wait > 0) {
-          return reject(client, req, WEBAUTH_ROUTE_TOO_MANY, wait);
-        }
+        // the right key always works (Home Assistant may share its address with a guesser);
+        // wrong keys count, and while the address backs off they get 429
         if((req->truncated & (1 << WEBSERVER_HEADER_AUTHORIZATION)) || !webauth_check_apikey(key, klen)) {
+          unsigned long wait = ip_wait(env->ip, now_ms());
+          if(wait > 0) {
+            return reject(client, req, WEBAUTH_ROUTE_TOO_MANY, wait);
+          }
           webauth_lock_failed(env->ip);
           return reject(client, req, WEBAUTH_ROUTE_UNAUTHORIZED, 0);
         }
@@ -842,8 +1146,12 @@ int8_t webauth_request(struct webserver_t *client, const struct webserver_reques
           }
         }
       }
-      if(route == WEBAUTH_ROUTE_SECURITY_POST && !webauth_lock_check(env->ip)) {
-        return reject(client, req, WEBAUTH_ROUTE_TOO_MANY, webauth_lock_wait_ms(env->ip));
+      // logged in: no global budget; only this address's own wrong current passwords back it off
+      if(route == WEBAUTH_ROUTE_SECURITY_POST) {
+        unsigned long wait = ip_wait(env->ip, now_ms());
+        if(wait > 0) {
+          return reject(client, req, WEBAUTH_ROUTE_TOO_MANY, wait);
+        }
       }
     }
   }
@@ -863,7 +1171,7 @@ int8_t webauth_request(struct webserver_t *client, const struct webserver_reques
     memset(f, 0, sizeof(*f));
     f->ip = env->ip;
     f->session = session;
-    f->counted = webauth_login_on();  // both form routes went through webauth_lock_check() then
+    f->counted = (route == WEBAUTH_ROUTE_LOGIN_POST) && webauth_login_on();  // went through webauth_lock_check()
     client->userdata = f;
   }
   return WEBSERVER_ACCEPT;
@@ -908,6 +1216,8 @@ int webauth_args(struct webserver_t *client, struct arguments_t *args) {
     append(f->hosts, sizeof(f->hosts), args->value, args->len, &f->overflow);
   } else if(strcmp_P(name, PSTR("action")) == 0) {
     append(f->action, sizeof(f->action), args->value, args->len, &f->overflow);
+  } else if(strcmp_P(name, PSTR("keep_apikey")) == 0) {
+    f->keep_apikey = 1;
   }
   return 0;
 }
@@ -939,50 +1249,74 @@ uint8_t webauth_process_form(struct webserver_t *client) {
     } else {
       result = WEBAUTH_RESULT_WRONG;  // counted by webauth_lock_check() already
     }
-  } else if(strcmp_P(f->action, PSTR("password")) == 0) {
-    // first password or a change: decided now, not when the request came in
+  } else {
+    // /security: with the login on, every action needs the current password
+    bool login = webauth_login_on();
+    bool is_password = strcmp_P(f->action, PSTR("password")) == 0;
+    bool is_remove = strcmp_P(f->action, PSTR("remove")) == 0;
+    bool is_apikey = strcmp_P(f->action, PSTR("apikey")) == 0;
+    bool is_apikey_delete = strcmp_P(f->action, PSTR("apikey_delete")) == 0;
+    bool is_hosts = strcmp_P(f->action, PSTR("hosts")) == 0;
     size_t len = strlen(f->password);
-    if(strcmp(f->password, f->repeat) != 0) {
+    bool checked = false;  // the current password was right
+    if(!(is_password || is_remove || is_apikey || is_apikey_delete || is_hosts)) {
+      result = WEBAUTH_RESULT_INVALID;
+    } else if(is_password && strcmp(f->password, f->repeat) != 0) {
       result = WEBAUTH_RESULT_MISMATCH;
-    } else if(len < WEBAUTH_PASSWORD_MIN || len > WEBAUTH_PASSWORD_MAX) {
+    } else if(is_password && (len < WEBAUTH_PASSWORD_MIN || len > WEBAUTH_PASSWORD_MAX)) {
       result = WEBAUTH_RESULT_LENGTH;
-    } else if(webauth_login_on() && !webauth_check_password(f->current)) {
+    } else if(is_hosts && (strlen(f->hosts) >= sizeof(webauth_store.hosts) || !hosts_chars_ok(f->hosts))) {
+      result = WEBAUTH_RESULT_INVALID;
+    } else if(!login && (is_remove || is_apikey)) {
+      result = WEBAUTH_RESULT_NO_PASSWORD;  // no key while everything is open: it would outlive the first password
+    } else if(login && !(checked = webauth_check_password(f->current))) {
+      webauth_lock_failed(ip);
       result = WEBAUTH_RESULT_WRONG;
     } else {
-      if(webauth_login_on()) {
+      if(checked) {
         webauth_lock_success(ip);
       }
-      webauth_set_password(f->password);  // also ends all sessions
-      webauth_platform_close_others(client);
-      new_session(f);
-      result = WEBAUTH_RESULT_PASSWORD_SET;
+      bool saved = true;
+      if(is_password) {
+        if(!login || !f->keep_apikey) {
+          // first password: nothing set while everything was open stays; a change revokes the key by default
+          webauth_store.apikey_set = 0;
+          wipe(webauth_store.apikey_hash, sizeof(webauth_store.apikey_hash));
+          if(!login) {
+            wipe(webauth_store.hosts, sizeof(webauth_store.hosts));
+          }
+        }
+        webauth_set_password(f->password);  // also ends all sessions and saves
+        saved = webauth_last_save_ok();
+        webauth_platform_close_others(client);
+        new_session(f);
+        result = WEBAUTH_RESULT_PASSWORD_SET;
+      } else if(is_remove) {
+        webauth_remove_password();  // also the API key and the extra host names
+        saved = webauth_last_save_ok();
+        webauth_platform_close_others(client);
+        result = WEBAUTH_RESULT_REMOVED;
+      } else if(is_apikey) {
+        webauth_new_apikey(f->apikey);
+        saved = webauth_last_save_ok();
+        webauth_platform_close_others(client);
+        result = WEBAUTH_RESULT_APIKEY;
+      } else if(is_apikey_delete) {
+        webauth_delete_apikey();
+        saved = webauth_last_save_ok();
+        webauth_platform_close_others(client);
+        result = WEBAUTH_RESULT_APIKEY_DELETED;
+      } else {
+        webauth_set_hosts(f->hosts);
+        saved = webauth_last_save_ok();
+        result = WEBAUTH_RESULT_HOSTS;
+      }
+      if(!saved && result != WEBAUTH_RESULT_APIKEY) {
+        result = WEBAUTH_RESULT_SAVE_FAILED;  // the key page says it itself
+      }
     }
-  } else if(strcmp_P(f->action, PSTR("remove")) == 0) {
-    if(!webauth_login_on()) {
-      result = WEBAUTH_RESULT_NO_PASSWORD;
-    } else if(!webauth_check_password(f->current)) {
-      result = WEBAUTH_RESULT_WRONG;
-    } else {
-      webauth_lock_success(ip);
-      webauth_remove_password();
-      webauth_platform_close_others(client);
-      result = WEBAUTH_RESULT_REMOVED;
-    }
-  } else if(strcmp_P(f->action, PSTR("apikey")) == 0 && !webauth_login_on()) {
-    result = WEBAUTH_RESULT_NO_PASSWORD;  // a key made while everything is open would outlive the first password
-  } else if(strcmp_P(f->action, PSTR("apikey")) == 0) {
-    webauth_new_apikey(f->apikey);
-    webauth_platform_close_others(client);
-    result = WEBAUTH_RESULT_APIKEY;
-  } else if(strcmp_P(f->action, PSTR("apikey_delete")) == 0) {
-    webauth_delete_apikey();
-    webauth_platform_close_others(client);
-    result = WEBAUTH_RESULT_APIKEY_DELETED;
-  } else if(strcmp_P(f->action, PSTR("hosts")) == 0) {
-    result = webauth_set_hosts(f->hosts) ? WEBAUTH_RESULT_HOSTS : WEBAUTH_RESULT_INVALID;
   }
-  if(f->counted && result != WEBAUTH_RESULT_WRONG && result != WEBAUTH_RESULT_LOGGED_IN &&
-     result != WEBAUTH_RESULT_PASSWORD_SET && result != WEBAUTH_RESULT_REMOVED) {
+  if(f->counted && result != WEBAUTH_RESULT_WRONG && result != WEBAUTH_RESULT_LOGGED_IN) {
     webauth_lock_refund(ip);  // no password was checked
   }
   wipe(f->current, sizeof(f->current));
@@ -1018,6 +1352,9 @@ void webauth_close(struct webserver_t *client) {
     wipe(client->userdata, sizeof(struct webauth_form_t));
     free(client->userdata);
   }
+  if(client->route == WEBAUTH_ROUTE_BAD_HOST && client->userdata != NULL) {
+    free(client->userdata);
+  }
   if(is_form_route(client->route) || webauth_is_answer_route(client->route) ||
      client->route == WEBAUTH_ROUTE_LOGIN_PAGE || client->route == WEBAUTH_ROUTE_SECURITY_PAGE) {
     client->userdata = NULL;
@@ -1045,7 +1382,8 @@ int webauth_create_header(struct webserver_t *client, struct header_t *header) {
       header->ptr += n;
       return 0;
     }
-    case WEBAUTH_ROUTE_FORBIDDEN: {
+    case WEBAUTH_ROUTE_FORBIDDEN:
+    case WEBAUTH_ROUTE_BAD_HOST: {
       n = snprintf_P(b, room, PSTR("Cache-Control: no-store\r\n"));
       header->ptr += n;
       return 0;
@@ -1116,8 +1454,35 @@ int webauth_write_answer(struct webserver_t *client) {
       webserver_send(client, 401, (char *)"text/plain", 0);
       webserver_send_content_P(client, msg, strlen_P(msg));
     } break;
+    case WEBAUTH_ROUTE_BAD_HOST: {
+      struct webauth_bad_host_t *bh = (struct webauth_bad_host_t *)client->userdata;
+      static const char p1[] PROGMEM = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                                       "<title>HeishaMon: unknown host name</title></head><body style='font-family:sans-serif;max-width:640px;margin:2em auto'>"
+                                       "<h2>Unknown host name</h2><p>This HeishaMon does not answer to the name <b>";
+      static const char p2[] PROGMEM = "</b>. It only accepts its IP addresses, its hostname and hostname.local, to protect it from other web sites (DNS rebinding).</p>"
+                                       "<p>If this is the name your router or reverse proxy gives it (for example <i>heishamon.fritz.box</i>), open ";
+      static const char p3[] PROGMEM = " and add the name under <i>Host names</i> on the Web login page (/security).</p></body></html>\n";
+      webserver_send(client, 403, (char *)"text/html", 0);
+      webserver_send_content_P(client, p1, strlen_P(p1));
+      if(bh != NULL) {
+        webserver_send_content(client, bh->host, strlen(bh->host));  // only host name characters (reject_host)
+      }
+      webserver_send_content_P(client, p2, strlen_P(p2));
+      if(bh != NULL && bh->ip[0]) {
+        char link[96];
+        snprintf_P(link, sizeof(link), PSTR("<a href='http://%s/security'>http://%s/security</a>"), bh->ip, bh->ip);
+        webserver_send_content(client, link, strlen(link));
+      } else {
+        webserver_send_content_P(client, PSTR("HeishaMon by its IP address"), 27);
+      }
+      webserver_send_content_P(client, p3, strlen_P(p3));
+      if(bh != NULL) {
+        free(bh);
+      }
+      client->userdata = NULL;  // the webserver drops it after the answer
+    } break;
     case WEBAUTH_ROUTE_FORBIDDEN: {
-      static const char msg[] PROGMEM = "403 Forbidden: unknown Host name, or a request of another site (Origin)\n";
+      static const char msg[] PROGMEM = "403 Forbidden: a request of another site (Origin or Sec-Fetch-Site)\n";
       webserver_send(client, 403, (char *)"text/plain", 0);
       webserver_send_content_P(client, msg, strlen_P(msg));
     } break;

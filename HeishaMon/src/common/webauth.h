@@ -48,6 +48,13 @@
 #define WEBAUTH_LOCK_FORGET_MS (15UL * 60UL * 1000UL) // failures of an address are forgotten after this
 #define WEBAUTH_BUCKET_SIZE 10                // password checks in a burst, all addresses together
 #define WEBAUTH_BUCKET_REFILL_MS 3000UL       // one more password check every 3 s
+#define WEBAUTH_KNOWN_ENTRIES 4               // addresses that logged in lately: never share the entry of new addresses
+#define WEBAUTH_KNOWN_MS (7UL * 24UL * 60UL * 60UL * 1000UL)
+#define WEBAUTH_BUCKET_RESERVE 4              // the last ones only for addresses without recent failures
+#define WEBAUTH_ITERATIONS_MIN 1000           // a stored hash outside these limits is not valid
+#define WEBAUTH_ITERATIONS_MAX 100000
+#define WEBAUTH_SWEEP_MS 60000UL              // expired sessions and lockouts are dropped at least this often
+#define WEBAUTH_HOSTNAME_MAX 32
 #define WEBAUTH_REJECT_DRAIN_MAX 4096         // a rejected POST with a longer body is closed, not drained
 
 #define WEBAUTH_COOKIE_NAME "hmsession"
@@ -70,6 +77,7 @@
 #define WEBAUTH_ROUTE_UNAUTHORIZED 221 // 401
 #define WEBAUTH_ROUTE_FORBIDDEN 222    // 403 (Host or Origin)
 #define WEBAUTH_ROUTE_TOO_MANY 223     // 429 (lockout)
+#define WEBAUTH_ROUTE_BAD_HOST 224     // 403 with a page: which host name to add
 
 typedef struct webauth_route_t {
   uint8_t route;
@@ -92,6 +100,7 @@ typedef struct webauth_store_t {
   uint8_t password_set;
   uint8_t apikey_set;
   uint8_t reserved[2];
+  uint8_t check[8];                           // first bytes of the SHA-256 of everything else (bit rot, cut writes)
   uint8_t salt[WEBAUTH_SALT_BYTES];
   uint8_t password_hash[WEBAUTH_HASH_BYTES];  // PBKDF2-HMAC-SHA256(password, salt, iterations)
   uint8_t apikey_hash[WEBAUTH_HASH_BYTES];    // SHA-256 of the key as sent (the key itself is never stored)
@@ -101,11 +110,18 @@ typedef struct webauth_store_t {
 extern webauth_store_t webauth_store;
 
 void webauth_reset(void);            // forget everything (RAM): no password, no sessions, no lockouts
-uint8_t webauth_load(const void *data, size_t len); // 1: valid stored credentials taken over
-bool webauth_login_on(void);         // a web password is set
+uint8_t webauth_load(const void *data, size_t len); // 1: valid stored credentials taken over, 0: invalid (nothing changed)
+void webauth_load_failed(void);      // the stored file exists but is not valid: login on, no password matches (until a factory reset)
+bool webauth_broken(void);           // webauth_load_failed() was called
+bool webauth_login_on(void);         // a web password is set (or the stored one is damaged)
+void webauth_tick(void);             // call from loop(): drops expired sessions and lockouts (millis() wrap)
+bool webauth_ota_allowed(const char *ota_password); // ArduinoOTA may run: login off and not the default password
+bool webauth_hostname_valid(const char *name);       // [A-Za-z0-9-], 1..32, no '-' at either end
+void webauth_device_hosts(char *out, size_t size, const char *const *ips, uint8_t nips, const char *hostname);
+size_t webauth_html_escape(const char *in, char *out, size_t size); // returns the length written
 
 /* Implemented by the firmware (and the tests) */
-void webauth_platform_save(const webauth_store_t *store);   // write /webauth.bin
+bool webauth_platform_save(const webauth_store_t *store);   // write /webauth.bin, false: failed
 void webauth_platform_random(uint8_t *buf, size_t len);     // hardware random numbers
 void webauth_platform_sha256(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, uint8_t out[32]);
 void webauth_platform_yield(void);
@@ -143,6 +159,7 @@ enum {
   WEBAUTH_RESULT_HOSTS,         // extra host names stored
   WEBAUTH_RESULT_INVALID,       // invalid input
   WEBAUTH_RESULT_LOGGED_OUT,
+  WEBAUTH_RESULT_SAVE_FAILED,   // changed, but could not be written to the flash (lost on restart)
 };
 
 /* POST /login and POST /security: run once in the write phase (content 0) */
@@ -155,7 +172,8 @@ unsigned long webauth_lock_wait_ms(uint32_t ip);               // remaining back
 /* ---- building blocks (used by the code above, public for the tests) ---- */
 void webauth_pbkdf2_sha256(const char *password, size_t plen, const uint8_t *salt, size_t slen, uint32_t iterations, uint8_t out[32]);
 bool webauth_equal(const uint8_t *a, const uint8_t *b, size_t len);      // constant time
-bool webauth_set_password(const char *password);
+bool webauth_set_password(const char *password);  // false: invalid length (true even when the save failed, see webauth_last_save_ok)
+bool webauth_last_save_ok(void);
 bool webauth_check_password(const char *password);
 void webauth_remove_password(void);
 void webauth_new_apikey(char out[2 * WEBAUTH_TOKEN_BYTES + 1]);

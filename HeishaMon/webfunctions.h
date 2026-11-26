@@ -120,6 +120,8 @@ int handleModbus(struct webserver_t *client);
 int handleSettings(struct webserver_t *client);
 // web login (src/common/webauth.*)
 #define WEBAUTH_DEVICE_HOSTS_LEN 192
+#define WEBAUTH_FILE "/webauth.bin"
+#define WEBAUTH_FILE_TMP "/webauth.tmp"
 void webauthDeviceHosts(char *out, size_t size, settingsStruct *heishamonSettings);
 void loadWebAuth(void);
 int handleLogin(struct webserver_t *client, uint8_t message);
