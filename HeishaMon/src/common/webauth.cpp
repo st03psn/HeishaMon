@@ -14,7 +14,10 @@
   #include "webauth.h"
   #include "unittest.h"
 #else
+  #define LWIP_INTERNAL  // as webserver.cpp: webserver.h pulls in lwIP, which needs this before Arduino.h
   #include <Arduino.h>
+  #include <WiFiClient.h>
+  #include <WiFiServer.h>
   #include "webauth.h"
 #endif
 
