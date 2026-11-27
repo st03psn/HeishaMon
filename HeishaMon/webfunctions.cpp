@@ -251,6 +251,12 @@ static void sendTextP(struct webserver_t *client, PGM_P text) {
 static_assert(WEBAUTH_RESULT_SAVE_FAILED < HTTPS_MSG_PAGE_OFFSET, "web login messages must stay below the HTTPS ones");
 static_assert(HTTPS_MSG_PAGE_OFFSET + HTTPS_MSG_UPLOAD_ERROR - HTTPSCERT_ERR_IO <= 255, "HTTPS messages must fit into ?m=<n> (one byte)");
 
+#ifdef ESP32
+static void sendHttpsPiece(void *ctx, const char *text, size_t len) {
+  webserver_send_content((struct webserver_t *)ctx, (char *)text, len);
+}
+#endif
+
 /* The HTTPS section of the access page (what /https showed). Only what the certificate says, never the key.
    part 0: status and the settings form, part 1: certificate, own certificate, measurements. */
 static void sendHttpsSection(struct webserver_t *client, uint8_t part, uint8_t message) {
@@ -273,9 +279,9 @@ static void sendHttpsSection(struct webserver_t *client, uint8_t part, uint8_t m
     if (st.running) {
       webserver_send_content_P(client, PSTR("running"), 7);
     } else if (st.pending) {
-      sendTextP(client, PSTR("a new certificate is loaded as soon as the open HTTPS connections have ended"));
+      sendTextP(client, PSTR("loading the new certificate once the open HTTPS connections end"));
     } else if (st.enabled) {
-      sendTextP(client, PSTR("switched on, starts when the network is up (see the log if it does not)"));
+      sendTextP(client, PSTR("on, starts once the network is up (if not, see the log)"));
     } else {
       webserver_send_content_P(client, PSTR("off"), 3);
     }
@@ -284,11 +290,19 @@ static void sendHttpsSection(struct webserver_t *client, uint8_t part, uint8_t m
       webserver_send_content_P(client, PSTR("checked"), 7);
     }
     webserver_send_content_P(client, webBodyHttpsForm3, strlen_P(webBodyHttpsForm3));
-    static const char *const modes[] = { "On (as without HTTPS)", "Redirect pages to HTTPS, API stays on HTTP", "Off (only a redirect to HTTPS)" };
+    // the options as constant pieces: no formatting into a fixed buffer (a cut tag breaks the page)
+    static const char *const modes[] = { "On", "Redirect to HTTPS", "Off (HTTPS only)" };
+    static const char *const values[] = { "0", "1", "2" };
     for (uint8_t m = 0; m < 3; m++) {
-      char opt[96];
-      int n = snprintf(opt, sizeof(opt), "<option value='%u'%s>%s</option>", m, st.http_mode == m ? " selected" : "", modes[m]);
-      webserver_send_content(client, opt, n);
+      sendTextP(client, PSTR("<option value='"));
+      webserver_send_content(client, (char *)values[m], 1);
+      if (st.http_mode == m) {
+        sendTextP(client, PSTR("' selected>"));
+      } else {
+        sendTextP(client, PSTR("'>"));
+      }
+      webserver_send_content(client, (char *)modes[m], strlen(modes[m]));
+      sendTextP(client, PSTR("</option>"));
     }
     webserver_send_content_P(client, webBodyHttpsForm4, strlen_P(webBodyHttpsForm4));
     return;
@@ -297,21 +311,10 @@ static void sendHttpsSection(struct webserver_t *client, uint8_t part, uint8_t m
     return;
   }
   if (st.cert) {
-    const char *rows[][2] = {
-      { "Made by", st.info.generated ? "this device (self-signed)" : "you (uploaded)" },
-      { "Subject", st.info.subject },
-      { "Valid from", st.info.not_before },
-      { "Valid until", st.info.not_after },
-      { "Key", st.info.key_type },
-      { "SHA-256 fingerprint", st.info.fingerprint },
-    };
-    for (auto &r : rows) {
-      char head[96];
-      int n = snprintf(head, sizeof(head), "<div class='setting-row'><label class='setting-label'>%s</label><span style='word-break:break-all'>", r[0]);
-      webserver_send_content(client, head, n);
-      sendEscaped(client, r[1]);  // an uploaded certificate can say anything
-      webserver_send_content_P(client, PSTR("</span></div>"), 13);
-    }
+#ifdef ESP32
+    // made by, subject, validity, key type and fingerprint, each value escaped (an uploaded certificate can say anything)
+    httpscert_info_html(&st.info, sendHttpsPiece, client);
+#endif
   } else {
     sendTextP(client, PSTR("<div class='setting-row'><span class='setting-hint' style='margin-left:0'>No certificate yet: it is made when HTTPS starts.</span></div>"));
   }

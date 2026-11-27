@@ -187,8 +187,8 @@ need(sec_open, r"<button type='button' class='active' onclick=\"location\.href='
 if sec_open.count("class='active'") != 1:
     sys.exit("FAIL: /security must show only System active")
 back = html.split("static const char webBodySecurityBack[]", 1)[1].split(')===="', 1)[0]
-need(back, r"<a href='/settings#system'>&larr; Back to System</a>.*?Web login</h2>", "/security needs a link back to System and the section Web login")
-need(piece("webBodyHttpsHead"), r"<h2 id='https'[^>]*>[^<]*HTTPS</h2>", "/security needs the section HTTPS (anchor #https)")
+need(back, r"<a href='/settings#system'>&larr; Back to System</a>.*?Web login <a href='[^']*'[^>]*>Details</a></h2>", "/security needs a link back to System and the section Web login")
+need(piece("webBodyHttpsHead"), r"<h2 id='https'[^>]*>[^<]*HTTPS <a href='[^']*'[^>]*>Details</a></h2>", "/security needs the section HTTPS (anchor #https)")
 for gone in ("webBodyHttpsOpen", "location.href='/https'", ">Web login</button>", ">HTTPS</button>", "tab <i>Web login", "/https?m="):
     if gone in html:
         sys.exit(f"FAIL: left over from the old tabs: {gone}")
@@ -213,6 +213,27 @@ for first in ("webBodySecurityFirst", "webBodySecurityChange"):
                 sys.exit(f"FAIL: /security closes more <div> than it opens ({first}, {https[0]})")
         if depth != 0 or not piece("webBodySecurityClose").rstrip().endswith("</div>"):
             sys.exit(f"FAIL: /security leaves {depth} <div> open ({first}, {https[0]})")
+# the help texts of /security stay short (one sentence per setting), the details are in the README
+readme = (ROOT / "README.md").read_text(encoding="utf-8")
+slugs = set()
+for h in re.findall(r"^#+ (.+)$", readme, re.M):
+    slugs.add(re.sub(r"[^\w\- ]", "", h.strip().lower()).replace(" ", "-"))
+sec_pieces = web_login + ["webBodySecurityFirst", "webBodySecurityChange", "webBodyHttpsNone", "webBodyHttpsForm1", "webBodyHttpsForm2",
+                          "webBodyHttpsForm3", "webBodyHttpsForm4", "webBodyHttpsCert", "webBodyHttpsEnd", "webBodySecurityClose"]
+sec_html = "".join(piece(n) for n in sec_pieces)
+links = re.findall(r"<a href='https://github\.com/st03psn/HeishaMon#([\w-]+)'[^>]*>Details</a>", sec_html)
+if links != ["web-login-optional", "https-large-board-only"]:
+    sys.exit(f"FAIL: /security needs a Details link to the README for Web login and for HTTPS: {links}")
+for anchor in links:
+    if anchor not in slugs:
+        sys.exit(f"FAIL: the Details link #{anchor} has no heading in README.md")
+for m in re.finditer(r"class='setting-(?:desc|hint)'[^>]*>(.*?)</(?:div|span)>", sec_html, re.S):
+    text = re.sub(r"<[^>]+>|&\w+;", "x", m.group(1)).strip()
+    if len(text) > 100 or text.count(". ") > 1:
+        sys.exit(f"FAIL: /security help text too long (details belong in the README): {text}")
+warn = re.sub(r"<[^>]+>", "", piece("webBodySecurityFirst").split('R"====(', 1)[1].split("<div class='panel'", 1)[0]).strip()
+if len(warn) > 140:
+    sys.exit(f"FAIL: /security warning too long: {warn}")
 need(ino, r"case WEBAUTH_ROUTE_HTTPS_PAGE: \{\s*header->ptr \+= sprintf_P\(\(char \*\)header->buffer, PSTR\(\"Location: /security#https\\r\\n", "GET /https must lead to /security#https")
 need(ino, r"PSTR\(\"Location: /security\?m=%u#https\\r\\nCache-Control: no-store\\r\\n\"\),\s*\(unsigned int\)\(HTTPS_MSG_PAGE_OFFSET \+ httpsFormResult\(client\)\)\)",
      "POST /https must answer with the HTTPS section of /security")
