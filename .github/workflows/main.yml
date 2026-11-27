@@ -37,6 +37,9 @@ jobs:
       - name: Test boot button and setup hotspot
         run: python3 tests/setupap/run_tests.py
 
+      - name: Test flow temperature limit
+        run: python3 tests/flowlimit/run_tests.py
+
       - name: Test command encoding
         run: python3 Tools/test_commands.py
 

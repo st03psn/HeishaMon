@@ -188,6 +188,7 @@ struct String {
   String(const char *c) : s(c ? c : "") {}
   long toInt() const { return atol(s.c_str()); }
 };
+#include "flowlimit.h"
 std::vector<byte> sent;
 int send_count;
 bool send_command(byte* data, int length) {
@@ -319,6 +320,25 @@ GATE = r"""
     byte buffer[256]; char log[256] = { 0 }; char payload[] = "-3.5";
     assert(heatpump_command(&offset, payload, buffer, log) != 0 && strcmp(log, "SetOffset set to -3.5") == 0);
   }
+  // the flow temperature limit (off above: the recorded datagrams are byte-identical): on, a request above the
+  // maximum is clamped and the log says so; off again, the same payload is sent as it is
+  { assert(!flowlimit_on(&flowlimit));
+    flowlimit_configure(&flowlimit, FLOWLIMIT_FLOOR, 35, 16);
+    byte buffer[256]; char log[256] = { 0 }; char payload[] = "60";
+    assert(heatpump_command(find("SetZ1HeatRequestTemperature"), payload, buffer, log) == sizeof(panasonicSendQuery));
+    assert(buffer[38] == 35 + 128 && strcmp(log, "SetZ1HeatRequestTemperature set to 60 [limit: Z1 heat request 60>35]") == 0);
+    char cool[] = "7";
+    assert(heatpump_command(find("SetZ2CoolRequestTemperature"), cool, buffer, log) == sizeof(panasonicSendQuery) && buffer[41] == 16 + 128);
+    char dhw[] = "60";
+    assert(heatpump_command(find("SetDHWTemp"), dhw, buffer, log) == sizeof(panasonicSendQuery) && buffer[42] == 60 + 128);
+    // a refused payload stays refused, the buffer untouched
+    char refused[] = "1x";
+    memset(buffer, 0xa5, sizeof(buffer));
+    assert(heatpump_command(find("SetHeatToCoolTemp"), refused, buffer, log) == 0);
+    for (byte b : buffer) assert(b == 0xa5);
+    flowlimit_configure(&flowlimit, FLOWLIMIT_OFF, 35, 16);
+    assert(heatpump_command(find("SetZ1HeatRequestTemperature"), payload, buffer, log) == sizeof(panasonicSendQuery) && buffer[38] == 60 + 128);
+  }
   for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
     if (commands[i].type == CMD_FUNC) continue;
     byte buffer[256]; char log[256];
@@ -385,7 +405,8 @@ def main():
         cpp = Path(directory) / "test.cpp"
         binary = Path(directory) / "test"
         cpp.write_text(program)
-        subprocess.run(["g++", "-std=c++17", str(cpp), "-o", str(binary)], check=True)
+        common = ROOT / "HeishaMon/src/common"
+        subprocess.run(["g++", "-std=c++17", "-I" + str(common), str(cpp), str(common / "flowlimit.cpp"), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
     print(f"PASS: {len(checks)} command cases for {len(names) - 1} commands (recorded bytes, boundaries, refused payloads)")
 

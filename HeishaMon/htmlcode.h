@@ -1793,6 +1793,36 @@ static const char settingsForm2[] FLASHPROG = R"====(
     <div class='setting-row'><label class='setting-label'>Enable Opentherm processing</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' onclick='updateGPIORowVisibility()' name='opentherm' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Reads an OpenTherm thermostat connected to HeishaMon, for use in the rules and on MQTT.</span></div></div>
     <div class='setting-row'><label class='setting-label'>Listen only (parallel CZ-TAW1)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' onclick='updateGPIORowVisibility()' name='listenonly' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>For a HeishaMon wired parallel to a CZ-TAW1: it only listens and never sends, so commands don't work.</span></div></div>
   </div></div>
+  <div class='panel' data-tab='heatpump' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Flow temperature limit</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><span class='setting-hint'>HeishaMon never sends a heating flow target above the maximum or a cooling flow target below the minimum, whichever way the command comes in (MQTT, rules, web, Modbus, CZ-TAW1, raw). Curve targets and direct targets are clamped, a curve shift is lowered as far as needed. A value outside the limit set at the remote controller is corrected, at most every 10 minutes. Off: no limit.</span></div>
+    <div class='setting-row'>
+      <label class='setting-label'>Heating surface</label>
+      <select name='flowlimit_surface' class='setting-input' onchange="var m={1:35,2:55}[this.value];if(m)document.getElementsByName('flowlimit_heat_max')[0].value=m">
+        <option value='0'>Off (no limit)</option>
+        <option value='1'>Underfloor heating (max 35 &deg;C)</option>
+        <option value='2'>Radiators (max 55 &deg;C)</option>
+        <option value='3'>Custom</option>
+      </select>
+      <div class='setting-desc'>35 &deg;C is the recommended maximum for underfloor heating. 55 &deg;C for radiators is a common design value, not a standard: check it against the design of your system.</div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Max heating flow</label>
+      <div style='display:flex;align-items:center;gap:8px'>
+        <input type='number' name='flowlimit_heat_max' class='setting-input' min='20' max='65' value='' style='width:80px'>
+        <span class='setting-hint'>&deg;C (20 to 65)</span>
+      </div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Min cooling flow</label>
+      <div style='display:flex;align-items:center;gap:8px'>
+        <input type='number' name='flowlimit_cool_min' class='setting-input' min='5' max='25' value='' style='width:80px'>
+        <span class='setting-hint'>&deg;C (5 to 25, default 16)</span>
+      </div>
+      <div class='setting-desc'>Against condensation. Applies whenever a heating surface is chosen.</div>
+    </div>
+  </div></div>
   <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Topic groups</h3></div>
   <div class='settings-grid'>
@@ -1933,6 +1963,36 @@ static const char settingsForm2[] FLASHPROG = R"====(
     <div class='setting-row'><label class='setting-label'>Enable CZ-TAW1 proxy port</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='proxy' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>The port for a CZ-TAW1 behind HeishaMon, so the Panasonic cloud keeps working.</span></div></div>
     <div class='setting-row'><label class='setting-label'>Block settings changes from CZ-TAW1</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='proxyBlockWrites' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>The CZ-TAW1 (Panasonic cloud) can still read the heat pump, but its commands are not passed on.</span></div></div>
     <div class='setting-row'><label class='setting-label'>Listen only (parallel CZ-TAW1)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='listenonly' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>For a HeishaMon wired parallel to a CZ-TAW1: it only listens and never sends, so commands don't work.</span></div></div>
+  </div></div>
+  <div class='panel' data-tab='heatpump' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Flow temperature limit</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><span class='setting-hint'>HeishaMon never sends a heating flow target above the maximum or a cooling flow target below the minimum, whichever way the command comes in (MQTT, rules, web, Modbus, CZ-TAW1, raw). Curve targets and direct targets are clamped, a curve shift is lowered as far as needed. A value outside the limit set at the remote controller is corrected, at most every 10 minutes. Off: no limit.</span></div>
+    <div class='setting-row'>
+      <label class='setting-label'>Heating surface</label>
+      <select name='flowlimit_surface' class='setting-input' onchange="var m={1:35,2:55}[this.value];if(m)document.getElementsByName('flowlimit_heat_max')[0].value=m">
+        <option value='0'>Off (no limit)</option>
+        <option value='1'>Underfloor heating (max 35 &deg;C)</option>
+        <option value='2'>Radiators (max 55 &deg;C)</option>
+        <option value='3'>Custom</option>
+      </select>
+      <div class='setting-desc'>35 &deg;C is the recommended maximum for underfloor heating. 55 &deg;C for radiators is a common design value, not a standard: check it against the design of your system.</div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Max heating flow</label>
+      <div style='display:flex;align-items:center;gap:8px'>
+        <input type='number' name='flowlimit_heat_max' class='setting-input' min='20' max='65' value='' style='width:80px'>
+        <span class='setting-hint'>&deg;C (20 to 65)</span>
+      </div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Min cooling flow</label>
+      <div style='display:flex;align-items:center;gap:8px'>
+        <input type='number' name='flowlimit_cool_min' class='setting-input' min='5' max='25' value='' style='width:80px'>
+        <span class='setting-hint'>&deg;C (5 to 25, default 16)</span>
+      </div>
+      <div class='setting-desc'>Against condensation. Applies whenever a heating surface is chosen.</div>
+    </div>
   </div></div>
   <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Topic groups</h3></div>

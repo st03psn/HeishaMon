@@ -1,6 +1,6 @@
 # MQTT Topics for HeishaMon
 
-`TOP...` IDs identify the normal decoded heat pump values; `XTOP...` and `OPT...` identify values from the extra data block and optional PCB. Not every MQTT topic needs such an ID: device status and event topics such as `LWT`, `log`, `stats`, `rules/state`, and `rules/executed` are documented separately without a TOP number, and so are the GPIO and relay states (`gpio/...`).
+`TOP...` IDs identify the normal decoded heat pump values; `XTOP...` and `OPT...` identify values from the extra data block and optional PCB. Not every MQTT topic needs such an ID: device status and event topics such as `LWT`, `log`, `stats`, `rules/state`, `rules/executed` and `flowlimit/...` are documented separately without a TOP number, and so are the GPIO and relay states (`gpio/...`).
 
 ## Availability Topic:
 
@@ -34,6 +34,25 @@ This reports loaded rules, not whether a rule is executing at that instant. `0` 
 - `duration_us`: elapsed microseconds for an outer Boot, timer, or topic/event invocation, including its helper calls. Omitted for nested helper events. Nested event publication time is included in the outer duration.
 
 Ruleset validation does not publish execution events. A returned error is reported for the outer invocation; a helper that fails before returning successfully has no separate completion event. A crash cannot produce a completion event. Events use MQTT QoS 0, are sent only while connected, and are neither queued nor replayed after reconnecting. Boot events may therefore be absent if MQTT is not connected yet. Every execution can produce traffic, including frequent timer/topic handlers and their helper calls.
+
+## Flow Temperature Limit:
+
+Topic | Response/Description
+--- | ---
+flowlimit/state | Read-only, retained: `0` = off (no limit), `1` = on, `2` = on, but the watchdog stopped correcting a zone (heating or cooling) because the heat pump did not take 3 corrections; see the log. Commands are still clamped.
+flowlimit/surface | Read-only, retained: the chosen heating surface, `0` = off, `1` = underfloor heating, `2` = radiators, `3` = custom
+flowlimit/heat_max | Read-only, retained: the maximum heating flow temperature in °C (only applied while `state` is not `0`)
+flowlimit/cool_min | Read-only, retained: the minimum cooling flow temperature in °C (only applied while `state` is not `0`)
+
+The full topics are `<base>/flowlimit/...`, for example `panasonic_heat_pump/flowlimit/heat_max`. They are published on MQTT connection/reconnection, when a value changes, and at the configured full-data resend interval (`updateAllTime`). The limit is set in the settings (tab **Heat pump**, *Flow temperature limit*), not over MQTT.
+
+While a heating surface is chosen, HeishaMon clamps every main command before it is sent, whichever way it comes in (MQTT commands, rules, the web `/command` route, Modbus, `SendRawValue` and, on the large board, the CZ-TAW1 proxy port):
+
+- heat curve targets (`SetCurves` `zoneN.heat.target.high/low`) at most `heat_max`, cool curve targets at least `cool_min`;
+- `SetZ1/Z2HeatRequestTemperature` in direct mode (`Heating_Mode` 1) at most `heat_max`; in compensation curve mode (`Heating_Mode` 0) the shift is lowered until the highest heat curve target of the zone plus the shift is at most `heat_max` (within -5..5). Cooling the same way with `cool_min` and the lowest cool curve target;
+- before the first data from the heat pump (mode or curve unknown), a request outside -5..5 counts as a direct target and is clamped, a shift passes.
+
+The log line of the command says what was clamped, for example `SetZ1HeatRequestTemperature set to 40 [limit: Z1 heat request 40>35]`. When the data of the heat pump shows a value outside the limit (set at the remote controller, or before the limit was switched on), HeishaMon sends one correction, at most every 10 minutes, for the zones in use (`Zones_State`). After 3 corrections without effect it stops correcting that zone (heating or cooling), logs a warning and `flowlimit/state` becomes `2`, until the settings change or a reboot. In listen only mode nothing is corrected.
 
 ## Log Topic:
 

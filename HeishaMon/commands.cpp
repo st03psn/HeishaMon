@@ -1,5 +1,6 @@
 #include "commands.h"
 #include <LittleFS.h>
+#include "src/common/flowlimit.h"
 
 //removed checksum from default query, is calculated in send_command
 byte initialQuery[] = {0x31, 0x05, 0x10, 0x01, 0x00, 0x00, 0x00};
@@ -82,7 +83,11 @@ unsigned int heatpump_command(const cmdStruct *command, char *msg, unsigned char
     snprintf_P(log_msg, 256, PSTR("%s ignored: installer commands are not allowed"), command->name);
     return 0;
   }
-  if (command->type == CMD_FUNC) return command->func(msg, cmd, log_msg);
+  if (command->type == CMD_FUNC) {
+    unsigned int length = command->func(msg, cmd, log_msg);
+    if (length > 0) flowlimit_apply(&flowlimit, cmd, length, log_msg, 256);
+    return length;
+  }
 
   long value = 0;
   const bool tenths = command->type == CMD_TENTHS;
@@ -111,6 +116,8 @@ unsigned int heatpump_command(const cmdStruct *command, char *msg, unsigned char
   } else {
     snprintf_P(log_msg, 256, PSTR("%s set to %ld"), command->name, value);
   }
+  // the flow temperature limit (src/common/flowlimit.h): clamps the request temperatures, the log says so
+  flowlimit_apply(&flowlimit, cmd, sizeof(panasonicSendQuery), log_msg, 256);
   return sizeof(panasonicSendQuery);
 }
 
