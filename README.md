@@ -15,6 +15,21 @@ Suomen kielellä [README_FI.md](README_FI.md) luettavissa täällä.
 # Current releases
 Latest release is available [here](https://github.com/Egyras/HeishaMon/releases). The ESP8266 compiled binary can be installed on a Wemos D1 mini, on the HeishaMon PCB and generally on any ESP8266 based board compatible with Wemos build settings (at least 4MB flash). You can also download the code and compile it yourself (see required libraries below). The ESP32-S3 binary is for the newer, large, version of heishamon.
 
+## Releases of this fork (st03psn/HeishaMon)
+Releases of this fork are on [its releases page](https://github.com/st03psn/HeishaMon/releases). Each release has the firmware for both boards as assets: `HeishaMon.ino.esp32-v<version>.bin` (large board, ESP32-S3) and `HeishaMon.ino.d1-v<version>.bin` (small board, ESP8266), each with a `.md5` file holding its MD5 checksum. The [Home Assistant integration](https://github.com/st03psn/heishamon-homeassistant) finds the latest release and installs exactly these files.
+
+Versions are `<upstream version>-st03psn.<n>`, for example `4.4.1-st03psn.1`: the upstream release the fork is based on, then a counter that starts at 1 and goes up with each fork release on that base. The board reports this version (without `v`), the tag is `v<version>`. The integration offers `4.4.1-st03psn.2` to a board with `4.4.1-st03psn.1` and `4.4.2-st03psn.1` to both; it does not offer a fork release to a board with the upstream release of the same number (`4.4.1`) or the other way round (install that one by its version with `update.install`). Alpha and nightly builds (`Alpha-<sha>`, `Nightly-<sha>`) are never offered an update automatically.
+
+**How to release the fork:** on an up to date `develop` (or `main`), create an annotated tag and push it:
+
+```bash
+git checkout develop && git pull
+git tag -a v4.4.1-st03psn.1 -m "HeishaMon 4.4.1-st03psn.1" -m "What changed, in a few lines (becomes the release notes)."
+git push origin v4.4.1-st03psn.1
+```
+
+The *Build binary* workflow then runs the tests, builds both boards with this version and publishes a normal (not pre-) release with the four files above; the tag message plus the generated list of changes are the release notes. A tag that does not look like `v<digits>...` fails the build. To redo a release, delete the release and the tag on GitHub, then tag and push again.
+
 
 # Using the software
 HeishaMon is able to communicate with the Panasonic Aquarea H, J, K, L and M series. [Confirmed by users types of HP you can find here](HeatPumpType.md) \
