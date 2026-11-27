@@ -4,7 +4,7 @@
 
   Only the ESP32 (large board) has HTTPS. The ESP8266 has about 40 kB of
   free RAM in all, and one TLS server connection needs about 40 kB
-  (two 16 kB record buffers): its /https page says so, nothing else of
+  (two 16 kB record buffers): the HTTPS section of /security says so, nothing else of
   this is compiled there.
 */
 #ifndef _HTTPSWEB_H_
@@ -18,7 +18,9 @@
 #define HTTPS_FILE "/https.pem"      // certificate and private key (httpscert.h store file)
 #define HTTPS_FILE_TMP "/https.tmp"
 
-/* Results of POST /https, shown on the page (/https?m=<n>) */
+/* Results of POST /https, shown in the HTTPS section of the access page:
+   /security?m=<HTTPS_MSG_PAGE_OFFSET + n>#https (the web login messages of /security are below the offset) */
+#define HTTPS_MSG_PAGE_OFFSET 100
 enum {
   HTTPS_MSG_NONE = 0,
   HTTPS_MSG_SAVED,

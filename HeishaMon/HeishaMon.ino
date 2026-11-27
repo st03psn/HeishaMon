@@ -1416,14 +1416,6 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case 20: {
               return handleJsonArgs(client, args, &heishamonSettings);
             } break;
-          case WEBAUTH_ROUTE_HTTPS_PAGE: {
-              if (strcmp_P((char *)args->name, PSTR("m")) == 0 && args->value != NULL) {
-                char m[4];
-                snprintf(m, sizeof(m), "%.*s", (int)args->len, (char *)args->value);
-                client->userdata = (void *)(uintptr_t)(atoi(m) & 0xFF); // the message of the last form
-              }
-              return 0;
-            } break;
           case WEBAUTH_ROUTE_HTTPS_POST: {
               return httpsFormArgs(client, args);
             } break;
@@ -1626,12 +1618,15 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               return webauth_write_answer(client);
             } break;
           case WEBAUTH_ROUTE_HTTPS_PAGE: {
-              return handleHttps(client, (uint8_t)(uintptr_t)client->userdata);
+              if (client->content == 0) {
+                webserver_send(client, 302, (char *)"text/html", 0); // the HTTPS section of the access page
+              }
+              return 0;
             } break;
           case WEBAUTH_ROUTE_HTTPS_POST: {
               if (client->content == 0) {
                 httpsFormProcess(client);
-                webserver_send(client, 302, (char *)"text/html", 0); // Location: /https?m=<result>
+                webserver_send(client, 302, (char *)"text/html", 0); // Location: /security?m=<offset + result>#https
                 httpsFormFree(client);  // the webserver drops userdata after the answer
               }
               return 0;
@@ -1878,8 +1873,13 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case WEBAUTH_ROUTE_HTTP_OFF: {
               return webauth_create_header(client, header);
             } break;
+          case WEBAUTH_ROUTE_HTTPS_PAGE: {
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /security#https\r\nCache-Control: no-store\r\n"));
+              return -1;
+            } break;
           case WEBAUTH_ROUTE_HTTPS_POST: {
-              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /https?m=%u\r\nCache-Control: no-store\r\n"), (unsigned int)httpsFormResult(client));
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /security?m=%u#https\r\nCache-Control: no-store\r\n"),
+                                       (unsigned int)(HTTPS_MSG_PAGE_OFFSET + httpsFormResult(client)));
               return -1;
             } break;
         }

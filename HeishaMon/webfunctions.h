@@ -133,8 +133,7 @@ int handleSettings(struct webserver_t *client);
 void webauthDeviceHosts(char *out, size_t size, settingsStruct *heishamonSettings);
 void loadWebAuth(void);
 int handleLogin(struct webserver_t *client, uint8_t message);
-int handleSecurity(struct webserver_t *client, uint8_t message);
-int handleHttps(struct webserver_t *client, uint8_t message);
+int handleSecurity(struct webserver_t *client, uint8_t message); // the access page: Web login and HTTPS
 int showApiKey(struct webserver_t *client, const char *key);
 int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings);
 int settingsReconnectWifi(struct webserver_t *client, settingsStruct *heishamonSettings);

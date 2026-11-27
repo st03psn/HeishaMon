@@ -804,7 +804,7 @@ static const char webBodyStart3[] FLASHPROG = R"====(</div>
 static const char webBodyRootLoginOff[] FLASHPROG = R"====(
 <div class='firmware-warning' style='margin:16px 24px 0'>
   <strong>No web password is set.</strong> Every device in your network can control this HeishaMon, change its settings and upload firmware,
-  and the first one to set a web password owns the login. <a href='/security'>Set a web password now</a>
+  and the first one to set a web password owns the login. <a href='/security'>Set a web password now</a> (Settings &rarr; System &rarr; Access &amp; security)
 </div>
 )====";
 
@@ -816,7 +816,7 @@ static const char webFooter[] FLASHPROG = "</body></html>";
 static const char menuJS[] FLASHPROG = R"====(
 <script>
 document.addEventListener('DOMContentLoaded', function(){
-  // /security is the Web login tab of the settings
+  // /security (Access & security) belongs to the System tab of the settings
   var here = window.location.pathname === '/security' ? '/settings' : window.location.pathname;
   document.querySelectorAll('#sideNav a').forEach(function(link){
     if (link.getAttribute('href') === here) {
@@ -1635,14 +1635,14 @@ static const char settingsForm1[] FLASHPROG = R"====(
     <button type='button' data-tab='io' onclick="openSettingsTab('io')">Sensors &amp; GPIO</button>
     <button type='button' data-tab='advanced' onclick="openSettingsTab('advanced')">Advanced</button>
     <button type='button' data-tab='system' onclick="openSettingsTab('system')">System</button>
-    <button type='button' onclick="location.href='/security'">Web login</button>
-)===="
-#ifdef ESP32
-R"====(    <button type='button' onclick="location.href='/https'">HTTPS</button>
-)===="
-#endif
-R"====(  </nav>
+  </nav>
   <form accept-charset='UTF-8' action='/savesettings' method='POST'>
+  <div class='panel' data-tab='system' id='access_panel' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Access &amp; security</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><label class='setting-label'>Status</label><span id='access_status'>&hellip;</span></div>
+    <div class='setting-row'><a href='/security' class='btn btn-primary'>Open Access &amp; security</a><span class='setting-hint'>Web login (web password, API key, host names) and HTTPS (certificate, plain HTTP), each form saves on its own.</span></div>
+  </div></div>
   <div class='panel' data-tab='basic' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Network</h3></div>
   <div class='settings-grid'>
@@ -2179,6 +2179,25 @@ R"====(
           if(el[0].type=='radio'){for(var x=0;x<el.length;x++){if(el[x].value==j[k])el[x].checked=true;}}
           if(el[0].type.indexOf('select')>-1){var ch=el[0].childNodes;for(var x=0;x<ch.length;x++){if(ch[x].value==j[k])ch[x].selected=true;}}
         }
+      }
+      var as=document.getElementById('access_status');
+      if(as){
+        var st='Web password: '+(j.web_password_set?'set (login on)':'not set (login off)')+' \u00b7 API key: '+(j.web_apikey_set?'set':'not set');
+)===="
+#ifdef ESP32
+R"====(
+        st+=' \u00b7 HTTPS: '+(j.https==='enabled'?(j.https_running?'on (running)':'on (not running yet)'):'off');
+        var hm=['on','redirect pages to HTTPS','off'][j.http_mode]||'on';
+        st+=' \u00b7 plain HTTP: '+(j.https_running?hm:'on (setting: '+hm+', applies while HTTPS runs)');
+)===="
+#else
+R"====(
+        st+=' \u00b7 HTTPS: not available on this board';
+)===="
+#endif
+R"====(
+        as.textContent=st;
+        as.style.color=j.web_password_set?'':'var(--red)';
       }
       checkStoredHostname();
       if(typeof updateGPIORowVisibility==='function')updateGPIORowVisibility();
@@ -2874,7 +2893,8 @@ static const char webBodySettingsSaveMessage[] FLASHPROG = R"====(
 )====";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WEB LOGIN (login page, the Web login tab of the settings at /security, new API key)
+// WEB LOGIN (login page, the access page /security of the System tab of the settings:
+// sections Web login and HTTPS; new API key)
 // ─────────────────────────────────────────────────────────────────────────────
 static const char webBodyLogin1[] FLASHPROG = R"====(
 </head>
@@ -2885,7 +2905,7 @@ static const char webBodyLogin1[] FLASHPROG = R"====(
 
 static const char webBodyLoginNoPassword[] FLASHPROG = R"====(
   <p><strong>No web password is set</strong>, so there is nothing to log in to: every device in your network can use this HeishaMon.
-  Whoever sets the first web password owns the login. <a href='/security'>Set a web password</a> &middot; <a href='/'>Home</a></p>
+  Whoever sets the first web password owns the login. <a href='/security'>Set a web password</a> (Settings &rarr; System &rarr; Access &amp; security) &middot; <a href='/'>Home</a></p>
 </div>
 )====";
 
@@ -2905,14 +2925,13 @@ static const char webBodySecurityOpen[] FLASHPROG = R"====(
     <button type='button' onclick="location.href='/settings#heatpump'">Heat pump</button>
     <button type='button' onclick="location.href='/settings#io'">Sensors &amp; GPIO</button>
     <button type='button' onclick="location.href='/settings#advanced'">Advanced</button>
-    <button type='button' onclick="location.href='/settings#system'">System</button>
-    <button type='button' class='active'>Web login</button>
-)===="
-#ifdef ESP32
-R"====(    <button type='button' onclick="location.href='/https'">HTTPS</button>
-)===="
-#endif
-R"====(  </nav>
+    <button type='button' class='active' onclick="location.href='/settings#system'">System</button>
+  </nav>
+)====";
+
+static const char webBodySecurityBack[] FLASHPROG = R"====(
+<p style='margin:0 0 12px'><a href='/settings#system'>&larr; Back to System</a></p>
+<h2 id='weblogin' style='font-size:18px;font-weight:500;margin:0 0 12px'>Access &amp; security: Web login</h2>
 )====";
 
 static const char webBodySecurityFirst[] FLASHPROG = R"====(
@@ -2979,20 +2998,16 @@ static const char webBodySecurityEnd[] FLASHPROG = R"====('></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Save host names</button></div>
 </form></div>
 <p style='font-size:12px;color:var(--text-muted)'>Forgot the web password? It can only be reset at the device: hold its boot button for more than 10 seconds (factory reset, all settings are lost). No network request can skip the login.</p>
-</div>
 )====";
 
-static const char webBodyHttpsOpen[] FLASHPROG = R"====(
-<div class='main-content' style='max-width:780px;margin:0 auto'>
-  <nav class='tabnav' id='settings_tabs' style='padding:0 0 14px;background:none'>
-    <button type='button' onclick="location.href='/settings#basic'">Basic</button>
-    <button type='button' onclick="location.href='/settings#heatpump'">Heat pump</button>
-    <button type='button' onclick="location.href='/settings#io'">Sensors &amp; GPIO</button>
-    <button type='button' onclick="location.href='/settings#advanced'">Advanced</button>
-    <button type='button' onclick="location.href='/settings#system'">System</button>
-    <button type='button' onclick="location.href='/security'">Web login</button>
-    <button type='button' class='active'>HTTPS</button>
-  </nav>
+// the HTTPS section of the access page (/https leads here, /security#https)
+static const char webBodyHttpsHead[] FLASHPROG = R"====(
+<h2 id='https' style='font-size:18px;font-weight:500;margin:24px 0 12px'>Access &amp; security: HTTPS</h2>
+)====";
+
+static const char webBodySecurityClose[] FLASHPROG = R"====(
+<p><a href='/settings#system'>&larr; Back to System</a></p>
+</div>
 )====";
 
 static const char webBodyHttpsNone[] FLASHPROG = R"====(
@@ -3000,7 +3015,6 @@ static const char webBodyHttpsNone[] FLASHPROG = R"====(
 <div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>HTTPS is only available on the large board (ESP32-S3).
 The ESP8266 has too little RAM for a TLS server: one HTTPS connection needs about 40 kB, about all the RAM this board has free.
 Use the web login and keep the web interface in a network you trust, or put a reverse proxy with HTTPS in front of it.</span></div></div></div>
-</div>
 )====";
 
 static const char webBodyHttpsForm1[] FLASHPROG = R"====(
@@ -3016,7 +3030,7 @@ static const char webBodyHttpsForm2[] FLASHPROG = R"====(</span></div>
 static const char webBodyHttpsForm3[] FLASHPROG = R"====(></div><div class='setting-desc'>The first start makes a key and a self-signed certificate for this hostname (a few seconds). Browsers warn about a self-signed certificate: compare the fingerprint below with the one the browser shows, then accept it once.</div></div>
   <div class='setting-row'><label class='setting-label'>Plain HTTP (port 80)</label><select name='http_mode' class='setting-input'>)====";
 
-static const char webBodyHttpsForm4[] FLASHPROG = R"====(</select><div class='setting-desc'><b>Redirect</b>: pages opened in a browser go to HTTPS. On HTTP stay /json, /command, /reboot, /gpio, POST /firmware, POST /saverules, /debug, /wifiscan, /getsettings, /dallasalias, /removedallas, /dallasoffset, /scandallas, and POST /savesettings and /cacert only with the API key, so Home Assistant keeps working. Never on HTTP: the login, the Web login and HTTPS forms and the live log; a login cookie does not count on HTTP (with the login on, HTTP needs the API key). <b>Off</b>: only the redirect of pages is left; Home Assistant and scripts must use https:// (and accept this certificate). In both modes the setup hotspot (192.168.4.1) stays on HTTP, and HTTP works as before as long as HTTPS is not running.</div></div>
+static const char webBodyHttpsForm4[] FLASHPROG = R"====(</select><div class='setting-desc'><b>Redirect</b>: pages opened in a browser go to HTTPS. On HTTP stay /json, /command, /reboot, /gpio, POST /firmware, POST /saverules, /debug, /wifiscan, /getsettings, /dallasalias, /removedallas, /dallasoffset, /scandallas, and POST /savesettings and /cacert only with the API key, so Home Assistant keeps working. Never on HTTP: the login, the forms of this page (Web login and HTTPS) and the live log; a login cookie does not count on HTTP (with the login on, HTTP needs the API key). <b>Off</b>: only the redirect of pages is left; Home Assistant and scripts must use https:// (and accept this certificate). In both modes the setup hotspot (192.168.4.1) stays on HTTP, and HTTP works as before as long as HTTPS is not running.</div></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Save</button></div>
 </form></div>
 <div class='panel' style='margin-bottom:16px'>
@@ -3044,7 +3058,6 @@ static const char webBodyHttpsCert[] FLASHPROG = R"====(
 <div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>)====";
 
 static const char webBodyHttpsEnd[] FLASHPROG = R"====(</span></div></div></div>
-</div>
 )====";
 
 static const char webBodyApiKey1[] FLASHPROG = R"====(
