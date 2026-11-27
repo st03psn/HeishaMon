@@ -10,6 +10,7 @@
 #include "src/common/webserver.h"
 #include "src/common/timerqueue.h"
 #include "src/common/webauth.h"
+#include "httpsweb.h"
 
 #if defined(ESP8266)
 #include <bearssl/bearssl_hash.h> // SHA-256 of the ESP8266 core (BearSSL)
@@ -277,6 +278,94 @@ int handleSecurity(struct webserver_t *client, uint8_t message) {
         webserver_send_content_P(client, webBodySecurityApiKey3, strlen_P(webBodySecurityApiKey3));
         sendEscaped(client, webauth_store.hosts);
         webserver_send_content_P(client, webBodySecurityEnd, strlen_P(webBodySecurityEnd));
+        webserver_send_content_P(client, menuJS, strlen_P(menuJS));
+        webserver_send_content_P(client, webFooter, strlen_P(webFooter));
+      } break;
+  }
+  return 0;
+}
+
+static void sendTextP(struct webserver_t *client, PGM_P text) {
+  webserver_send_content_P(client, text, strlen_P(text));
+}
+
+/* The HTTPS tab of the settings (/https). Only what the certificate says, never the key. */
+int handleHttps(struct webserver_t *client, uint8_t message) {
+  switch (client->content) {
+    case 0: {
+        webserver_send(client, 200, (char *)"text/html", 0);
+        webserver_send_content_P(client, webHeader, strlen_P(webHeader));
+        webserver_send_content_P(client, webCSS, strlen_P(webCSS));
+        sendBodyStart(client);
+        webserver_send_content_P(client, webBodyHttpsOpen, strlen_P(webBodyHttpsOpen));
+        bool good = false;
+        PGM_P msg = httpsMessage(message, &good);
+        if (msg != NULL) {
+          sendMessageP(client, msg, good);
+        }
+      } break;
+    case 1: {
+        https_status_t st;
+        httpsStatus(&st);
+        if (!st.available) {
+          webserver_send_content_P(client, webBodyHttpsNone, strlen_P(webBodyHttpsNone));
+          webserver_send_content_P(client, menuJS, strlen_P(menuJS));
+          webserver_send_content_P(client, webFooter, strlen_P(webFooter));
+          return 0;
+        }
+        webserver_send_content_P(client, webBodyHttpsForm1, strlen_P(webBodyHttpsForm1));
+        if (st.running) {
+          webserver_send_content_P(client, PSTR("running"), 7);
+        } else if (st.pending) {
+          sendTextP(client, PSTR("a new certificate is loaded as soon as the open HTTPS connections have ended"));
+        } else if (st.enabled) {
+          sendTextP(client, PSTR("switched on, starts when the network is up (see the log if it does not)"));
+        } else {
+          webserver_send_content_P(client, PSTR("off"), 3);
+        }
+        webserver_send_content_P(client, webBodyHttpsForm2, strlen_P(webBodyHttpsForm2));
+        if (st.enabled) {
+          webserver_send_content_P(client, PSTR("checked"), 7);
+        }
+        webserver_send_content_P(client, webBodyHttpsForm3, strlen_P(webBodyHttpsForm3));
+        static const char *const modes[] = { "On (as without HTTPS)", "Redirect pages to HTTPS, API stays on HTTP", "Off (only a redirect to HTTPS)" };
+        for (uint8_t m = 0; m < 3; m++) {
+          char opt[96];
+          int n = snprintf(opt, sizeof(opt), "<option value='%u'%s>%s</option>", m, st.http_mode == m ? " selected" : "", modes[m]);
+          webserver_send_content(client, opt, n);
+        }
+        webserver_send_content_P(client, webBodyHttpsForm4, strlen_P(webBodyHttpsForm4));
+      } break;
+    case 2: {
+        https_status_t st;
+        httpsStatus(&st);
+        if (!st.available) {
+          return 0;
+        }
+        if (st.cert) {
+          const char *rows[][2] = {
+            { "Made by", st.info.generated ? "this device (self-signed)" : "you (uploaded)" },
+            { "Subject", st.info.subject },
+            { "Valid from", st.info.not_before },
+            { "Valid until", st.info.not_after },
+            { "Key", st.info.key_type },
+            { "SHA-256 fingerprint", st.info.fingerprint },
+          };
+          for (auto &r : rows) {
+            char head[96];
+            int n = snprintf(head, sizeof(head), "<div class='setting-row'><label class='setting-label'>%s</label><span style='word-break:break-all'>", r[0]);
+            webserver_send_content(client, head, n);
+            sendEscaped(client, r[1]);  // an uploaded certificate can say anything
+            webserver_send_content_P(client, PSTR("</span></div>"), 13);
+          }
+        } else {
+          sendTextP(client, PSTR("<div class='setting-row'><span class='setting-hint' style='margin-left:0'>No certificate yet: it is made when HTTPS starts.</span></div>"));
+        }
+        webserver_send_content_P(client, webBodyHttpsCert, strlen_P(webBodyHttpsCert));
+        char stats[640];
+        httpsStatsText(stats, sizeof(stats));
+        webserver_send_content(client, stats, strlen(stats));
+        webserver_send_content_P(client, webBodyHttpsEnd, strlen_P(webBodyHttpsEnd));
         webserver_send_content_P(client, menuJS, strlen_P(menuJS));
         webserver_send_content_P(client, webFooter, strlen_P(webFooter));
       } break;
@@ -591,6 +680,8 @@ void loadSettings(settingsStruct *heishamonSettings) {
           heishamonSettings->ethernet = ( jsonDoc[F("ethernet")] == "disabled" ) ? false : true; //default to true if not found in settings
           heishamonSettings->modbus = ( jsonDoc[F("modbus")] == "enabled" ) ? true : false;
           heishamonSettings->modbusWrites = ( jsonDoc[F("modbusWrites")] == "enabled" ) ? true : false;
+          heishamonSettings->https = ( jsonDoc[F("https")] == "enabled" ) ? true : false; //missing (older config): off
+          heishamonSettings->http_mode = webauth_http_mode(jsonDoc[F("http_mode")] | 0L);
 #endif          
           if ( jsonDoc[F("waitTime")]) heishamonSettings->waitTime = jsonDoc[F("waitTime")];
           if (heishamonSettings->waitTime < 5) heishamonSettings->waitTime = 5;
@@ -888,6 +979,8 @@ void settingsToJson(JsonDocument &jsonDoc, settingsStruct *heishamonSettings) {
   } else {
     jsonDoc[F("modbusWrites")] = "disabled";
   }
+  jsonDoc[F("https")] = heishamonSettings->https ? "enabled" : "disabled";
+  jsonDoc[F("http_mode")] = heishamonSettings->http_mode;
 #endif 
   jsonDoc[F("flowlimit_surface")] = heishamonSettings->flowlimitSurface;
   jsonDoc[F("flowlimit_heat_max")] = heishamonSettings->flowlimitHeatMax;
@@ -1347,6 +1440,7 @@ int getSettings(struct webserver_t *client, settingsStruct *heishamonSettings) {
 #ifdef TLS_SUPPORT
         jsonDoc[F("mqtt_ca_cert")] = LittleFS.exists("/ca.pem") ? F("CA certificate stored in filesystem") : F("No CA certificate found");
 #endif   
+        httpsSettingsJson(jsonDoc); //HTTPS (ESP32): on/off, HTTP mode, what the certificate says (never the key)
         int size = measureJson(jsonDoc);
         char* buffer = (char*)malloc(size+1);
         if (buffer == nullptr) {

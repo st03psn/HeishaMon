@@ -83,6 +83,8 @@ struct settingsStruct {
   bool ethernet = true; //probe for W5500 ethernet module at boot (disable on boards without it)
   bool modbus = false; //modbus tcp server enable flag
   bool modbusWrites = false; //allow modbus clients to write commands and relays
+  bool https = false; //HTTPS web interface on port 443 (off by default: nothing changes for an existing installation)
+  uint8_t http_mode = 0; //plain HTTP while HTTPS runs: WEBAUTH_HTTP_ON, _REDIRECT (pages to HTTPS, API stays) or _OFF
 #endif
   s0SettingsStruct s0Settings[NUM_S0_COUNTERS];
   gpioSettingsStruct gpioSettings;
@@ -132,6 +134,7 @@ void webauthDeviceHosts(char *out, size_t size, settingsStruct *heishamonSetting
 void loadWebAuth(void);
 int handleLogin(struct webserver_t *client, uint8_t message);
 int handleSecurity(struct webserver_t *client, uint8_t message);
+int handleHttps(struct webserver_t *client, uint8_t message);
 int showApiKey(struct webserver_t *client, const char *key);
 int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings);
 int settingsReconnectWifi(struct webserver_t *client, settingsStruct *heishamonSettings);
