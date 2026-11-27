@@ -5,8 +5,8 @@
   License, v. 2.0. If a copy of the MPL was not distributed with this
   file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
+#include "webfunctions.h"  // first: the board's WiFi headers before lwIP (webserver.h), as everywhere else
 #include "httpsweb.h"
-#include "webfunctions.h"
 #include "src/common/progmem.h"
 #include "src/common/webauth.h"
 #include <LittleFS.h>
