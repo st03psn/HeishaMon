@@ -154,22 +154,70 @@ sec = wf.split("int handleSecurity(", 1)[1].split("\nint ", 1)[0]
 need(sec, r"sendEscaped\(client, hosts\);.*sendEscaped\(client, webauth_store\.hosts\);", "/security must escape the host names")
 if re.search(r"webserver_send_content\(client, (hosts|webauth_store\.hosts)", sec):
     sys.exit("FAIL: /security prints host names without escaping")
-# the web login is a tab of the settings (at /security), not a menu entry of its own
+# the access page (/security: Web login and HTTPS) belongs to the System tab of the settings:
+# no menu entry and no settings tab of its own
 html = (ROOT / "HeishaMon" / "htmlcode.h").read_text(encoding="utf-8")
 side = html.split("id='sideNav'", 1)[1].split("</nav>", 1)[0]
-if "/security" in side or 'href="/settings"' not in side:
-    sys.exit("FAIL: the menu must have Settings and no entry of its own for /security")
-form1 = html.split("static const char settingsForm1[]", 1)[1].split("<form", 1)[0]
-need(form1, r"id='settings_tabs'.*location\.href='/security'\">Web login</button>\s*(\)====\"\s*#ifdef ESP32\s*R\"====\(\s*<button type='button' onclick=\"location\.href='/https'\">HTTPS</button>\s*\)====\"\s*#endif\s*R\"====\(\s*)?</nav>",
-     "the settings need a Web login tab that opens /security (then, on the ESP32, the HTTPS tab)")
+if "/security" in side or "/https" in side or 'href="/settings"' not in side:
+    sys.exit("FAIL: the menu must have Settings and no entry of its own for /security or /https")
+form1_all = html.split("static const char settingsForm1[]", 1)[1].split('static const char ', 1)[0]
+form1 = form1_all.split("<form", 1)[0]
+nav = form1.split("id='settings_tabs'", 1)[1].split("</nav>", 1)[0]
+tabs = re.findall(r"<button type='button' data-tab='(\w+)' onclick=\"openSettingsTab\('\1'\)\">", nav)
+if tabs != ["basic", "heatpump", "io", "advanced", "system"] or nav.count("<button") != len(tabs):
+    sys.exit(f"FAIL: the settings tabs must be Basic, Heat pump, Sensors & GPIO, Advanced, System and nothing else: {tabs}")
+if "/security" in nav or "/https" in nav or "#ifdef" in nav:
+    sys.exit("FAIL: Web login and HTTPS must not be tabs of the settings")
+panel = form1_all.split("<form", 1)[1]
+need(panel, r"^[^>]*action='/savesettings'[^>]*>\s*<div class='panel' data-tab='system' id='access_panel'[^>]*>\s*<div class='panel-header'><h3>Access &amp; security</h3>.*?id='access_status'.*?<a href='/security' class='btn btn-primary'>",
+     "the System tab must start with the section Access & security, a status line and a link to /security")
+js = html.split("static const char populategetsettingsJS[]", 1)[1].split("static const char ", 1)[0]
+need(js, r"getElementById\('access_status'\).*?j\.web_password_set.*?j\.web_apikey_set.*?#ifdef ESP32.*?j\.https===.*?j\.https_running.*?j\.http_mode.*?#else.*?HTTPS: not available on this board.*?#endif.*?as\.textContent=st;",
+     "the status line must show password, API key and (ESP32) HTTPS and the HTTP mode, as text")
+def piece(name):
+    return html.split(f"static const char {name}[]", 1)[1].split(')====";', 1)[0]
+
+
 sec_open = html.split("static const char webBodySecurityOpen[]", 1)[1].split(')===="', 1)[0]
-need(sec_open, r"id='settings_tabs'.*/settings#basic.*/settings#heatpump.*/settings#io.*/settings#advanced.*/settings#system.*class='active'>Web login</button>",
-     "/security must show the tabs of the settings with Web login active")
-for tab in re.findall(r"/settings#(\w+)", sec_open):
-    if f"data-tab='{tab}' onclick" not in form1:
-        sys.exit(f"FAIL: /security links to the settings tab '{tab}' that does not exist")
-if len(re.findall(r"data-tab='\w+' onclick", form1)) != len(re.findall(r"/settings#\w+", sec_open)):
-    sys.exit("FAIL: /security does not show every tab of the settings")
+buttons = re.findall(r"<button[^>]*>[^<]*</button>", sec_open)
+targets = re.findall(r"location\.href='/settings#(\w+)'", sec_open)
+if targets != tabs or len(buttons) != len(tabs):
+    sys.exit(f"FAIL: /security must show exactly the tabs of the settings: {targets}")
+need(sec_open, r"<button type='button' class='active' onclick=\"location\.href='/settings#system'\">System</button>\s*</nav>", "/security must show the System tab active")
+if sec_open.count("class='active'") != 1:
+    sys.exit("FAIL: /security must show only System active")
+back = html.split("static const char webBodySecurityBack[]", 1)[1].split(')===="', 1)[0]
+need(back, r"<a href='/settings#system'>&larr; Back to System</a>.*?Web login</h2>", "/security needs a link back to System and the section Web login")
+need(piece("webBodyHttpsHead"), r"<h2 id='https'[^>]*>[^<]*HTTPS</h2>", "/security needs the section HTTPS (anchor #https)")
+for gone in ("webBodyHttpsOpen", "location.href='/https'", ">Web login</button>", ">HTTPS</button>", "tab <i>Web login", "/https?m="):
+    if gone in html:
+        sys.exit(f"FAIL: left over from the old tabs: {gone}")
+need(html, r"webBodyRootLoginOff\[\].*?<a href='/security'>[^<]*</a> \(Settings &rarr; System &rarr; Access &amp; security\)", "the start page must say where the access page is")
+need(html, r"webBodyLoginNoPassword\[\].*?<a href='/security'>[^<]*</a> \(Settings &rarr; System &rarr; Access &amp; security\)", "the login page must say where the access page is")
+need(sec, r"case 2: \{.*?webBodySecurityEnd.*?\} break;\s*case 3: \{\s*sendHttpsSection\(client, 0, message\);\s*\} break;\s*case 4: \{\s*sendHttpsSection\(client, 1, message\);\s*webserver_send_content_P\(client, webBodySecurityClose,.*?menuJS.*?webFooter",
+     "/security must show the section Web login, then the section HTTPS, then close the page once")
+need(sec, r"message < HTTPS_MSG_PAGE_OFFSET \? webauthMessage\(message, &good\) : NULL", "web login messages below the HTTPS ones")
+hs = wf.split("static void sendHttpsSection(", 1)[1].split("\n}\n", 1)[0]
+need(hs, r"message >= HTTPS_MSG_PAGE_OFFSET\) \{.*?httpsMessage\(message - HTTPS_MSG_PAGE_OFFSET, &good\)", "HTTPS messages in the HTTPS section")
+if "menuJS" in hs or "webFooter" in hs:
+    sys.exit("FAIL: the HTTPS section must not close the page (it goes on, also on the ESP8266)")
+# the pieces of the page in the order handleSecurity() sends them: every <div> closed once, the page at the end
+web_login = ["webBodySecurityOpen", "webBodySecurityBack", "webBodySecurityApiKey1", "webBodySecurityApiKey2", "webBodySecurityApiKey3", "webBodySecurityEnd", "webBodyHttpsHead"]
+for first in ("webBodySecurityFirst", "webBodySecurityChange"):
+    for https in (["webBodyHttpsNone"], ["webBodyHttpsForm1", "webBodyHttpsForm2", "webBodyHttpsForm3", "webBodyHttpsForm4", "webBodyHttpsCert", "webBodyHttpsEnd"]):
+        page = "".join(piece(n) for n in web_login[:2] + [first] + web_login[2:] + https + ["webBodySecurityClose"])
+        depth = 0
+        for m in re.finditer(r"<(/?)div\b", page):
+            depth += -1 if m.group(1) else 1
+            if depth < 0:
+                sys.exit(f"FAIL: /security closes more <div> than it opens ({first}, {https[0]})")
+        if depth != 0 or not piece("webBodySecurityClose").rstrip().endswith("</div>"):
+            sys.exit(f"FAIL: /security leaves {depth} <div> open ({first}, {https[0]})")
+need(ino, r"case WEBAUTH_ROUTE_HTTPS_PAGE: \{\s*header->ptr \+= sprintf_P\(\(char \*\)header->buffer, PSTR\(\"Location: /security#https\\r\\n", "GET /https must lead to /security#https")
+need(ino, r"PSTR\(\"Location: /security\?m=%u#https\\r\\nCache-Control: no-store\\r\\n\"\),\s*\(unsigned int\)\(HTTPS_MSG_PAGE_OFFSET \+ httpsFormResult\(client\)\)\)",
+     "POST /https must answer with the HTTPS section of /security")
+wa = (COMMON / "webauth.cpp").read_text()
+need(wa, r"Host names</i> in Settings &rarr; System &rarr; Access &amp; security \(/security\)", "the unknown host page must say where to add the name")
 need(sec, r"sendBodyStart\(client\);\s*webserver_send_content_P\(client, webBodySecurityOpen,", "/security must start with the menu and the tabs of the settings")
 need(wf, r"strcmp\(tmp->name\.c_str\(\), \"wifi_hostname\"\) == 0\) \{\s*if \(webauth_hostname_valid\(", "saveSettings() must validate the hostname")
 need(wf, r"strlcpy\(heishamonSettings->wifi_hostname, jsonDoc\[F\(\"wifi_hostname\"\)\].*?webauth_hostname_valid\(heishamonSettings->wifi_hostname\)",

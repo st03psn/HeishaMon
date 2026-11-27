@@ -112,7 +112,7 @@ const webauth_route_t webauth_routes[] PROGMEM = {
   { WEBAUTH_ROUTE_LOGIN_PAGE, WEBAUTH_PUBLIC | WA_PAGE, WA_GET, p_login },
   { WEBAUTH_ROUTE_LOGIN_POST, WEBAUTH_PUBLIC | WA_STATE, WA_POST, p_login },
   { WEBAUTH_ROUTE_LOGOUT, WA_PAGE | WA_STATE, WA_ANY, p_logout },
-  { WEBAUTH_ROUTE_SECURITY_PAGE, WA_PAGE, WA_GET, p_security },   // web password, API key, extra host names
+  { WEBAUTH_ROUTE_SECURITY_PAGE, WA_PAGE, WA_GET, p_security },   // access page: web password, API key, extra host names, HTTPS
   { WEBAUTH_ROUTE_SECURITY_POST, WA_STATE, WA_POST, p_security },
   { 110, WA_STATE, WA_POST, p_savesettings },              // save settings
   { 111, WA_STATE | WEBAUTH_INTERNAL, WA_ANY, NULL },      // save settings: answer "new password" (webfunctions.cpp)
@@ -127,7 +127,7 @@ const webauth_route_t webauth_routes[] PROGMEM = {
   { 160, WA_PAGE, WA_GET, p_rules },                       // rules page (also the answer of a failed /saverules)
   { 166, WA_PAGE, WA_GET, p_cacert },                      // CA certificate page
   { 180, WA_STATE, WA_GET, p_scandallas },                 // rescan 1-wire
-  { WEBAUTH_ROUTE_HTTPS_PAGE, WA_PAGE, WA_GET, p_https },  // HTTPS tab of the settings (ESP32; the ESP8266 says it has none)
+  { WEBAUTH_ROUTE_HTTPS_PAGE, WA_PAGE, WA_GET, p_https },  // old address of the HTTPS settings: 302 to /security#https
   { WEBAUTH_ROUTE_HTTPS_POST, WA_STATE, WA_POST, p_https }, // HTTPS on/off, HTTP mode, new certificate, certificate upload
   { 0, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },          // 404
   { WEBAUTH_ROUTE_TO_LOGIN, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
@@ -1769,7 +1769,7 @@ int webauth_write_answer(struct webserver_t *client) {
                                        "<h2>Unknown host name</h2><p>This HeishaMon does not answer to the name <b>";
       static const char p2[] PROGMEM = "</b>. It only accepts its IP addresses, its hostname and hostname.local, to protect it from other web sites (DNS rebinding).</p>"
                                        "<p>If this is the name your router or reverse proxy gives it (for example <i>heishamon.fritz.box</i>), open ";
-      static const char p3[] PROGMEM = " and add the name under <i>Host names</i> in the settings, tab <i>Web login</i> (/security).</p></body></html>\n";
+      static const char p3[] PROGMEM = " and add the name under <i>Host names</i> in Settings &rarr; System &rarr; Access &amp; security (/security).</p></body></html>\n";
       webserver_send(client, 403, (char *)"text/html", 0);
       webserver_send_content_P(client, p1, strlen_P(p1));
       if(bh != NULL) {

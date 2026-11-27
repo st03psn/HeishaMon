@@ -174,7 +174,7 @@ need(hw, r"open\(HTTPS_FILE_TMP, \"w\"\).*?remove\(HTTPS_FILE\);\s*ok = LittleFS
 need(hw, r"httpscert_from_upload\(", "an upload is checked before it is stored")
 # the private key never goes to the browser: the page and /getsettings only use the info struct
 wf = (SKETCH / "webfunctions.cpp").read_text()
-for text, fn in ((wf, "int handleHttps("), (hw, "void httpsSettingsJson(")):
+for text, fn in ((wf, "static void sendHttpsSection("), (hw, "void httpsSettingsJson(")):
     start = text.index(fn)
     body = text[start:text.index("\n}\n", start)]
     if "PRIVATE" in body or "HTTPS_FILE" in body or "readStore" in body or "LittleFS" in body:
