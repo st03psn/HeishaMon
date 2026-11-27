@@ -87,9 +87,18 @@ static uint8_t *rbuffer = NULL;
   wire order and resume delivery across webserver_loop() iterations, without
   blocking the main loop on a slow receiver.
 */
+#if defined(ESP32)
+  #include "httpstls.h"
+#endif
 #ifdef ESP32
 #include "lwip/sockets.h"
 #include <errno.h>
+static WiFiServer tls_server(0);  // HTTPS: same client slots, same request path
+static uint8_t tls_listening = 0;
+static uint8_t tls_paused = 0;   // connections wait in the backlog while a new certificate is loaded
+#define WEB_TLS_STEP_BUDGET_MS 20  // after a handshake step this long no other one in the same webserver_loop() pass
+static uint16_t webserver_tls_read(struct webserver_t *client, uint8_t *buf, uint16_t size);
+static void webserver_tls_accept(void);
 // One fixed staging buffer for each possible client (no per-request malloc/free).
 static const uint16_t WEB_TX_CAPACITY = MTU_SIZE + 64;
 static const uint16_t WEB_TX_FLUSH_LIMIT = 1500;
@@ -191,7 +200,18 @@ static web_tx_status_t web_tx_flush(struct webserver_t *client) {
   }
 
   uint16_t attempt = client->tx_used < WEB_TX_FLUSH_LIMIT ? client->tx_used : WEB_TX_FLUSH_LIMIT;
-  int n = lwip_send(fd, client->tx_data, attempt, MSG_DONTWAIT);
+  int n = 0;
+  if(client->tlsconn != NULL) {
+    n = httpstls_write(client->tlsconn, client->tx_data, attempt);
+    if(n == 0) {
+      n = -1;
+      errno = EAGAIN;  // the record is partly on its way: the same bytes again next time
+    } else if(n < 0) {
+      errno = EIO;
+    }
+  } else {
+    n = lwip_send(fd, client->tx_data, attempt, MSG_DONTWAIT);
+  }
 
   if(n > 0) {
     if((uint16_t)n > attempt) {
@@ -2428,6 +2448,7 @@ static int8_t webserver_request_ready(struct webserver_t *client) {
 
   memset(&request, 0, sizeof(request));
   request.method = client->method;
+  request.tls = client->tls;
   request.path = reqbuf_get(rb, REQ_FIELD_PATH);
   request.query = reqbuf_get(rb, REQ_FIELD_QUERY);
   if(request.query == NULL) {
@@ -2663,6 +2684,10 @@ err_t webserver_poll(void *arg, struct tcp_pcb *pcb) {
 
 void webserver_reset_client(struct webserver_t *client) {
 #if defined(ESP32)
+  if(client->tlsconn != NULL) {
+    httpstls_conn_free(client->tlsconn);
+    client->tlsconn = NULL;
+  }
   web_tx_release(client);
   client->tx_last_progress = 0;
   client->tx_failed = 0;
@@ -2693,6 +2718,7 @@ void webserver_reset_client(struct webserver_t *client) {
   client->lastping = 0;
   client->content = 0;
   client->is_websocket = 0;
+  client->tls = 0;
   client->userdata = NULL;
 
   struct sendlist_t *tmp = NULL;
@@ -2780,6 +2806,9 @@ void webserver_loop(void) {
   uint8_t i = 0;
 
   webserver_busy = 1;
+#if defined(ESP32)
+  unsigned long tls_spent = 0;  // ms of handshake steps in this pass
+#endif
 
   for(i=0;i<WEBSERVER_MAX_CLIENTS;i++) {
     /*
@@ -2842,6 +2871,29 @@ void webserver_loop(void) {
     }
     switch(clients[i].data.step) {
       case WEBSERVER_CLIENT_CONNECTING: {
+#if defined(ESP32)
+        if(clients[i].data.tlsconn != NULL) {
+          // HTTPS: the handshake first, one step at a time (a step can block loop() for tens of ms)
+          if(httpstls_conn_age(clients[i].data.tlsconn) > HTTPSTLS_HANDSHAKE_TIMEOUT_MS) {
+            clients[i].data.step = WEBSERVER_CLIENT_CLOSE;
+            break;
+          }
+          if(tls_spent < WEB_TLS_STEP_BUDGET_MS) {
+            unsigned long t = millis();
+            int r = httpstls_handshake(clients[i].data.tlsconn);
+            tls_spent += (unsigned long)(millis() - t) + 1;
+            if(r == HTTPSTLS_DONE) {
+              clients[i].data.step = WEBSERVER_CLIENT_READ_HEADER;
+              clients[i].data.lastseen = millis();
+              clients[i].data.ptr = 0;
+              memset(&clients[i].data.buffer, 0, WEBSERVER_BUFFER_SIZE);
+            } else if(r == HTTPSTLS_FAIL) {
+              clients[i].data.step = WEBSERVER_CLIENT_CLOSE;
+            }
+          }
+          break;
+        }
+#endif
         if(clients[i].data.client->available()) {
           clients[i].data.step = WEBSERVER_CLIENT_READ_HEADER;
         }
@@ -2851,6 +2903,16 @@ void webserver_loop(void) {
       case WEBSERVER_CLIENT_ARGS:
       case WEBSERVER_CLIENT_WEBSOCKET:
       case WEBSERVER_CLIENT_READ_HEADER: {
+#if defined(ESP32)
+        if(clients[i].data.tlsconn != NULL) {
+          size = webserver_tls_read(&clients[i].data, rbuffer, WEBSERVER_READ_SIZE);
+          if(size > 0) {
+            clients[i].data.lastseen = millis();
+            webserver_sync_receive(&clients[i].data, rbuffer, size);
+          }
+          break;
+        }
+#endif
         if(clients[i].data.client->connected() || clients[i].data.client->available()) {
           if(clients[i].data.client->available()) {
             uint8_t *p = (uint8_t *)rbuffer;
@@ -2902,6 +2964,12 @@ void webserver_loop(void) {
         if(clients[i].data.callback != NULL) {
           clients[i].data.callback(&clients[i].data, NULL);
         }
+#if defined(ESP32)
+        if(clients[i].data.tlsconn != NULL) {
+          httpstls_conn_free(clients[i].data.tlsconn);  // close_notify while the socket is still open
+          clients[i].data.tlsconn = NULL;
+        }
+#endif
 
         clients[i].data.client->stop();
         webserver_reset_client(&clients[i].data);
@@ -2934,8 +3002,124 @@ void webserver_loop(void) {
     }
   }
 #endif
+#if defined(ESP32)
+  if(tls_listening && !tls_paused && tls_server.hasClient()) {
+    webserver_tls_accept();
+  }
+#endif
   webserver_busy = 0;
 }
+
+#if defined(ESP32)
+/* > 0: bytes; 0: nothing now; a closed or broken connection is set to WEBSERVER_CLIENT_CLOSE */
+static uint16_t webserver_tls_read(struct webserver_t *client, uint8_t *buf, uint16_t size) {
+  int n = httpstls_read(client->tlsconn, buf, size);
+  if(n < 0) {
+    client->step = WEBSERVER_CLIENT_CLOSE;
+    return 0;
+  }
+  return (uint16_t)n;
+}
+
+/* A new HTTPS connection: a free slot, the cap and the memory, else it is closed right away */
+static void webserver_tls_accept(void) {
+  WiFiClient c = tls_server.accept();
+  if(!c) {
+    return;
+  }
+  uint8_t slot = WEBSERVER_MAX_CLIENTS;
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    if(clients[i].data.client == NULL && clients[i].data.pcb == NULL) {
+      slot = i;
+      break;
+    }
+  }
+  if(slot == WEBSERVER_MAX_CLIENTS || httpstls_stats.active >= HTTPSTLS_MAX_CONN) {
+    httpstls_stats.refused_cap++;
+    c.stop();
+    return;
+  }
+  if(!webserver_tls_admit()) {
+    httpstls_stats.refused_memory++;
+    c.stop();
+    return;
+  }
+  struct webserver_t *client = &clients[slot].data;
+  webserver_reset_client(client);
+  client->client = new WiFiClient(c);
+  if(client->client == NULL) {
+    c.stop();
+    return;
+  }
+  client->tlsconn = httpstls_conn_new(client->client->fd());
+  if(client->tlsconn == NULL) {
+    httpstls_stats.refused_memory++;  // the record buffers did not fit
+    client->client->stop();
+    delete client->client;
+    client->client = NULL;
+    return;
+  }
+  client->tls = 1;
+  client->async = 0;
+  client->lastseen = millis();
+  client->step = WEBSERVER_CLIENT_CONNECTING;
+  client->client->setNoDelay(true);
+  loggingSerial.print("New HTTPS client: ");
+  loggingSerial.print(client->client->remoteIP());
+  loggingSerial.print(":");
+  loggingSerial.println(client->client->remotePort());
+}
+
+int8_t webserver_tls_start(int port) {
+  if(!httpstls_ready()) {
+    return -1;
+  }
+  if(!tls_listening) {
+    tls_server.begin(port);
+    tls_listening = 1;
+    loggingSerial.print("HTTPS webserver started at port: ");
+    loggingSerial.println(port);
+  }
+  return 0;
+}
+
+void webserver_tls_stop(void) {
+  if(tls_listening) {
+    tls_server.end();
+    tls_listening = 0;
+  }
+}
+
+bool webserver_tls_running(void) {
+  return tls_listening != 0;
+}
+
+void webserver_tls_pause(bool pause) {
+  tls_paused = pause ? 1 : 0;
+}
+
+void webserver_tls_close_all(void) {
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    struct webserver_t *c = &clients[i].data;
+    if(c->tlsconn != NULL && c->step != 0) {
+      c->step = WEBSERVER_CLIENT_CLOSE;
+      c->tx_used = 0;  // nothing more is sent
+    }
+  }
+}
+
+void webserver_tls_close_idle(void) {
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    struct webserver_t *c = &clients[i].data;
+    if(c->tlsconn == NULL || c->step == 0 || c->step == WEBSERVER_CLIENT_CLOSE || c->tx_used > 0) {
+      continue;
+    }
+    if(c->is_websocket || c->step == WEBSERVER_CLIENT_CONNECTING || (c->step == WEBSERVER_CLIENT_READ_HEADER && c->req == NULL)) {
+      c->step = WEBSERVER_CLIENT_CLOSE;  // the page reconnects (websocket) or the browser retries
+    }
+  }
+}
+#endif
 
 int8_t webserver_start(int port, webserver_cb_t *callback, uint8_t async) {
   uint8_t i = 0;

@@ -56,6 +56,7 @@
 #define WEBAUTH_ITERATIONS_MAX 100000
 #define WEBAUTH_SWEEP_MS 60000UL              // expired sessions and lockouts are dropped at least this often
 #define WEBAUTH_HOSTNAME_MAX 32
+#define WEBAUTH_LOCATION_MAX 256               // Location of the redirect to HTTPS (fits the header buffer of the webserver)
 #define WEBAUTH_REJECT_DRAIN_MAX 4096         // a rejected POST with a longer body is closed, not drained
 
 #define WEBAUTH_COOKIE_NAME "hmsession"
@@ -79,6 +80,18 @@
 #define WEBAUTH_ROUTE_FORBIDDEN 222    // 403 (Host or Origin)
 #define WEBAUTH_ROUTE_TOO_MANY 223     // 429 (lockout)
 #define WEBAUTH_ROUTE_BAD_HOST 224     // 403 with a page: which host name to add
+#define WEBAUTH_ROUTE_TO_HTTPS 225     // 302 to the same page over HTTPS
+#define WEBAUTH_ROUTE_HTTP_OFF 226     // 403: HTTP is switched off, use HTTPS
+#define WEBAUTH_ROUTE_HTTPS_PAGE 175   // GET /https: 302 to the HTTPS section of /security
+#define WEBAUTH_ROUTE_HTTPS_POST 176   // its forms: on/off, HTTP mode, new certificate, upload
+#define WEBAUTH_ROUTE_SAVESETTINGS 110  // POST /savesettings (carries the WiFi and MQTT passwords)
+#define WEBAUTH_ROUTE_CACERT_POST 165   // POST /cacert (MQTT CA certificate)
+
+/* What plain HTTP may do while HTTPS is running (setting "HTTP") */
+#define WEBAUTH_HTTP_ON 0        // everything, as without HTTPS
+#define WEBAUTH_HTTP_REDIRECT 1  // pages of a browser go to HTTPS; the API (Home Assistant, scripts) stays on HTTP
+#define WEBAUTH_HTTP_OFF 2       // pages go to HTTPS, everything else is refused (except the setup hotspot)
+uint8_t webauth_http_mode(long value);  // a stored value of the setting, anything unknown: WEBAUTH_HTTP_ON
 
 typedef struct webauth_route_t {
   uint8_t route;
@@ -151,7 +164,27 @@ void webauth_platform_close_others(struct webserver_t *keep); // stop every othe
 typedef struct webauth_env_t {
   uint32_t ip;          // address of the client (for the lockout only)
   const char *hosts;    // the Host names of this device: its IP addresses, hostname, hostname.local (comma separated)
+  uint8_t https_on;     // the HTTPS server is running (not only switched on: it may have failed to start)
+  uint8_t http_mode;    // WEBAUTH_HTTP_ON, _REDIRECT or _OFF
+  uint8_t hotspot;      // the request came in on the setup hotspot (local address of the socket is the access point)
 } webauth_env_t;
+
+/*
+ * What happens to a request because of the transport (HTTP or HTTPS),
+ * before anything else is checked. Only plain HTTP requests while HTTPS
+ * runs are affected; the setup hotspot and the captive portal checks
+ * always stay on HTTP.
+ */
+enum {
+  WEBAUTH_TRANSPORT_OK = 0,
+  WEBAUTH_TRANSPORT_REDIRECT,   // answer with 302 to https://<host><path>
+  WEBAUTH_TRANSPORT_REFUSE,     // answer with 403 (HTTP off)
+};
+uint8_t webauth_transport(const struct webserver_request_t *req, const webauth_env_t *env, uint8_t route, uint8_t flags);
+/* May the session cookie count? Not over plain HTTP while HTTPS runs in Redirect or Off (hotspot excepted) */
+bool webauth_cookie_allowed(const struct webserver_request_t *req, const webauth_env_t *env);
+/* Location of the redirect: https://<Host of the request when it is one of this device, else the first device address><path>[?query] */
+bool webauth_https_location(const struct webserver_request_t *req, const char *device_hosts, char *out, size_t size);
 
 int8_t webauth_request(struct webserver_t *client, const struct webserver_request_t *req, const webauth_env_t *env);
 
@@ -209,6 +242,7 @@ int8_t webauth_cookie_session(const char *cookie);  // valid session of the Cook
 
 bool webauth_host_allowed(const char *host, const char *device_hosts);
 bool webauth_origin_matches(const char *origin, const char *host);
+bool webauth_origin_matches_transport(const char *origin, const char *host, bool tls); // over TLS only https:// counts
 
 bool webauth_lock_check(uint32_t ip);     // 1: this address may try a password now (no backoff, budget left); takes one try and counts it as a failure until webauth_lock_success()
 void webauth_lock_failed(uint32_t ip);

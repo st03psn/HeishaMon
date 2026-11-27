@@ -155,6 +155,7 @@ enum {
 typedef struct webserver_request_t {
   uint8_t method;                 // WEBSERVER_METHOD_GET or WEBSERVER_METHOD_POST
   uint8_t websocket;              // 1: a valid websocket upgrade on WEBSERVER_WEBSOCKET_PATH
+  uint8_t tls;                    // 1: the request came over HTTPS (ESP32 only)
   uint8_t truncated;              // bit (1 << WEBSERVER_HEADER_x): value longer than its limit, cut
   uint32_t content_length;        // 0 without a Content-Length header
   const char *path;               // as sent, not url decoded, without the query
@@ -202,6 +203,7 @@ typedef struct webserver_t {
   uint16_t tx_used;
   unsigned long tx_last_progress;
   uint8_t tx_failed;
+  struct httpstls_conn_t *tlsconn; // HTTPS: the TLS state of this connection (httpstls.h), NULL for HTTP
 #endif
   uint8_t is_websocket:1;
   uint8_t reqtype:1;
@@ -212,6 +214,7 @@ typedef struct webserver_t {
   uint8_t substep:4;
   uint8_t rejected:1;   // the callback rejected the request: body is skipped, not parsed
   uint8_t mpemitted:1;  // multipart: a part of the current value was already given to the callback
+  uint8_t tls:1;        // an HTTPS connection (ESP32: its bytes go through tlsconn)
   uint8_t mpmatch;      // multipart: bytes of the boundary delimiter matched so far
   uint8_t mpdlen;       // multipart: length of the boundary delimiter
   uint8_t mpname;       // multipart: length of the name of the current field
@@ -262,6 +265,21 @@ enum {
 };
 
 int8_t webserver_start(int port, webserver_cb_t *callback, uint8_t async);
+#if defined(ESP32)
+/*
+ * HTTPS next to the HTTP port: accepted connections use the same client
+ * slots, callback and request path (httpstls_server_init() must have
+ * succeeded). webserver_tls_stop() refuses new connections; open ones end
+ * normally.
+ */
+int8_t webserver_tls_start(int port);
+void webserver_tls_stop(void);
+void webserver_tls_pause(bool pause);   // keep the port open, but accept nothing (a new certificate is loaded)
+void webserver_tls_close_idle(void);    // close TLS connections that are not in the middle of a request (websocket, waiting)
+void webserver_tls_close_all(void);     // close every TLS connection (a new certificate waited too long)
+bool webserver_tls_running(void);
+bool webserver_tls_admit(void); // implemented by the firmware: enough memory for one more TLS connection
+#endif
 void webserver_loop(void);
 void websocket_write_all_P(PGM_P data, uint16_t data_len);
 void websocket_write_all(char *data, uint16_t data_len);

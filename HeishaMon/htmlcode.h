@@ -908,9 +908,9 @@ function attemptReconnect(){
 }
 function startWebsockets(){
   if(typeof MozWebSocket!='undefined'){
-    oWebsocket=new MozWebSocket('ws://'+location.host+'/ws');
+    oWebsocket=new MozWebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/ws');
   } else if(typeof WebSocket!='undefined'){
-    oWebsocket=new WebSocket('ws://'+location.host+'/ws');
+    oWebsocket=new WebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/ws');
   }
   if(oWebsocket){
     oWebsocket.onopen=function(){bConnected=true;};
@@ -1626,7 +1626,7 @@ static const char settingsForm1[] FLASHPROG = R"====(
   <div class='panel-header'><h3>Access &amp; security</h3></div>
   <div class='settings-grid'>
     <div class='setting-row'><label class='setting-label'>Status</label><span id='access_status'>&hellip;</span></div>
-    <div class='setting-row'><a href='/security' class='btn btn-primary'>Open Access &amp; security</a><span class='setting-hint'>Web password, API key and host names.</span></div>
+    <div class='setting-row'><a href='/security' class='btn btn-primary'>Open Access &amp; security</a><span class='setting-hint'>Web login (password, API key, host names) and HTTPS.</span></div>
   </div></div>
   <div class='panel' data-tab='basic' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Network</h3></div>
@@ -2105,7 +2105,21 @@ R"====(
       }
       var as=document.getElementById('access_status');
       if(as){
-        as.textContent='Web password: '+(j.web_password_set?'set (login on)':'not set (login off)')+' \u00b7 API key: '+(j.web_apikey_set?'set':'not set');
+        var st='Web password: '+(j.web_password_set?'set (login on)':'not set (login off)')+' \u00b7 API key: '+(j.web_apikey_set?'set':'not set');
+)===="
+#ifdef ESP32
+R"====(
+        st+=' \u00b7 HTTPS: '+(j.https==='enabled'?(j.https_running?'on (running)':'on (not running yet)'):'off');
+        var hm=['on','redirect pages to HTTPS','off'][j.http_mode]||'on';
+        st+=' \u00b7 plain HTTP: '+(j.https_running?hm:'on (setting: '+hm+', applies while HTTPS runs)');
+)===="
+#else
+R"====(
+        st+=' \u00b7 HTTPS: not available on this board';
+)===="
+#endif
+R"====(
+        as.textContent=st;
         as.style.color=j.web_password_set?'':'var(--red)';
       }
       checkStoredHostname();
@@ -2802,7 +2816,8 @@ static const char webBodySettingsSaveMessage[] FLASHPROG = R"====(
 )====";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WEB LOGIN (login page, the access page /security of the System tab of the settings, new API key)
+// WEB LOGIN (login page, the access page /security of the System tab of the settings:
+// sections Web login and HTTPS; new API key)
 // ─────────────────────────────────────────────────────────────────────────────
 static const char webBodyLogin1[] FLASHPROG = R"====(
 </head>
@@ -2907,9 +2922,62 @@ static const char webBodySecurityEnd[] FLASHPROG = R"====('></div>
 <p style='font-size:12px;color:var(--text-muted)'>Forgot the web password? Only a factory reset at the device helps (boot button for more than 10 seconds).</p>
 )====";
 
+// the HTTPS section of the access page (/https leads here, /security#https)
+static const char webBodyHttpsHead[] FLASHPROG = R"====(
+<h2 id='https' style='font-size:18px;font-weight:500;margin:24px 0 12px'>Access &amp; security: HTTPS</h2>
+)====";
+
 static const char webBodySecurityClose[] FLASHPROG = R"====(
 <p><a href='/settings#system'>&larr; Back to System</a></p>
 </div>
+)====";
+
+static const char webBodyHttpsNone[] FLASHPROG = R"====(
+<div class='panel' style='margin-bottom:16px'><div class='panel-header'><h3>HTTPS</h3></div>
+<div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>HTTPS is only available on the large board (ESP32-S3): the ESP8266 has too little RAM for a TLS server.</span></div></div></div>
+)====";
+
+static const char webBodyHttpsForm1[] FLASHPROG = R"====(
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>HTTPS (port 443)</h3></div>
+<form method='POST' action='/https' class='settings-grid'>
+  <input type='hidden' name='action' value='settings'>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>Status: )====";
+
+static const char webBodyHttpsForm2[] FLASHPROG = R"====(</span></div>
+  <div class='setting-row'><label class='setting-label'>HTTPS</label><div class='checkbox-wrap'><input type='checkbox' name='https' value='enabled' )====";
+
+static const char webBodyHttpsForm3[] FLASHPROG = R"====(></div><div class='setting-desc'>The first start makes a self-signed certificate: compare its fingerprint below with the one the browser shows.</div></div>
+  <div class='setting-row'><label class='setting-label'>Plain HTTP (port 80)</label><select name='http_mode' class='setting-input'>)====";
+
+static const char webBodyHttpsForm4[] FLASHPROG = R"====(</select><div class='setting-desc'><b>Redirect</b>: browser pages go to HTTPS, the API stays on HTTP; <b>Off</b>: only the redirect is left (details in the README).</div></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Save</button></div>
+</form></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Certificate</h3></div>
+<div class='settings-grid'>
+)====";
+
+static const char webBodyHttpsCert[] FLASHPROG = R"====(
+  <div class='setting-row'>
+    <form method='POST' action='/https' style='display:inline' onsubmit="return confirm('Make a new key and certificate? Browsers warn again and must accept the new one.');"><input type='hidden' name='action' value='regenerate'><button type='submit' class='btn btn-ghost'>Make a new self-signed certificate</button></form>
+    <span class='setting-hint'>For example after the IP address changed.</span>
+  </div>
+</div></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Own certificate</h3></div>
+<form method='POST' action='/https' enctype='multipart/form-data' class='settings-grid'>
+  <input type='hidden' name='action' value='upload'>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>PEM certificate (its chain may follow) and PEM key without a password, EC P-256 or RSA 2048 only.</span></div>
+  <div class='setting-row'><label class='setting-label'>Certificate (PEM)</label><input type='file' name='cert' accept='.pem,.crt,.cer' class='setting-input' required></div>
+  <div class='setting-row'><label class='setting-label'>Private key (PEM)</label><input type='file' name='key' accept='.pem,.key' class='setting-input' required></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Upload and use</button></div>
+</form></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Measurements</h3></div>
+<div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>)====";
+
+static const char webBodyHttpsEnd[] FLASHPROG = R"====(</span></div></div></div>
 )====";
 
 static const char webBodyApiKey1[] FLASHPROG = R"====(

@@ -10,6 +10,7 @@
 #include "src/common/webserver.h"
 #include "src/common/timerqueue.h"
 #include "src/common/webauth.h"
+#include "httpsweb.h"
 
 #if defined(ESP8266)
 #include <bearssl/bearssl_hash.h> // SHA-256 of the ESP8266 core (BearSSL)
@@ -242,6 +243,88 @@ int handleLogin(struct webserver_t *client, uint8_t message) {
   return 0;
 }
 
+static void sendTextP(struct webserver_t *client, PGM_P text) {
+  webserver_send_content_P(client, text, strlen_P(text));
+}
+
+// the messages of the two sections share ?m=<n>: those of POST /https start at HTTPS_MSG_PAGE_OFFSET
+static_assert(WEBAUTH_RESULT_SAVE_FAILED < HTTPS_MSG_PAGE_OFFSET, "web login messages must stay below the HTTPS ones");
+static_assert(HTTPS_MSG_PAGE_OFFSET + HTTPS_MSG_UPLOAD_ERROR - HTTPSCERT_ERR_IO <= 255, "HTTPS messages must fit into ?m=<n> (one byte)");
+
+/* The HTTPS section of the access page (what /https showed). Only what the certificate says, never the key.
+   part 0: status and the settings form, part 1: certificate, own certificate, measurements. */
+static void sendHttpsSection(struct webserver_t *client, uint8_t part, uint8_t message) {
+  https_status_t st;
+  httpsStatus(&st);
+  if (part == 0) {
+    sendTextP(client, webBodyHttpsHead);
+    if (message >= HTTPS_MSG_PAGE_OFFSET) {
+      bool good = false;
+      PGM_P msg = httpsMessage(message - HTTPS_MSG_PAGE_OFFSET, &good);
+      if (msg != NULL) {
+        sendMessageP(client, msg, good);
+      }
+    }
+    if (!st.available) {
+      webserver_send_content_P(client, webBodyHttpsNone, strlen_P(webBodyHttpsNone));
+      return;
+    }
+    webserver_send_content_P(client, webBodyHttpsForm1, strlen_P(webBodyHttpsForm1));
+    if (st.running) {
+      webserver_send_content_P(client, PSTR("running"), 7);
+    } else if (st.pending) {
+      sendTextP(client, PSTR("a new certificate is loaded as soon as the open HTTPS connections have ended"));
+    } else if (st.enabled) {
+      sendTextP(client, PSTR("switched on, starts when the network is up (see the log if it does not)"));
+    } else {
+      webserver_send_content_P(client, PSTR("off"), 3);
+    }
+    webserver_send_content_P(client, webBodyHttpsForm2, strlen_P(webBodyHttpsForm2));
+    if (st.enabled) {
+      webserver_send_content_P(client, PSTR("checked"), 7);
+    }
+    webserver_send_content_P(client, webBodyHttpsForm3, strlen_P(webBodyHttpsForm3));
+    static const char *const modes[] = { "On (as without HTTPS)", "Redirect pages to HTTPS, API stays on HTTP", "Off (only a redirect to HTTPS)" };
+    for (uint8_t m = 0; m < 3; m++) {
+      char opt[96];
+      int n = snprintf(opt, sizeof(opt), "<option value='%u'%s>%s</option>", m, st.http_mode == m ? " selected" : "", modes[m]);
+      webserver_send_content(client, opt, n);
+    }
+    webserver_send_content_P(client, webBodyHttpsForm4, strlen_P(webBodyHttpsForm4));
+    return;
+  }
+  if (!st.available) {
+    return;
+  }
+  if (st.cert) {
+    const char *rows[][2] = {
+      { "Made by", st.info.generated ? "this device (self-signed)" : "you (uploaded)" },
+      { "Subject", st.info.subject },
+      { "Valid from", st.info.not_before },
+      { "Valid until", st.info.not_after },
+      { "Key", st.info.key_type },
+      { "SHA-256 fingerprint", st.info.fingerprint },
+    };
+    // label and value are sent as pieces of their own: no buffer that a long label could overrun
+    for (auto &r : rows) {
+      sendTextP(client, PSTR("<div class='setting-row'><label class='setting-label'>"));
+      webserver_send_content(client, (char *)r[0], strlen(r[0]));
+      sendTextP(client, PSTR("</label><span style='word-break:break-all'>"));
+      sendEscaped(client, r[1]);  // an uploaded certificate can say anything
+      sendTextP(client, PSTR("</span></div>"));
+    }
+  } else {
+    sendTextP(client, PSTR("<div class='setting-row'><span class='setting-hint' style='margin-left:0'>No certificate yet: it is made when HTTPS starts.</span></div>"));
+  }
+  webserver_send_content_P(client, webBodyHttpsCert, strlen_P(webBodyHttpsCert));
+  char stats[640];
+  httpsStatsText(stats, sizeof(stats));
+  webserver_send_content(client, stats, strlen(stats));
+  webserver_send_content_P(client, webBodyHttpsEnd, strlen_P(webBodyHttpsEnd));
+}
+
+/* The access page /security (Settings, tab System, "Access & security"): section Web login
+   (web password, API key, host names), then section HTTPS. Each form keeps its own POST target. */
 int handleSecurity(struct webserver_t *client, uint8_t message) {
   switch (client->content) {
     case 0: {
@@ -252,7 +335,7 @@ int handleSecurity(struct webserver_t *client, uint8_t message) {
         webserver_send_content_P(client, webBodySecurityOpen, strlen_P(webBodySecurityOpen));
         webserver_send_content_P(client, webBodySecurityBack, strlen_P(webBodySecurityBack));
         bool good = false;
-        PGM_P msg = webauthMessage(message, &good);
+        PGM_P msg = message < HTTPS_MSG_PAGE_OFFSET ? webauthMessage(message, &good) : NULL;
         if (msg != NULL) {
           sendMessageP(client, msg, good);
         }
@@ -278,6 +361,12 @@ int handleSecurity(struct webserver_t *client, uint8_t message) {
         webserver_send_content_P(client, webBodySecurityApiKey3, strlen_P(webBodySecurityApiKey3));
         sendEscaped(client, webauth_store.hosts);
         webserver_send_content_P(client, webBodySecurityEnd, strlen_P(webBodySecurityEnd));
+      } break;
+    case 3: {
+        sendHttpsSection(client, 0, message);
+      } break;
+    case 4: {
+        sendHttpsSection(client, 1, message);
         webserver_send_content_P(client, webBodySecurityClose, strlen_P(webBodySecurityClose));
         webserver_send_content_P(client, menuJS, strlen_P(menuJS));
         webserver_send_content_P(client, webFooter, strlen_P(webFooter));
@@ -572,6 +661,8 @@ void loadSettings(settingsStruct *heishamonSettings) {
           heishamonSettings->ethernet = ( jsonDoc[F("ethernet")] == "disabled" ) ? false : true; //default to true if not found in settings
           heishamonSettings->modbus = ( jsonDoc[F("modbus")] == "enabled" ) ? true : false;
           heishamonSettings->modbusWrites = ( jsonDoc[F("modbusWrites")] == "enabled" ) ? true : false;
+          heishamonSettings->https = ( jsonDoc[F("https")] == "enabled" ) ? true : false; //missing (older config): off
+          heishamonSettings->http_mode = webauth_http_mode(jsonDoc[F("http_mode")] | 0L);
 #endif          
           if ( jsonDoc[F("waitTime")]) heishamonSettings->waitTime = jsonDoc[F("waitTime")];
           if (heishamonSettings->waitTime < 5) heishamonSettings->waitTime = 5;
@@ -881,6 +972,8 @@ void settingsToJson(JsonDocument &jsonDoc, settingsStruct *heishamonSettings) {
   } else {
     jsonDoc[F("modbusWrites")] = "disabled";
   }
+  jsonDoc[F("https")] = heishamonSettings->https ? "enabled" : "disabled";
+  jsonDoc[F("http_mode")] = heishamonSettings->http_mode;
 #endif 
   jsonDoc[F("waitTime")] = heishamonSettings->waitTime;
   jsonDoc[F("waitDallasTime")] = heishamonSettings->waitDallasTime;
@@ -1328,6 +1421,7 @@ int getSettings(struct webserver_t *client, settingsStruct *heishamonSettings) {
 #ifdef TLS_SUPPORT
         jsonDoc[F("mqtt_ca_cert")] = LittleFS.exists("/ca.pem") ? F("CA certificate stored in filesystem") : F("No CA certificate found");
 #endif   
+        httpsSettingsJson(jsonDoc); //HTTPS (ESP32): on/off, HTTP mode, what the certificate says (never the key)
         int size = measureJson(jsonDoc);
         char* buffer = (char*)malloc(size+1);
         if (buffer == nullptr) {

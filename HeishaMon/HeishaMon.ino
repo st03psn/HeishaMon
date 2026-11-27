@@ -45,6 +45,7 @@
 #include "commands.h"
 #include "rules.h"
 #include "version.h"
+#include "httpsweb.h"
 #ifdef ESP32
 #include "HeishaModbusServer.h"
 #endif
@@ -1176,7 +1177,11 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
         //    skips the query arguments, the body and a websocket upgrade.
         char hosts[WEBAUTH_DEVICE_HOSTS_LEN];
         webauthDeviceHosts(hosts, sizeof(hosts), &heishamonSettings);
-        webauth_env_t env = { (uint32_t)client->client->remoteIP(), hosts };
+#ifdef ESP32
+        webauth_env_t env = { (uint32_t)client->client->remoteIP(), hosts, httpsRunning(), heishamonSettings.http_mode, httpsClientOnHotspot(client) };
+#else
+        webauth_env_t env = { (uint32_t)client->client->remoteIP(), hosts, 0, 0, 0 };
+#endif
         int8_t decision = webauth_request(client, req, &env);
         if (decision != WEBSERVER_ACCEPT) {
           return decision;
@@ -1202,6 +1207,11 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                 exit(-1);
               }
               ((char *)client->userdata)[0] = 0;
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              if (httpsFormStart(client) == -1) {
+                return -1;
+              }
             } break;
           case 170: {
               if (LittleFS.begin()) {
@@ -1250,6 +1260,9 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 20: {
               return handleJsonArgs(client, args, &heishamonSettings);
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              return httpsFormArgs(client, args);
             } break;
           case 60: {
               snprintf_P(log_msg, LOG_MSG_SIZE, PSTR("Dallas alias changed address %s to alias %s"), args->name, args->value);
@@ -1444,8 +1457,24 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case WEBAUTH_ROUTE_UNAUTHORIZED:
           case WEBAUTH_ROUTE_FORBIDDEN:
           case WEBAUTH_ROUTE_BAD_HOST:
-          case WEBAUTH_ROUTE_TOO_MANY: {
+          case WEBAUTH_ROUTE_TOO_MANY:
+          case WEBAUTH_ROUTE_TO_HTTPS:
+          case WEBAUTH_ROUTE_HTTP_OFF: {
               return webauth_write_answer(client);
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_PAGE: {
+              if (client->content == 0) {
+                webserver_send(client, 302, (char *)"text/html", 0); // the HTTPS section of the access page
+              }
+              return 0;
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              if (client->content == 0) {
+                httpsFormProcess(client);
+                webserver_send(client, 302, (char *)"text/html", 0); // Location: /security?m=<offset + result>#https
+                httpsFormFree(client);  // the webserver drops userdata after the answer
+              }
+              return 0;
             } break;
 #ifdef ESP32
           case 200: {
@@ -1684,8 +1713,19 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case WEBAUTH_ROUTE_UNAUTHORIZED:
           case WEBAUTH_ROUTE_FORBIDDEN:
           case WEBAUTH_ROUTE_BAD_HOST:
-          case WEBAUTH_ROUTE_TOO_MANY: {
+          case WEBAUTH_ROUTE_TOO_MANY:
+          case WEBAUTH_ROUTE_TO_HTTPS:
+          case WEBAUTH_ROUTE_HTTP_OFF: {
               return webauth_create_header(client, header);
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_PAGE: {
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /security#https\r\nCache-Control: no-store\r\n"));
+              return -1;
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /security?m=%u#https\r\nCache-Control: no-store\r\n"),
+                                       (unsigned int)(HTTPS_MSG_PAGE_OFFSET + httpsFormResult(client)));
+              return -1;
             } break;
         }
         return 0;
@@ -1694,8 +1734,12 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
         switch (client->route) {
           case WEBAUTH_ROUTE_LOGIN_POST:
           case WEBAUTH_ROUTE_SECURITY_POST:
-          case WEBAUTH_ROUTE_BAD_HOST: {
-              webauth_close(client); // frees the form (and wipes the passwords in it) or the 403 page data
+          case WEBAUTH_ROUTE_BAD_HOST:
+          case WEBAUTH_ROUTE_TO_HTTPS: {
+              webauth_close(client); // frees the form (and wipes the passwords in it), the 403 page data or the redirect target
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              httpsFormFree(client); // the uploaded key is wiped
             } break;
           case 100: {
               if (client->userdata != NULL) {
@@ -2063,6 +2107,9 @@ void setup() {
   loggingSerial.println(F("Loading config from flash..."));
   loadSettings(&heishamonSettings);
   loadWebAuth(); // web login: password hash and API key hash from /webauth.bin
+#ifdef ESP32
+  httpsSetup(); // HTTPS switched on: mbedtls takes its large blocks from PSRAM; the server starts in loop() once the network is up
+#endif
 
   loggingSerial.println(F("Setup wifi..."));
   setupWifi(&heishamonSettings);
@@ -2218,6 +2265,9 @@ void loop() {
 
   // check wifi
   check_wifi();
+#ifdef ESP32
+  httpsLoop(); // HTTPS: start when the network is up, load a new certificate when no TLS connection is open
+#endif
   // Handle OTA first.s
   if (otaRunning) {
     if (webauth_ota_allowed(heishamonSettings.ota_password)) {

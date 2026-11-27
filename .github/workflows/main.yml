@@ -34,6 +34,9 @@ jobs:
       - name: Test web login
         run: python3 tests/webauth/run_tests.py
 
+      - name: Test HTTPS (certificate, TLS, glue)
+        run: python3 tests/https/run_tests.py
+
       - name: Test command encoding
         run: python3 Tools/test_commands.py
 
