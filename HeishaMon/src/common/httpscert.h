@@ -81,6 +81,8 @@ enum {
 };
 /* A stored file with this result is wrong and is replaced by a new self-signed one; any other error is kept and retried */
 bool httpscert_damaged(int err);
+/* An mbedtls error of reading certificate or key: HTTPSCERT_ERR_MEMORY when it is out of memory, else `fallback` */
+int httpscert_mbedtls_error(int err, int fallback);
 const char *httpscert_error_text(int err);
 
 /*

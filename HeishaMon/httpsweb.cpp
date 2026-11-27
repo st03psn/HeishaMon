@@ -497,6 +497,10 @@ uint8_t httpsFormProcess(struct webserver_t *client) {
       return f->result;
     }
     bool changed = on != heishamonSettings.https;
+    if (httpsRunning() && webauth_http_mode(heishamonSettings.http_mode) == WEBAUTH_HTTP_ON && mode != WEBAUTH_HTTP_ON) {
+      // sessions of mode On may have been used over plain HTTP (seen in clear): log in again over HTTPS
+      webauth_sessions_clear();
+    }
     heishamonSettings.https = on;
     heishamonSettings.http_mode = (uint8_t)mode;
     saveHttpsSettings();

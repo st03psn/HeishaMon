@@ -22,6 +22,8 @@
 #include "mbedtls/sha256.h"
 #include "mbedtls/asn1.h"
 #include "mbedtls/platform_util.h"
+#include "mbedtls/pem.h"
+#include "mbedtls/bignum.h"
 
 static bool host_valid(const char *name) {
   if(name == NULL) {
@@ -107,6 +109,19 @@ const char *httpscert_error_text(int err) {
     case HTTPSCERT_ERR_IO: return "the stored file could not be read";
   }
   return "unknown error";
+}
+
+int httpscert_mbedtls_error(int err, int fallback) {
+  if(err >= 0) {
+    return fallback;
+  }
+  // mbedtls errors are a high-level code plus a low-level one: out of memory in either part
+  int high = -((-err) & 0xFF80), low = -((-err) & 0x007F);
+  if(high == MBEDTLS_ERR_X509_ALLOC_FAILED || high == MBEDTLS_ERR_PK_ALLOC_FAILED || high == MBEDTLS_ERR_PEM_ALLOC_FAILED ||
+     high == MBEDTLS_ERR_ECP_ALLOC_FAILED || low == MBEDTLS_ERR_MPI_ALLOC_FAILED || low == MBEDTLS_ERR_ASN1_ALLOC_FAILED) {
+    return HTTPSCERT_ERR_MEMORY;
+  }
+  return fallback;
 }
 
 /* Only keys whose private operation fits into one short step of loop() */
@@ -354,6 +369,7 @@ static int check_pair(const char *cert, size_t cert_len, const char *key, size_t
                       httpscert_rng_t f_rng, void *p_rng,
                       mbedtls_x509_crt *crt_out, mbedtls_pk_context *pk_out, httpscert_info_t *info) {
   int result = HTTPSCERT_OK;
+  int ret = 0;
   mbedtls_x509_crt crt_local;
   mbedtls_pk_context pk_local;
   mbedtls_x509_crt *crt = crt_out ? crt_out : &crt_local;
@@ -378,12 +394,14 @@ static int check_pair(const char *cert, size_t cert_len, const char *key, size_t
     result = HTTPSCERT_ERR_MEMORY;
     goto done;
   }
-  if(mbedtls_x509_crt_parse(crt, (const unsigned char *)cert_z, cert_len + 1) != 0 || crt->raw.len == 0) {
-    result = HTTPSCERT_ERR_CERT;
+  ret = mbedtls_x509_crt_parse(crt, (const unsigned char *)cert_z, cert_len + 1);
+  if(ret != 0 || crt->raw.len == 0) {
+    result = httpscert_mbedtls_error(ret, HTTPSCERT_ERR_CERT);  // out of memory is no damaged certificate
     goto done;
   }
-  if(mbedtls_pk_parse_key(pk, (const unsigned char *)key_z, key_len + 1, NULL, 0, f_rng, p_rng) != 0) {
-    result = HTTPSCERT_ERR_KEY;
+  ret = mbedtls_pk_parse_key(pk, (const unsigned char *)key_z, key_len + 1, NULL, 0, f_rng, p_rng);
+  if(ret != 0) {
+    result = httpscert_mbedtls_error(ret, HTTPSCERT_ERR_KEY);
     goto done;
   }
   if(!key_type_ok(pk, key_type, sizeof(key_type))) {
@@ -391,8 +409,9 @@ static int check_pair(const char *cert, size_t cert_len, const char *key, size_t
     goto done;
   }
   // the first certificate is the one of this server; the key must be its key
-  if(mbedtls_pk_check_pair(&crt->pk, pk, f_rng, p_rng) != 0) {
-    result = HTTPSCERT_ERR_MISMATCH;
+  ret = mbedtls_pk_check_pair(&crt->pk, pk, f_rng, p_rng);
+  if(ret != 0) {
+    result = httpscert_mbedtls_error(ret, HTTPSCERT_ERR_MISMATCH);
     goto done;
   }
   if(info != NULL) {

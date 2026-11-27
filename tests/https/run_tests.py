@@ -205,6 +205,18 @@ for fn in ("static int readStore(",):
     for code in ("HTTPSCERT_ERR_IO", "HTTPSCERT_ERR_MEMORY", "HTTPSCERT_ERR_FORMAT"):
         if code not in rs:
             sys.exit(f"FAIL: readStore() does not report {code}")
+tlsc = (COMMON / "httpstls.cpp").read_text()
+# resumed only when mbedtls goes on with the abbreviated handshake (a cache hit can still be a full one)
+need(tlsc, r"c->resumed = \(c->ssl\.MBEDTLS_PRIVATE\(state\) == MBEDTLS_SSL_SERVER_CHANGE_CIPHER_SPEC\);", "resumption from the handshake state")
+need(tlsc, r"if\(!c->hello_seen && \(ret == 0 \|\| ret == MBEDTLS_ERR_SSL_WANT_READ \|\| ret == MBEDTLS_ERR_SSL_WANT_WRITE\) &&",
+     "the rate check also when the ServerHello step is still sending")
+if "resumed = 1" in tlsc:
+    sys.exit("FAIL: a cache hit must not mark a connection as resumed")
+need(hw, r"httpsRunning\(\) && webauth_http_mode\(heishamonSettings\.http_mode\) == WEBAUTH_HTTP_ON && mode != WEBAUTH_HTTP_ON\) \{.*?webauth_sessions_clear\(\);",
+     "sessions end when the HTTP mode leaves On while HTTPS runs")
+cert_src = (COMMON / "httpscert.cpp").read_text()
+for what in ("HTTPSCERT_ERR_CERT", "HTTPSCERT_ERR_KEY", "HTTPSCERT_ERR_MISMATCH"):
+    need(cert_src, r"result = httpscert_mbedtls_error\(ret, " + what + r"\)", f"check_pair(): out of memory is not {what}")
 if re.search(r"requestReload\(void\) \{[^}]*state\.running = false", hw):
     sys.exit("FAIL: a reload must not switch the HTTP policy off")
 js = (SKETCH / "htmlcode.h").read_text()

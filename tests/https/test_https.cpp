@@ -39,6 +39,9 @@
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/oid.h"
+#include "mbedtls/pem.h"
+#include "mbedtls/bignum.h"
+#include "mbedtls/asn1.h"
 
 unsigned long httpstls_platform_millis(void) {
   struct timeval tv;
@@ -308,6 +311,17 @@ static void test_policies(void) {
   int passing[] = { HTTPSCERT_OK, HTTPSCERT_ERR_MEMORY, HTTPSCERT_ERR_IO, HTTPSCERT_ERR_GENERATE };
   for(int e : passing) CHECK(!httpscert_damaged(e));
   CHECK(strcmp(httpscert_error_text(HTTPSCERT_ERR_IO), "unknown error") != 0);
+  // out of memory while reading certificate or key is a passing trouble, never a damaged store
+  int oom[] = { MBEDTLS_ERR_X509_ALLOC_FAILED, MBEDTLS_ERR_PK_ALLOC_FAILED, MBEDTLS_ERR_MPI_ALLOC_FAILED, MBEDTLS_ERR_PEM_ALLOC_FAILED,
+                MBEDTLS_ERR_ECP_ALLOC_FAILED, MBEDTLS_ERR_ASN1_ALLOC_FAILED, MBEDTLS_ERR_PK_KEY_INVALID_FORMAT + MBEDTLS_ERR_ASN1_ALLOC_FAILED,
+                MBEDTLS_ERR_X509_INVALID_FORMAT + MBEDTLS_ERR_MPI_ALLOC_FAILED, MBEDTLS_ERR_PK_INVALID_PUBKEY + MBEDTLS_ERR_MPI_ALLOC_FAILED };
+  for(int e : oom) {
+    CHECK(httpscert_mbedtls_error(e, HTTPSCERT_ERR_CERT) == HTTPSCERT_ERR_MEMORY);
+    CHECK(!httpscert_damaged(httpscert_mbedtls_error(e, HTTPSCERT_ERR_KEY)));
+  }
+  int wrong[] = { MBEDTLS_ERR_X509_INVALID_FORMAT, MBEDTLS_ERR_PK_KEY_INVALID_FORMAT, MBEDTLS_ERR_PEM_NO_HEADER_FOOTER_PRESENT,
+                  MBEDTLS_ERR_PK_PASSWORD_REQUIRED, MBEDTLS_ERR_ECP_BAD_INPUT_DATA, MBEDTLS_ERR_PK_KEY_INVALID_FORMAT + MBEDTLS_ERR_ASN1_OUT_OF_DATA, 1 };
+  for(int e : wrong) CHECK(httpscert_mbedtls_error(e, HTTPSCERT_ERR_KEY) == HTTPSCERT_ERR_KEY);
   // a new certificate: waits for open connections, then forces them closed
   CHECK(httpstls_reload_step(0, 0) == HTTPSTLS_RELOAD_NOW);
   CHECK(httpstls_reload_step(HTTPSTLS_RELOAD_FORCE_MS * 10, 0) == HTTPSTLS_RELOAD_NOW);
@@ -362,7 +376,7 @@ static int cli_recv(void *ctx, unsigned char *buf, size_t len) {
   return n;
 }
 
-static void client_init(client_t *c, int fd, const std::string &cert, const char *hostname) {
+static void client_init(client_t *c, int fd, const std::string &cert, const char *hostname, const int *suites = NULL) {
   c->fd = fd;
   mbedtls_ssl_init(&c->ssl);
   mbedtls_ssl_config_init(&c->conf);
@@ -372,6 +386,7 @@ static void client_init(client_t *c, int fd, const std::string &cert, const char
   mbedtls_ssl_conf_rng(&c->conf, httpstls_random, rng());
   mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
   mbedtls_ssl_conf_ca_chain(&c->conf, &c->ca, NULL);
+  if(suites) mbedtls_ssl_conf_ciphersuites(&c->conf, suites);
   CHECK(mbedtls_ssl_setup(&c->ssl, &c->conf) == 0);
   mbedtls_ssl_set_hostname(&c->ssl, hostname);
   mbedtls_ssl_set_bio(&c->ssl, &c->fd, cli_send, cli_recv, NULL);
@@ -524,13 +539,13 @@ static void test_connection(void) {
 }
 
 /* one connection over a socket pair, both ends stepped; returns the server result, keeps the client session */
-static int pair_handshake(const std::string &cert, mbedtls_ssl_session *resume, mbedtls_ssl_session *save) {
+static int pair_handshake(const std::string &cert, mbedtls_ssl_session *resume, mbedtls_ssl_session *save, const int *suites = NULL) {
   int sv[2];
   socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
   struct httpstls_conn_t *s = httpstls_conn_new(sv[0]);
   CHECK(s != NULL);
   client_t c;
-  client_init(&c, sv[1], cert, "heishamon.local");
+  client_init(&c, sv[1], cert, "heishamon.local", suites);
   if(resume) CHECK(mbedtls_ssl_set_session(&c.ssl, resume) == 0);
   int sr = HTTPSTLS_AGAIN, cret = 1;
   for(int i = 0; i < 400 && sr == HTTPSTLS_AGAIN; i++) {
@@ -566,6 +581,26 @@ static void test_rate(void) {
   // a resumption is no ECC work: allowed over the limit, and counted as resumed
   CHECK(pair_handshake(cert, &session, NULL) == HTTPSTLS_DONE);
   CHECK(httpstls_stats.resumed == 1 && httpstls_stats.refused_rate == 1);
+  // a cached session id with another ciphersuite: mbedtls does a full handshake, so it must count
+  // (review finding: alternating AES-128/AES-256 session ids gave 20 of 20 full handshakes past the limit)
+  static const int aes128[] = { MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, 0 };
+  static const int aes256[] = { MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, 0 };
+  mbedtls_ssl_session s128;
+  mbedtls_ssl_session_init(&s128);
+  httpstls_full_reset();
+  for(int i = 1; i < HTTPSTLS_FULL_MAX; i++) CHECK(pair_handshake(cert, NULL, NULL, aes128) == HTTPSTLS_DONE);
+  CHECK(pair_handshake(cert, NULL, &s128, aes128) == HTTPSTLS_DONE);  // the newest entry of the session cache
+  uint32_t refused = httpstls_stats.refused_rate, resumed = httpstls_stats.resumed, done = httpstls_stats.handshakes;
+  int passed = 0;
+  for(int i = 0; i < 20; i++) {
+    if(pair_handshake(cert, &s128, NULL, (i & 1) ? aes128 : aes256) == HTTPSTLS_DONE) passed++;
+  }
+  printf("  suite switch: passed %d, resumed +%u, refused +%u, done +%u\n", passed, httpstls_stats.resumed - resumed, httpstls_stats.refused_rate - refused, httpstls_stats.handshakes - done);
+  CHECK(passed == 10);                                   // only the real resumptions (same suite)
+  CHECK(httpstls_stats.resumed == resumed + 10);
+  CHECK(httpstls_stats.refused_rate == refused + 10);    // the other suite: a full handshake, refused
+  CHECK(httpstls_stats.handshakes == done + 10);
+  mbedtls_ssl_session_free(&s128);
   mbedtls_ssl_session_free(&session);
   httpstls_full_reset();
 }
