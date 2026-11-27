@@ -20,7 +20,7 @@ De laatste release is beschikbaar [hier](https://github.com/Egyras/HeishaMon/rel
 HeishaMon kan communiceren met de Panasonic Aquarea H-, J-, K-, L- en M-serie. [Door gebruikers bevestigde typen warmtepompen vind je hier](HeatPumpType.md) \
 Als je dit image zelf wilt compileren, zorg er dan voor dat je de genoemde bibliotheken gebruikt en ondersteuning voor een bestandssysteem op de ESP8266, selecteer daarvoor de juiste flash-optie in de Arduino IDE.
 
-Bij het opstarten zonder geconfigureerd wifi wordt een open-wifi-hotspot zichtbaar waarmee je je wifi-netwerk en je MQTT-server kunt configureren. De configuratiepagina is beschikbaar op http://192.168.4.1 . \
+Bij het opstarten zonder geconfigureerd wifi wordt een open-wifi-hotspot zichtbaar waarmee je je wifi-netwerk en je MQTT-server kunt configureren. De configuratiepagina is beschikbaar op http://192.168.4.1 . Zodra een wifi is geconfigureerd gaat deze hotspot niet meer vanzelf open als het wifi wegvalt (gewijzigd gedrag): druk na een wissel van router, SSID of wachtwoord kort (korter dan 3 seconden) op de boot-knop van het apparaat, dan is `HeishaMon-Setup` 10 minuten open. Langer dan 10 seconden vasthouden blijft de fabrieksreset. Details in de Engelse [README](README.md#setup-hotspot-only-at-first-setup-or-with-the-boot-button). \
 
 Na het configureren en opstarten kan het image gegevens lezen van en communiceren met je warmtepomp. De GPIO13/GPIO15-verbinding wordt gebruikt voor communicatie, zodat je je computer/uploader aangesloten kunt laten als je dat wilt. \
 Serial 1 (GPIO2) kan worden gebruikt om een andere seriële verbinding (alleen GND en TX van het board) te verbinden om wat debug-gegevens uit te lezen.

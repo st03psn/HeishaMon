@@ -13,10 +13,13 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include "src/common/webserver.h"
+#include "src/common/webauth.h"
 #include "dallas.h"
 #include "s0.h"
 #include "HeishaOT.h"
 #include "gpio.h"
+#include "decode.h"
+#include "src/common/flowlimit.h"
 
 #define HEATPUMP_VALUE_LEN    16
 
@@ -45,6 +48,7 @@ struct settingsStruct {
   char wifi_ssid[33] = "";
   char wifi_password[PASSWORD_LENGTH] = "";
   char wifi_hostname[40] = "HeishaMon";
+  char description[64] = "";
   char ota_password[40] = "heisha";
   char mqtt_server[65];
   char mqtt_port[6] = "1883";
@@ -66,12 +70,21 @@ struct settingsStruct {
   bool logHexdump = false; //log hexdump from start
   bool logSerial1 = true; //log to serial1 (gpio2) from start
   bool opentherm = false; //opentherm enable flag
-  bool hotspot = true; //enable wifi hotspot when wifi is not connected
+  bool hotspot = true; //open the setup hotspot while no wifi is configured (factory state)
+  bool hotspot_auto = false; //also open the setup hotspot whenever the wifi is lost (less secure; default: only with the boot button)
+  // flow temperature limit (src/common/flowlimit.h): 0 = off (no limit), 1 = underfloor heating, 2 = radiators, 3 = custom
+  uint8_t flowlimitSurface = FLOWLIMIT_OFF;
+  uint8_t flowlimitHeatMax = FLOWLIMIT_FLOOR_MAX; //maximum heating flow temperature in degrees C
+  uint8_t flowlimitCoolMin = FLOWLIMIT_COOL_MIN; //minimum cooling flow temperature in degrees C
+  uint16_t topicGroups = TOPIC_GROUPS_DEFAULT; //bit per topic group (decode.h), a cleared bit stops publishing those topics
 #ifdef ESP32
   bool proxy = true; //cztaw proxy port enable flag
+  bool proxyBlockWrites = false; //don't pass settings changes from the proxy port to the heat pump
   bool ethernet = true; //probe for W5500 ethernet module at boot (disable on boards without it)
   bool modbus = false; //modbus tcp server enable flag
   bool modbusWrites = false; //allow modbus clients to write commands and relays
+  bool https = false; //HTTPS web interface on port 443 (off by default: nothing changes for an existing installation)
+  uint8_t http_mode = 0; //plain HTTP while HTTPS runs: WEBAUTH_HTTP_ON, _REDIRECT (pages to HTTPS, API stays) or _OFF
 #endif
   s0SettingsStruct s0Settings[NUM_S0_COUNTERS];
   gpioSettingsStruct gpioSettings;
@@ -87,6 +100,9 @@ void setupConditionals();
 int getFreeMemory(void);
 char *getUptime(void);
 void setupWifi(settingsStruct *heishamonSettings);
+#if defined(ESP8266)
+void wifiBeginStrongest(const char *ssid, const char *password);
+#endif
 int getWifiQuality(void);
 int getFreeMemory(void);
 void ntpReload(settingsStruct *heishamonSettings);
@@ -110,6 +126,15 @@ int getSettingsJson(struct webserver_t *client, settingsStruct *heishamonSetting
 int handleModbus(struct webserver_t *client);
 #endif
 int handleSettings(struct webserver_t *client);
+// web login (src/common/webauth.*)
+#define WEBAUTH_DEVICE_HOSTS_LEN 192
+#define WEBAUTH_FILE "/webauth.bin"
+#define WEBAUTH_FILE_TMP "/webauth.tmp"
+void webauthDeviceHosts(char *out, size_t size, settingsStruct *heishamonSettings);
+void loadWebAuth(void);
+int handleLogin(struct webserver_t *client, uint8_t message);
+int handleSecurity(struct webserver_t *client, uint8_t message); // the access page: Web login and HTTPS
+int showApiKey(struct webserver_t *client, const char *key);
 int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings);
 int settingsReconnectWifi(struct webserver_t *client, settingsStruct *heishamonSettings);
 int settingsNewPassword(struct webserver_t *client, settingsStruct *heishamonSettings);

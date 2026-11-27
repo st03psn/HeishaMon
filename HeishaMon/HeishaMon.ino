@@ -38,6 +38,8 @@
 #include "src/common/stricmp.h"
 #include "src/common/log.h"
 #include "src/common/progmem.h"
+#include "src/common/setupap.h"
+#include "src/common/flowlimit.h"
 #include "src/rules/rules.h"
 
 #include "webfunctions.h"
@@ -45,6 +47,7 @@
 #include "commands.h"
 #include "rules.h"
 #include "version.h"
+#include "httpsweb.h"
 #ifdef ESP32
 #include "HeishaModbusServer.h"
 #endif
@@ -72,10 +75,13 @@ bool extraDataBlockAvailable = false; // this will be set to true if, during boo
 #define MQTTRECONNECTTIMER 30000 //it takes 30 secs for each mqtt server reconnect attempt
 unsigned long lastMqttReconnectAttempt = 0;
 
-unsigned long bootButtonNotPressed = 0;
+// boot button (short press: setup hotspot, held > 10 s: factory reset) and the setup hotspot; the decisions are in src/common/setupap.cpp
+struct bootbutton_t bootButton = {};
+struct setupap_t setupAp = {};
+bool setupApStartNow = false; // a short press asked for the hotspot: start it right away, not at the next WiFi retry
+bool ethSeen = false;         // ESP32: ethernet had an address since the start
 
-#define WIFIRETRYTIMER 15000 // switch between hotspot and configured SSID each 10 secs if SSID is lost
-unsigned long lastWifiRetryTimer = 0;
+struct wifiretry_t wifiRetry = {}; // when and how the configured WiFi is tried again while it is lost (src/common/setupap.cpp)
 bool doInitialWifiScan = true; //we want an initial wifi scan to fill in the dropbox on the wifi settings page
 
 unsigned long lastRunTime = 0;
@@ -207,60 +213,158 @@ void setupETH() {
 
 
 /*
+    The setup hotspot (open access point HeishaMon-Setup). It is only started and stopped here;
+    whether it should be up is decided by setupap_update() (src/common/setupap.cpp).
+*/
+bool setupApIsUp() {
+  return (WiFi.getMode() & WIFI_AP) != 0; // WIFI_AP: 2 on both cores (ESP32: WIFI_MODE_AP)
+}
+
+void setupApLed(bool on) {
+#if defined(ESP8266)
+  // the blue LED is on the TX pin of the logging serial port: only free while that logging is off
+  static bool ledUsed = false;
+  if (heishamonSettings.logSerial1) {
+    ledUsed = false;
+    return;
+  }
+  if (on) {
+    if (!ledUsed) {
+      ledUsed = true;
+      pinMode(LEDPIN, OUTPUT);
+    }
+    digitalWrite(LEDPIN, ((millis() / 250) % 2) ? HIGH : LOW); // blinks twice a second while the hotspot is open
+  } else if (ledUsed) {
+    ledUsed = false;
+    digitalWrite(LEDPIN, HIGH); // off (the LED is active low)
+  }
+#elif defined(ESP32)
+  uint32_t color = on ? pixels.Color(16, 0, 16) : pixels.Color(16, 16, 0); // purple: setup hotspot open, yellow: no network
+  if (neoPixelState != color) {
+    neoPixelState = color;
+    pixels.setPixelColor(0, neoPixelState);
+    pixels.show();
+  }
+#endif
+}
+
+void setupApStart() {
+  log_message(_F("Starting the open setup hotspot HeishaMon-Setup (http://192.168.4.1)"));
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(_F("HeishaMon-Setup"));
+}
+
+void setupApStop() {
+  log_message(_F("Shutting down the setup hotspot"));
+#if defined(ESP32)
+  WiFi.enableSTA(true); // with no interface left the core would stop and deinit the whole WiFi driver
+#endif
+  WiFi.softAPdisconnect(true);
+}
+
+/* asks setupap_update() whether the hotspot should be up now (SETUPAP_*, 0: no) and logs what changed */
+uint8_t setupApWanted(bool netUp) {
+  struct setupap_input_t in;
+  in.wifi_configured = (heishamonSettings.wifi_ssid[0] != '\0');
+  in.net_up = netUp;
+  in.eth_seen = ethSeen;
+  in.allow_factory = heishamonSettings.hotspot;
+  in.auto_on_loss = heishamonSettings.hotspot_auto;
+  in.clients = setupApIsUp() ? WiFi.softAPgetStationNum() : 0;
+  unsigned long now = millis();
+
+  uint8_t button = bootbutton_update(&bootButton, digitalRead(BOOTPIN) == LOW, now);
+  if (button == BOOTBUTTON_FACTORY_RESET) {
+    factoryReset(); // never returns
+  } else if (button == BOOTBUTTON_SHORT) {
+    switch (setupap_button(&setupAp, &in, now)) {
+      case SETUPAP_EVENT_REQUESTED:
+        setupApStartNow = true;
+        log_message(_F("Boot button pressed: setup hotspot requested (stops when the network is back, after 10 minutes without a client, or after 30 minutes)"));
+        break;
+      case SETUPAP_EVENT_CANCELLED:
+        log_message(_F("Boot button pressed: setup hotspot request cancelled"));
+        break;
+      default:
+        log_message(_F("Boot button pressed: the network is up, no setup hotspot needed"));
+        break;
+    }
+  }
+
+  uint8_t reason = setupap_update(&setupAp, &in, now);
+  switch (setupAp.event) {
+    case SETUPAP_EVENT_KEPT:
+      log_message(_F("WiFi was configured on the setup hotspot: the hotspot comes back if that WiFi cannot be reached"));
+      break;
+    case SETUPAP_EVENT_NETWORK:
+      log_message(_F("Network is up: setup hotspot request ended"));
+      break;
+    case SETUPAP_EVENT_TIMEOUT:
+      log_message(_F("Setup hotspot request timed out"));
+      break;
+    default:
+      break;
+  }
+  if (reason == SETUPAP_OFF) {
+    setupApStartNow = false;
+  }
+  return reason;
+}
+
+/*
     check_wifi will process wifi reconnecting managing
 */
 #if defined(ESP8266)
 void check_wifi() {
   int wifistatus = WiFi.status();
+  uint8_t apReason = setupApWanted(WiFi.localIP() ? true : false);
+  bool apUp = setupApIsUp();
+  struct wifiretry_input_t retryIn;
+  retryIn.wifi_configured = (heishamonSettings.wifi_ssid[0] != '\0');
+  retryIn.busy = sending; // the scan of a retry blocks for about 2 seconds: not while an answer of the heat pump is awaited
+  retryIn.scanning = (WiFi.scanComplete() == -1);
   if ((wifistatus != WL_CONNECTED) && (WiFi.localIP())) {
     // special case where it seems that we are not connect but we do have working IP (causing the -1% wifi signal), do a reset.
     log_message(_F("Weird case, WiFi seems disconnected but is not. Resetting WiFi!"));
     setupWifi(&heishamonSettings);
-    lastWifiRetryTimer = millis();
+    wifiretry_started(&wifiRetry, millis());
   } else if ((wifistatus != WL_CONNECTED) || (!WiFi.localIP())) {
-    /*
-        if we are not connected to an AP
-        we must be in softAP so respond to DNS
-    */
-    if (heishamonSettings.hotspot) {
-      dnsServer.processNextRequest();
+    if (apUp && (apReason == SETUPAP_OFF)) {
+      setupApStop(); // the request timed out or was cancelled
+      apUp = false;
+    }
+    // nothing configured yet, or asked for with the boot button: right away. Automatic (setting) or wanted
+    // again after a WiFi change: once the WiFi had its time to connect.
+    if (!apUp && ((apReason == SETUPAP_FACTORY) || ((apReason != SETUPAP_OFF) && (setupApStartNow || wifiretry_ap_may_start(&wifiRetry, millis()))))) {
+      setupApStart();
+      setupApStartNow = false;
+      apUp = true;
+    }
+    if (apUp) {
+      dnsServer.processNextRequest(); // captive portal
     }
 
-    /* we need to stop reconnecting to a configured wifi network if there is a hotspot user connected
-        also, do not disconnect if wifi network scan is active
-    */
-    if ((heishamonSettings.wifi_ssid[0] != '\0') && (wifistatus != WL_DISCONNECTED) && (WiFi.scanComplete() != -1) && (WiFi.softAPgetStationNum() > 0)) {
-      log_message(_F("WiFi lost, but softAP station connecting, so stop trying to connect to configured ssid..."));
-      WiFi.disconnect(true);
-    }
-
-    /*  only start this routine if timeout on
-        reconnecting to AP and SSID is set
-    */
-    if ((heishamonSettings.wifi_ssid[0] != '\0') && ((unsigned long)(millis() - lastWifiRetryTimer) > WIFIRETRYTIMER)) {
-      lastWifiRetryTimer = millis();
-      if ((WiFi.softAPSSID() == "") && (heishamonSettings.hotspot)) {
-        log_message(_F("WiFi lost, starting setup hotspot..."));
-        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-        WiFi.softAP(_F("HeishaMon-Setup"));
-      }
-      if ((wifistatus == WL_DISCONNECTED) && (WiFi.softAPgetStationNum() == 0)) {
-        log_message(_F("Retrying configured WiFi, ..."));
-        if (heishamonSettings.wifi_password[0] == '\0') {
-          WiFi.begin(heishamonSettings.wifi_ssid);
-        } else {
-          WiFi.begin(heishamonSettings.wifi_ssid, heishamonSettings.wifi_password);
-        }
-      } else {
-        log_message(_F("Reconnecting to WiFi failed. Waiting a few seconds before trying again."));
+    // when and how to try the configured WiFi again is decided by wifiretry_update(): without the hotspot
+    // every 30 seconds for as long as it takes; with the hotspot only while nobody uses it
+    retryIn.ap_up = apUp;
+    retryIn.clients = apUp ? WiFi.softAPgetStationNum() : 0;
+    switch (wifiretry_update(&wifiRetry, &retryIn, millis())) {
+      case WIFIRETRY_STA_OFF:
+        log_message(_F("Setup hotspot is open: not trying the configured WiFi for a while"));
         WiFi.disconnect(true);
-      }
+        break;
+      case WIFIRETRY_BEGIN:
+        log_message(apUp ? _F("Retrying configured WiFi, ...") : _F("WiFi lost, retrying configured WiFi (the setup hotspot only starts with a short press of the boot button)"));
+        wifiBeginStrongest(heishamonSettings.wifi_ssid, heishamonSettings.wifi_password);  // scan again, the old node may be gone
+        break;
+      default:
+        break;
     }
   }
   if (WiFi.localIP()) {  //WiFi connected
-    if (WiFi.softAPSSID() != "") {
-      log_message(_F("WiFi (re)connected, shutting down hotspot..."));
-      WiFi.softAPdisconnect(true);
+    if (apUp) {
+      log_message(_F("WiFi (re)connected"));
+      setupApStop();
       MDNS.notifyAPChange();
     }
 
@@ -290,7 +394,9 @@ void check_wifi() {
        always update if wifi is working so next time on ssid failure
        it only starts the routine above after this timeout
     */
-    lastWifiRetryTimer = millis();
+    retryIn.ap_up = false;
+    retryIn.clients = 0;
+    wifiretry_net_up(&wifiRetry, &retryIn, millis());
 
     // Allow MDNS processing
     MDNS.update();
@@ -300,8 +406,18 @@ void check_wifi() {
     log_message(_F("Starting initial wifi scan ..."));
     WiFi.scanNetworksAsync(getWifiScanResults);
   }
+  setupApLed(setupApIsUp()); // blinks while the hotspot is open
 }
 #elif defined(ESP32)
+void wifiBeginConfigured() {
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  if (heishamonSettings.wifi_password[0] == '\0') {
+    WiFi.begin(heishamonSettings.wifi_ssid);
+  } else {
+    WiFi.begin(heishamonSettings.wifi_ssid, heishamonSettings.wifi_password);
+  }
+}
+
 void check_wifi() {
   if (doInitialWifiScan && (millis() > 15000)) {  //do a wifi scan at boot after 15 seconds so the settings page dropdown is already populated on first view
     doInitialWifiScan = false;
@@ -312,28 +428,34 @@ void check_wifi() {
   wl_status_t wifistatus = WiFi.status();
   bool ethUp = ETH.hasIP();
   bool wifiUp = (wifistatus == WL_CONNECTED);
+  if (ethUp) {
+    ethSeen = true; // an ethernet install: from now on the hotspot does not open by itself when the cable is pulled
+  }
+  uint8_t apReason = setupApWanted(wifiUp || ethUp);
+  bool apUp = setupApIsUp();
+  struct wifiretry_input_t retryIn;
+  retryIn.wifi_configured = (heishamonSettings.wifi_ssid[0] != '\0');
+  retryIn.ap_up = apUp;
+  retryIn.clients = 0;
+  retryIn.busy = false; // the heat pump serial line has its own task, and WiFi.begin() does not block
+  retryIn.scanning = (WiFi.scanComplete() == WIFI_SCAN_RUNNING);
 
   /* ---------- Fast path: network is up ---------- */
   if (wifiUp || ethUp) {
 
     neoPixelState = pixels.Color(0, 0, 0); // normal operation
-    lastWifiRetryTimer = millis();
+    // ETH came back while the WiFi station was switched off for the hotspot: switch it on again
+    bool beginWifi = (wifiretry_net_up(&wifiRetry, &retryIn, millis()) == WIFIRETRY_BEGIN);
 
-    // Shut down hotspot if no longer needed
-    if ((WiFi.getMode() & WIFI_MODE_AP) &&
-        ((heishamonSettings.wifi_ssid[0] != '\0') || !heishamonSettings.hotspot)) {
-
-      log_message(_F("WiFi or ETH connected, shutting down hotspot"));
-      WiFi.softAPdisconnect(true);
+    // The device can be reached through its network: the hotspot is never needed
+    if (apUp) {
+      log_message(_F("WiFi or ETH connected"));
+      setupApStop();
       WiFi.mode(WIFI_STA);
-      if (wifistatus != WL_CONNECTED) { //it must be that ETH reconnected, so keep trying WiFi in the background
-        WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-        if (heishamonSettings.wifi_password[0] == '\0') {
-          WiFi.begin(heishamonSettings.wifi_ssid);
-        } else {
-          WiFi.begin(heishamonSettings.wifi_ssid, heishamonSettings.wifi_password);
-        }
-      }
+      beginWifi = true; //it must be that ETH reconnected, so keep trying WiFi in the background
+    }
+    if (beginWifi && !wifiUp && (heishamonSettings.wifi_ssid[0] != '\0')) {
+      wifiBeginConfigured();
     }
 
     if (firstConnectSinceBoot) {
@@ -364,65 +486,39 @@ void check_wifi() {
 
   /* ---------- Network is DOWN ---------- */
 
-  neoPixelState = pixels.Color(16, 16, 0); // yellow: degraded
-
-  if (heishamonSettings.hotspot) {
-    dnsServer.processNextRequest();
+  if (apUp && (apReason == SETUPAP_OFF)) {
+    setupApStop(); // the request timed out or was cancelled
+    apUp = false;
   }
-
-  // If AP client is connected, STA must back off
-  if (WiFi.softAPgetStationNum() > 0) {
-    if (WiFi.getMode() != WIFI_AP) {
-      if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
-        return; // let a pending wifi scan finish before dropping STA, otherwise it never gets a result
-      }
-      log_message(_F("SoftAP client active, suspending STA reconnect"));
-	    WiFi.disconnect(true);
-	    WiFi.mode(WIFI_AP);
-    }
-	  return; //always return if hotspot is used
+  // nothing configured yet, or asked for with the boot button: right away. Automatic (setting) or wanted
+  // again after a WiFi change: once the WiFi had its time to connect.
+  if (!apUp && ((apReason == SETUPAP_FACTORY) || ((apReason != SETUPAP_OFF) && (setupApStartNow || wifiretry_ap_may_start(&wifiRetry, millis()))))) {
+    setupApStart();
+    setupApStartNow = false;
+    apUp = true;
   }
-
-  // Periodic retry gate
-  if ((unsigned long)(millis() - lastWifiRetryTimer) < WIFIRETRYTIMER) {
-    return;
+  if (apUp) {
+    dnsServer.processNextRequest(); // captive portal
   }
-  lastWifiRetryTimer = millis();
+  setupApLed(apUp); // purple: setup hotspot open, yellow: degraded
 
-  // Ensure AP is running if allowed
-  if (heishamonSettings.hotspot && !(WiFi.getMode() & WIFI_MODE_AP)) {
-    log_message(_F("Starting setup hotspot"));
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    WiFi.softAP(_F("HeishaMon-Setup"));
-  }
-
-  // Disable STA so next retry is clean and we wait WIFIRETRYTIMER so hotspot can do its thing
-  if (WiFi.getMode() != WIFI_AP) {
-    if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
-      return; // let a pending wifi scan finish before dropping STA, otherwise it never gets a result
-    }
-    log_message(_F("Disabling WiFi STA for a while..."));
-	  WiFi.disconnect(true);
-    WiFi.mode(WIFI_AP);
-    return;
-  }
-
-  // Retry STA connection
-  if (heishamonSettings.wifi_ssid[0] != '\0') {
-    // Repair STA if it is stopped
-    if (!(WiFi.getMode() & WIFI_MODE_STA)) {
-      log_message(_F("STA stopped, re-enabling STA"));
-      WiFi.mode(WIFI_AP_STA);
-      delay(50);
-    }    
-    log_message(_F("Retrying configured WiFi"));
-    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-    if (heishamonSettings.wifi_password[0] == '\0') {
-      WiFi.begin(heishamonSettings.wifi_ssid);
-    } else {
-      WiFi.begin(heishamonSettings.wifi_ssid, heishamonSettings.wifi_password);
-    }
+  // When and how to try the configured WiFi again is decided by wifiretry_update(). Without the hotspot the
+  // station is never switched off: with no interface left the core stops and deinits the whole WiFi driver,
+  // and that every 30 seconds of an outage. Only while the hotspot is up the station is off in between.
+  retryIn.ap_up = apUp;
+  retryIn.clients = apUp ? WiFi.softAPgetStationNum() : 0;
+  switch (wifiretry_update(&wifiRetry, &retryIn, millis())) {
+    case WIFIRETRY_STA_OFF:
+      log_message(_F("Setup hotspot is open: not trying the configured WiFi for a while"));
+      WiFi.disconnect(true); // STA off, the hotspot stays
+      break;
+    case WIFIRETRY_BEGIN:
+      log_message(apUp ? _F("Retrying configured WiFi") : _F("WiFi lost, retrying configured WiFi (the setup hotspot only starts with a short press of the boot button)"));
+      WiFi.disconnect(false); // ends a connection attempt that is still running; the station stays on
+      wifiBeginConfigured();
+      break;
+    default:
+      break;
   }
 }
 #endif
@@ -501,6 +597,59 @@ void publishRulesState(bool force) {
   }
 }
 
+bool send_command(byte* command, int length);
+
+// The flow temperature limit (src/common/flowlimit.h), retained: <base>/flowlimit/state (0 = off, 1 = on,
+// 2 = a part is no longer corrected, 3 = the zone sensor is not reported, 4 = both), surface,
+// heat_max and cool_min. Published on connect, on a change and every updateAllTime seconds.
+void publishFlowLimit(bool force) {
+  static long reported = -1;
+  static unsigned long lastPublish = 0;
+  const unsigned long now = millis();
+  if (!mqtt_client.connected()) return;
+  const int state = flowlimit_state(&flowlimit);
+  const long signature = ((long)state << 24) | ((long)flowlimit.surface << 16) | ((long)(uint8_t)flowlimit.heat_max << 8) | (uint8_t)flowlimit.cool_min;
+  if (!force && reported == signature && (unsigned long)(now - lastPublish) < heishamonSettings.updateAllTime * 1000UL) return;
+  const int values[] = { state, flowlimit.surface, flowlimit.heat_max, flowlimit.cool_min };
+  static const char names[][9] PROGMEM = { "state", "surface", "heat_max", "cool_min" };
+  bool ok = true;
+  for (int i = 0; i < 4; i++) {
+    char topic[256];
+    char name[9];
+    char value[8];
+    strcpy_P(name, names[i]);
+    snprintf_P(topic, sizeof(topic), PSTR("%s/flowlimit/%s"), heishamonSettings.mqtt_topic_base, name);
+    snprintf_P(value, sizeof(value), PSTR("%d"), values[i]);
+    ok = mqtt_client.publish(topic, value, true) && ok;
+  }
+  reported = ok ? signature : -1; // retry on the next loop
+  lastPublish = now;
+}
+
+// A received data block: remember its values for the flow limit and correct a value outside the limit.
+// ESP32: the flow limit state is only written here and read by heatpump_command() / send_command(), all on
+// the loop() task (readSerial, MQTT callback, web server, rules, Modbus executeWrite). The serial TX task only
+// sends queued frames. The one reader on another task is the Modbus dry run (mainCommandAccepts, AsyncTCP),
+// whose result (the length) does not depend on the limit.
+void flowlimitReceived(const char *block) {
+  flowlimit_update(&flowlimit, (const uint8_t *)block, DATASIZE);
+  char msg[256];
+  if (flowlimit_sensor_check(&flowlimit, millis(), msg, sizeof(msg))) log_message(msg);
+  if (heishamonSettings.listenonly) return;
+  uint8_t cmd[FLOWLIMIT_DATAGRAM_SIZE];
+  int len = flowlimit_watchdog(&flowlimit, millis(), cmd, msg, sizeof(msg));
+  if (msg[0] != '\0') log_message(msg);
+  // counted as a try only when the command was accepted (sent, buffered or queued), else again next time
+  if (len > 0 && send_command(cmd, len)) flowlimit_sent(&flowlimit, millis());
+}
+
+// Commands that are not built by heatpump_command() (SendRawValue, the CZ-TAW1 proxy) get the flow limit
+// here. A command from heatpump_command() is already inside the limit, nothing changes then.
+void flowlimitGuard(byte *command, int length) {
+  char msg[256] = "Flow limit: command clamped";
+  if (flowlimit_apply(&flowlimit, command, length, msg, sizeof(msg)) > 0) log_message(msg);
+}
+
 void mqtt_reconnect()
 {
   unsigned long now = millis();
@@ -547,6 +696,7 @@ void mqtt_reconnect()
     {
       mqttReconnects++;
       publishRulesState(true);
+      publishFlowLimit(true);
       if (heishamonSettings.opentherm) {
         sprintf(topic, "%s/%s/#", heishamonSettings.mqtt_topic_base, mqtt_topic_opentherm_read);
         mqtt_client.subscribe(topic);
@@ -750,9 +900,13 @@ void readProxy()
       }      
       log_message(_F("PROXY Checksum and header received ok!"));
       if ((proxydata[0]==0x71 or proxydata[0]==0xF1) and proxydata_length == (PANASONICQUERYSIZE+1)) { //this is a query from cztaw on proxy port
-        if (proxydata[0]==0xf1) {  //this is a write query, just pass this message forward as new command
-          log_message(_F("PROXY received write query, copy message forward to heatpump"));
-          send_command((byte*)proxydata,proxydata_length-1); //strip CRC, will be calculated again in send_command
+        if (proxydata[0]==0xf1) {  //this is a write query, pass this message forward as new command unless writes are blocked
+          if (heishamonSettings.proxyBlockWrites) {
+            log_message(_F("PROXY received write query, blocked by settings"));
+          } else {
+            log_message(_F("PROXY received write query, copy message forward to heatpump"));
+            send_command((byte*)proxydata,proxydata_length-1); //strip CRC, will be calculated again in send_command
+          }
           //then just reply with the current settings, for read and write it is the same as the write is only acknowledged in the next read
           //so we just run to the next if statement
         }
@@ -775,6 +929,10 @@ void readProxy()
       } else if (proxydata[0]==0x31) {
         log_message(_F("PROXY received startup message, forwarding to heatpump!"));
         send_command((byte *)proxydata, proxydata_length-1); //strip CRC from end as send_command wil recalculate it
+        proxydata_length = 0;
+        return;
+      } else if (proxydata[0]==0xF1 && heishamonSettings.proxyBlockWrites) {
+        log_message(_F("PROXY received unknown write message, blocked by settings"));
         proxydata_length = 0;
         return;
       } else {
@@ -835,6 +993,7 @@ bool readSerial()
       if (data_length == DATASIZE)  {  //receive a full data block
         if  (data[3] == 0x10) { //decode the normal data block
           decode_heatpump_data(data, actData, mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
+          flowlimitReceived(data);
           if ( (!extraDataBlockAvailable) && ((actData[0] == 0x71) && (actData[0xc7] >= 3)) ) { //do we have valid header and byte 0xc7 is more or equal 3 then assume K&L and more series
             log_message(_F("Extra data available on this heatpump"));
             extraDataBlockAvailable = true; //request for extra data next run
@@ -901,15 +1060,16 @@ void popCommandBuffer() {
   }
 }
 
-void pushCommandBuffer(byte* command, int length) {
+bool pushCommandBuffer(byte* command, int length) {
   if (cmdnrel + 1 > MAXCOMMANDSINBUFFER) {
     log_message(_F("Too much commands already in buffer. Ignoring this commands.\n"));
-    return;
+    return false;
   }
   cmdbuffer[cmdend].length = length;
   memcpy(&cmdbuffer[cmdend].data, command, length);
   cmdend = (cmdend + 1) % (MAXCOMMANDSINBUFFER);
   cmdnrel++;
+  return true;
 }
 
 #ifdef ESP32
@@ -999,29 +1159,37 @@ void serialTXTask(void *pvParameters) {
 }
 bool send_command(byte* command, int length) {
   if (length <= 0) return false;
+  if (length > (int)sizeof(cmdbuffer[0].data)) {
+    log_message(_F("Command length out of range. Not sending this command."));
+    return false;
+  }
   if ( heishamonSettings.listenonly ) {
     log_message(_F("Not sending this command. Heishamon in listen only mode!"));
     return false;
   }
+  flowlimitGuard(command, length); // only for a command that really goes out, so the log never claims more
   struct cmdbuffer_t cmd;
   cmd.length = length;
   memcpy(&cmd.data, command, length);
-  xQueueSend(cmdQueue, &cmd, 0);
-  return true;
+  return xQueueSend(cmdQueue, &cmd, 0) == pdTRUE; // false: queue full, the command is dropped
 }
 
 #else
 
 bool send_command(byte* command, int length) {
   if (length <= 0) return false;
+  if (length > (int)sizeof(cmdbuffer[0].data)) {
+    log_message(_F("Command length out of range. Not sending this command."));
+    return false;
+  }
   if ( heishamonSettings.listenonly ) {
     log_message(_F("Not sending this command. Heishamon in listen only mode!"));
     return false;
   }
+  flowlimitGuard(command, length); // only for a command that really goes out, so the log never claims more
   if ( sending ) {
     log_message(_F("Already sending data. Buffering this send request"));
-    pushCommandBuffer(command, length);
-    return false;
+    return pushCommandBuffer(command, length); // true: buffered, it is sent after the current answer
   }
   sending = true; //simple semaphore to only allow one send command at a time, semaphore ends when answered data is received
 
@@ -1113,7 +1281,20 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+static bool otaRunning = false;
+
 void setupOTA() {
+  // ArduinoOTA can flash firmware without the web login: it only runs while the login is off
+  // and with a password of its own (never the default one). Checked at start and in loop().
+  if (webauth_login_on()) {
+    log_message(_F("ArduinoOTA (port 8266) not started: the web login is on"));
+    return;
+  }
+  if (!webauth_ota_allowed(heishamonSettings.ota_password)) {
+    log_message(_F("ArduinoOTA (port 8266) not started: set an OTA password other than the default 'heisha' in the settings"));
+    return;
+  }
+  otaRunning = true;
   // Port defaults to 8266
   ArduinoOTA.setPort(8266);
 
@@ -1142,133 +1323,104 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
   
 
   switch (client->step) {
-    case WEBSERVER_CLIENT_REQUEST_METHOD: {
-        if (strcmp_P((char *)dat, PSTR("POST")) == 0) {
-          client->route = 110;
-        }
-        return 0;
-      } break;
-    case WEBSERVER_CLIENT_REQUEST_URI: {
-        if (strcmp_P((char *)dat, PSTR("/")) == 0) {
-          client->route = 1;
+    case WEBSERVER_CLIENT_REQUEST: {
+        // The whole request line and the headers are in; nothing of the request was handled yet.
+        struct webserver_request_t *req = (struct webserver_request_t *)dat;
+
+        // 1. Find the route and decide (src/common/webauth.cpp: route table, login, Host, Origin, lockout).
+        //    A rejected request gets an answer route (login redirect, 401, 403, 429); the webserver then
+        //    skips the query arguments, the body and a websocket upgrade.
+        char hosts[WEBAUTH_DEVICE_HOSTS_LEN];
+        webauthDeviceHosts(hosts, sizeof(hosts), &heishamonSettings);
 #ifdef ESP32
-        } else if (strcmp_P((char *)dat, PSTR("/modbus")) == 0) {
-          client->route = 200;
+        webauth_env_t env = { (uint32_t)client->client->remoteIP(), hosts, httpsRunning(), heishamonSettings.http_mode, httpsClientOnHotspot(client) };
+#else
+        webauth_env_t env = { (uint32_t)client->client->remoteIP(), hosts, 0, 0, 0 };
 #endif
-        } else if (strcmp_P((char *)dat, PSTR("/json")) == 0) {
-          client->route = 20;
-        } else if (strcmp_P((char *)dat, PSTR("/reboot")) == 0) {
-          client->route = 30;
-        } else if (strcmp_P((char *)dat, PSTR("/debug")) == 0) {
-          client->route = 40;
-          log_message(_F("Debug URL requested"));
-        } else if (strcmp_P((char *)dat, PSTR("/wifiscan")) == 0) {
-          client->route = 50;
-        } else if (strcmp((char *)dat, "/dallasalias") == 0) {
-          client->route = 60;
-        } else if (strcmp((char *)dat, "/removedallas") == 0) {
-          client->route = 190;
-        } else if (strcmp((char *)dat, "/dallasoffset") == 0) {
-          client->route = 195;
-        } else if (strcmp((char *)dat, "/togglelog") == 0) {
-          client->route = 1;
-          log_message(_F("Toggled mqtt log flag"));
-          heishamonSettings.logMqtt ^= true;
-        } else if (strcmp_P((char *)dat, PSTR("/togglehexdump")) == 0) {
-          client->route = 1;
-          log_message(_F("Toggled hexdump log flag"));
-          heishamonSettings.logHexdump ^= true;
-        } else if (strcmp_P((char *)dat, PSTR("/connecttest.txt")) == 0 ||
-                   strcmp_P((char *)dat, PSTR("/ncsi.txt")) == 0 ||
-                   strcmp_P((char *)dat, PSTR("/redirect")) == 0 ||
-                   strcmp_P((char *)dat, PSTR("/fwlink")) == 0 ||
-                   strcmp_P((char *)dat, PSTR("/generate_204")) == 0 ||
-                   strcmp_P((char *)dat, PSTR("/gen_204")) == 0 ||
-                   strcmp_P((char *)dat, PSTR("/popup")) == 0) {
-          client->route = 80; //for Android/Windows devices
-        } else if (strcmp_P((char *)dat, PSTR("/hotspot-detect.html")) == 0 ) {
-          client->route = 81;  //for Apple devices
-        } else if (strcmp_P((char *)dat, PSTR("/factoryreset")) == 0) {
-          client->route = 90;
-        } else if (strcmp_P((char *)dat, PSTR("/gpio")) == 0) {
-          client->route = 191;
-        } else if (strcmp_P((char *)dat, PSTR("/command")) == 0) {
-          if ((client->userdata = malloc(1)) == NULL) {
-            loggingSerial.printf(PSTR("Out of memory %s:#%d\n"), __FUNCTION__, __LINE__);
-            ESP.restart();
-            exit(-1);
-          }
-          ((char *)client->userdata)[0] = 0;
-          client->route = 100;
-        } else if (client->route == 110) {
-          // Only accept settings POST requests
-          if (strcmp_P((char *)dat, PSTR("/savesettings")) == 0) {
-            client->route = 110;
-          } else if (strcmp_P((char *)dat, PSTR("/saverules")) == 0) {
-            client->route = 170;
-            if (LittleFS.begin()) {
-              LittleFS.remove("/rules.new");
-              client->userdata = new File(LittleFS.open("/rules.new", "a+"));
-            }
-#ifdef TLS_SUPPORT
-        } else if (strcmp_P((char *)dat, PSTR("/cacert")) == 0) {
-          client->route = 165; 
-          if (LittleFS.begin()) {
-            LittleFS.remove("/ca.tmp");
-            File cf = LittleFS.open("/ca.tmp", "w");
-            if (cf) {
-              client->userdata = new File(cf);
-            }
-            new_ca_stored = true;
-          }
-#endif
-          } else if (strcmp_P((char *)dat, PSTR("/firmware")) == 0) {
-            if (!Update.isRunning()) {
-#ifdef ESP8266
-              Update.runAsync(true);
-#endif
-              if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
-                Update.printError(loggingSerial);
-                return -1;
-              } else {
-                client->route = 150;
-              }
-            } else {
-              loggingSerial.println(PSTR("New firmware update client, while previous isn't finished yet! Assume broken connection, abort!"));
-              Update.end();
-              return -1;
-            }
-          } else {
-            return -1;
-          }
-        } else if (strcmp_P((char *)dat, PSTR("/settings")) == 0) {
-          client->route = 120;
-        } else if (strcmp_P((char *)dat, PSTR("/getsettings")) == 0) {
-          client->route = 130;
-        } else if (strcmp_P((char *)dat, PSTR("/firmware")) == 0) {
-          client->route = 140;
-        } else if (strcmp_P((char *)dat, PSTR("/rules")) == 0) {
-          client->route = 160;
-#ifdef TLS_SUPPORT
-        } else if (strcmp_P((char *)dat, PSTR("/cacert")) == 0) {
-          client->route = 166; 
-#endif
-        } else if (strcmp_P((char *)dat, PSTR("/scandallas")) == 0) {
-          client->route = 180;          
-        } else {
-          client->route = 0;
+        int8_t decision = webauth_request(client, req, &env);
+        if (decision != WEBSERVER_ACCEPT) {
+          return decision;
         }
 
-        return 0;
+        // 2. Accepted: only now start what the route does.
+        switch (client->route) {
+          case 2: {
+              log_message(_F("Toggled mqtt log flag"));
+              heishamonSettings.logMqtt ^= true;
+            } break;
+          case 3: {
+              log_message(_F("Toggled hexdump log flag"));
+              heishamonSettings.logHexdump ^= true;
+            } break;
+          case 40: {
+              log_message(_F("Debug URL requested"));
+            } break;
+          case 100: {
+              if ((client->userdata = malloc(1)) == NULL) {
+                loggingSerial.printf(PSTR("Out of memory %s:#%d\n"), __FUNCTION__, __LINE__);
+                ESP.restart();
+                exit(-1);
+              }
+              ((char *)client->userdata)[0] = 0;
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              if (httpsFormStart(client) == -1) {
+                return -1;
+              }
+            } break;
+          case 170: {
+              if (LittleFS.begin()) {
+                LittleFS.remove("/rules.new");
+                client->userdata = new File(LittleFS.open("/rules.new", "a+"));
+              }
+            } break;
+#ifdef TLS_SUPPORT
+          case 165: {
+              if (LittleFS.begin()) {
+                LittleFS.remove("/ca.tmp");
+                File cf = LittleFS.open("/ca.tmp", "w");
+                if (cf) {
+                  client->userdata = new File(cf);
+                }
+                new_ca_stored = true;
+              }
+            } break;
+#endif
+          case 150: {
+              if (!Update.isRunning()) {
+#ifdef ESP8266
+                Update.runAsync(true);
+#endif
+                if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
+                  Update.printError(loggingSerial);
+                  return -1;
+                }
+              } else {
+                loggingSerial.println(PSTR("New firmware update client, while previous isn't finished yet! Assume broken connection, abort!"));
+                Update.end();
+                return -1;
+              }
+            } break;
+        }
+        return WEBSERVER_ACCEPT;
       } break;
     case WEBSERVER_CLIENT_ARGS: {
         struct arguments_t *args = (struct arguments_t *)dat;
         switch (client->route) {
+          case WEBAUTH_ROUTE_LOGIN_PAGE:
+          case WEBAUTH_ROUTE_LOGIN_POST:
+          case WEBAUTH_ROUTE_SECURITY_PAGE:
+          case WEBAUTH_ROUTE_SECURITY_POST: {
+              return webauth_args(client, args);
+            } break;
           case 20: {
               return handleJsonArgs(client, args, &heishamonSettings);
             } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              return httpsFormArgs(client, args);
+            } break;
           case 60: {
-              sprintf_P(log_msg, PSTR("Dallas alias changed address %s to alias %s"), args->name, args->value);
+              snprintf_P(log_msg, LOG_MSG_SIZE, PSTR("Dallas alias changed address %s to alias %s"), args->name, args->value);
               log_message(log_msg);
               changeDallasAlias((char *)args->name, (char *)args->value);
               return 0;
@@ -1285,12 +1437,14 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 100: {
               unsigned char cmd[256] = { 0 };
-              char cpy[args->len + 1];
               char log_msg[256] = { 0 };
               unsigned int len = 0;
-
-              memset(&cpy, 0, args->len + 1);
-              snprintf((char *)&cpy, args->len + 1, "%.*s", args->len, args->value);
+              // a query argument can be up to WEBSERVER_MAX_QUERY long (SetCurves JSON): keep it off the stack
+              char *cpy = (char *)malloc(args->len + 1);
+              if (cpy == NULL) {
+                return -1;
+              }
+              snprintf(cpy, args->len + 1, "%.*s", (int)args->len, (char *)args->value);
 
 #ifdef ESP32
               if (strcmp((char *)args->name, "SetRelayOne") == 0 || strcmp((char *)args->name, "SetRelayTwo") == 0) {
@@ -1304,6 +1458,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                 }
                 strcat((char *)client->userdata, log_msg);
                 strcat((char *)client->userdata, "\n");
+                free(cpy);
                 return 0;
               }
 #endif
@@ -1312,7 +1467,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                 cmdStruct tmp;
                 memcpy_P(&tmp, &commands[x], sizeof(tmp));
                 if (strcmp((char *)args->name, tmp.name) == 0) {
-                  len = tmp.func(cpy, cmd, log_msg);
+                  len = heatpump_command(&tmp, cpy, cmd, log_msg);
                   if ((client->userdata = realloc(client->userdata, strlen((char *)client->userdata) + strlen(log_msg) + 2)) == NULL) {
                     loggingSerial.printf(PSTR("Out of memory %s:#%d\n"), __FUNCTION__, __LINE__);
                     ESP.restart();
@@ -1349,6 +1504,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                   }
                 }
               }
+              free(cpy);
             } break;
           case 110: {
               return cacheSettings(client, args);
@@ -1379,12 +1535,12 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
           case 150: {
               if (Update.isRunning() && (!Update.hasError())) {
                 if ((strcmp((char *)args->name, "md5") == 0) && (args->len > 0)) {
-                  char md5[args->len + 1];
-                  memset(&md5, 0, args->len + 1);
-                  snprintf((char *)&md5, args->len + 1, "%.*s", args->len, args->value);
-                  sprintf_P(log_msg, PSTR("Firmware MD5 expected: %s"), md5);
+                  // an MD5 is 32 hex digits; any other length is refused below
+                  char md5[33];
+                  snprintf(md5, sizeof(md5), "%.*s", (int)args->len, (char *)args->value);
+                  snprintf_P(log_msg, LOG_MSG_SIZE, PSTR("Firmware MD5 expected: %s"), md5);
                   log_message(log_msg);
-                  if (!Update.setMD5(md5)) {
+                  if (args->len != 32 || !Update.setMD5(md5)) {
                     log_message(_F("Failed to set expected update file MD5!"));
                     Update.end(false);
                   }
@@ -1423,10 +1579,6 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
 #endif
         }
       } break;
-    case WEBSERVER_CLIENT_HEADER: {
-        struct arguments_t *args = (struct arguments_t *)dat;
-        return 0;
-      } break;
     case WEBSERVER_CLIENT_WRITE: {
         switch (client->route) {
           case 0: {
@@ -1436,8 +1588,48 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               }
               return 0;
             } break;
-          case 1: {
+          case 1:
+          case 2:
+          case 3: {
               return handleRoot(client, readpercentage, mqttReconnects, &heishamonSettings);
+            } break;
+          case WEBAUTH_ROUTE_LOGIN_PAGE: {
+              return handleLogin(client, webauth_query_message(client));
+            } break;
+          case WEBAUTH_ROUTE_SECURITY_PAGE: {
+              return handleSecurity(client, webauth_query_message(client));
+            } break;
+          case WEBAUTH_ROUTE_SECURITY_POST: {
+              if (webauth_write_answer(client) == 1) {
+                showApiKey(client, webauth_form_apikey(client)); // shown once, then wiped
+                webauth_close(client);
+              }
+              return 0;
+            } break;
+          case WEBAUTH_ROUTE_LOGIN_POST:
+          case WEBAUTH_ROUTE_LOGOUT:
+          case WEBAUTH_ROUTE_TO_LOGIN:
+          case WEBAUTH_ROUTE_UNAUTHORIZED:
+          case WEBAUTH_ROUTE_FORBIDDEN:
+          case WEBAUTH_ROUTE_BAD_HOST:
+          case WEBAUTH_ROUTE_TOO_MANY:
+          case WEBAUTH_ROUTE_TO_HTTPS:
+          case WEBAUTH_ROUTE_HTTP_OFF: {
+              return webauth_write_answer(client);
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_PAGE: {
+              if (client->content == 0) {
+                webserver_send(client, 302, (char *)"text/html", 0); // the HTTPS section of the access page
+              }
+              return 0;
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              if (client->content == 0) {
+                httpsFormProcess(client);
+                webserver_send(client, 302, (char *)"text/html", 0); // Location: /security?m=<offset + result>#https
+                httpsFormFree(client);  // the webserver drops userdata after the answer
+              }
+              return 0;
             } break;
 #ifdef ESP32
           case 200: {
@@ -1559,7 +1751,6 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               return showFirmware(client);
             } break;
           case 150: {
-              log_message((char*)"In /firmware client write part");
               if (Update.isRunning()) {
                 if (Update.end(true)) {
                   log_message((char*)"Firmware update success");
@@ -1656,7 +1847,6 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               return -1;
             } break;
           case 60:
-          case 70:
           case 190:
           case 195: {
               header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /"));
@@ -1671,16 +1861,41 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /rules"));
               return -1;
             } break;
-          default: {
-              if (client->route != 0) {
-                header->ptr += sprintf_P((char *)header->buffer, PSTR("Access-Control-Allow-Origin: *"));
-              }
+          case WEBAUTH_ROUTE_LOGIN_POST:
+          case WEBAUTH_ROUTE_LOGOUT:
+          case WEBAUTH_ROUTE_SECURITY_POST:
+          case WEBAUTH_ROUTE_TO_LOGIN:
+          case WEBAUTH_ROUTE_UNAUTHORIZED:
+          case WEBAUTH_ROUTE_FORBIDDEN:
+          case WEBAUTH_ROUTE_BAD_HOST:
+          case WEBAUTH_ROUTE_TOO_MANY:
+          case WEBAUTH_ROUTE_TO_HTTPS:
+          case WEBAUTH_ROUTE_HTTP_OFF: {
+              return webauth_create_header(client, header);
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_PAGE: {
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /security#https\r\nCache-Control: no-store\r\n"));
+              return -1;
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              header->ptr += sprintf_P((char *)header->buffer, PSTR("Location: /security?m=%u#https\r\nCache-Control: no-store\r\n"),
+                                       (unsigned int)(HTTPS_MSG_PAGE_OFFSET + httpsFormResult(client)));
+              return -1;
             } break;
         }
         return 0;
       } break;
     case WEBSERVER_CLIENT_CLOSE: {
         switch (client->route) {
+          case WEBAUTH_ROUTE_LOGIN_POST:
+          case WEBAUTH_ROUTE_SECURITY_POST:
+          case WEBAUTH_ROUTE_BAD_HOST:
+          case WEBAUTH_ROUTE_TO_HTTPS: {
+              webauth_close(client); // frees the form (and wipes the passwords in it), the 403 page data or the redirect target
+            } break;
+          case WEBAUTH_ROUTE_HTTPS_POST: {
+              httpsFormFree(client); // the uploaded key is wiped
+            } break;
           case 100: {
               if (client->userdata != NULL) {
                 free(client->userdata);
@@ -1927,7 +2142,11 @@ void timer_cb(int nr) {
         } break;
       case -3: {
           setupWifi(&heishamonSettings);
-          lastWifiRetryTimer = millis(); // give the new STA connection attempt a full WIFIRETRYTIMER window before check_wifi() can re-enable the hotspot
+          wifiretry_started(&wifiRetry, millis()); // the new WiFi gets its time to connect
+          // new WiFi data: if it cannot be reached (wrong password) the setup hotspot has to come back, or the
+          // device is unreachable until somebody presses the boot button
+          setupap_wifi_saved(&setupAp, millis());
+          log_message(_F("New WiFi settings: the setup hotspot starts in about 15 seconds if that WiFi cannot be reached"));
         } break;
       case -4: {
           int ret = rules_parse((char*)"/rules.new");
@@ -2046,10 +2265,14 @@ void setup() {
 
   loggingSerial.println(F("Loading config from flash..."));
   loadSettings(&heishamonSettings);
+  loadWebAuth(); // web login: password hash and API key hash from /webauth.bin
+#ifdef ESP32
+  httpsSetup(); // HTTPS switched on: mbedtls takes its large blocks from PSRAM; the server starts in loop() once the network is up
+#endif
 
   loggingSerial.println(F("Setup wifi..."));
   setupWifi(&heishamonSettings);
-  lastWifiRetryTimer = millis();
+  wifiretry_started(&wifiRetry, millis());
 
 #if defined(ESP32)
   loggingSerial.println(F("Setup ethernet module..."));
@@ -2181,28 +2404,25 @@ void readHeatpump() {
   if ( (heishamonSettings.listenonly || sending) && (heatpumpSerial.available() > 0)) readSerial();
 }
 
-void checkBootButton() {
-  if (digitalRead(BOOTPIN)) { //true = 1, not pressed
-    bootButtonNotPressed = millis();
-  } else {
-      if ((unsigned long)(millis() - bootButtonNotPressed) > 10000) {
-        //initiate factory reset
-        factoryReset();
-      }
-  }
-}
-
 void loop() {
-  //check boot button state
-  checkBootButton();
-
   //webserver function
   webserver_loop();
 
-  // check wifi
+  // check the boot button (short press: setup hotspot, held > 10 s: factory reset) and the wifi
   check_wifi();
+#ifdef ESP32
+  httpsLoop(); // HTTPS: start when the network is up, load a new certificate when no TLS connection is open
+#endif
   // Handle OTA first.s
-  ArduinoOTA.handle();
+  if (otaRunning) {
+    if (webauth_ota_allowed(heishamonSettings.ota_password)) {
+      ArduinoOTA.handle();
+    } else {
+      otaRunning = false;  // the login was switched on: no more OTA until a restart with the login off
+      log_message(_F("ArduinoOTA stopped: the web login is on"));
+    }
+  }
+  webauth_tick(); // expired web login sessions and lockouts
 
 #ifdef ESP32
   modbusServer.configure(heishamonSettings.modbus, heishamonSettings.optionalPCB, heishamonSettings.modbusWrites, heishamonSettings.listenonly);
@@ -2428,6 +2648,7 @@ void loop() {
 
   timerqueue_update();
   publishRulesState(false);
+  publishFlowLimit(false);
   publishGPIOStates(mqtt_client, heishamonSettings.gpioSettings, heishamonSettings.mqtt_topic_base, heishamonSettings.opentherm, heishamonSettings.listenonly, heishamonSettings.updateAllTime); // after the rules timers, so rule changes are published in the same loop
   #ifdef ESP32
   delay(1); // to keep watchdog happy

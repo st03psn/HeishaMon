@@ -1,6 +1,6 @@
 # MQTT Topics for HeishaMon
 
-`TOP...` IDs identify the normal decoded heat pump values; `XTOP...` and `OPT...` identify values from the extra data block and optional PCB. Not every MQTT topic needs such an ID: device status and event topics such as `LWT`, `log`, `stats`, `rules/state`, and `rules/executed` are documented separately without a TOP number, and so are the GPIO and relay states (`gpio/...`).
+`TOP...` IDs identify the normal decoded heat pump values; `XTOP...` and `OPT...` identify values from the extra data block and optional PCB. Not every MQTT topic needs such an ID: device status and event topics such as `LWT`, `log`, `stats`, `rules/state`, `rules/executed` and `flowlimit/...` are documented separately without a TOP number, and so are the GPIO and relay states (`gpio/...`).
 
 ## Availability Topic:
 
@@ -34,6 +34,26 @@ This reports loaded rules, not whether a rule is executing at that instant. `0` 
 - `duration_us`: elapsed microseconds for an outer Boot, timer, or topic/event invocation, including its helper calls. Omitted for nested helper events. Nested event publication time is included in the outer duration.
 
 Ruleset validation does not publish execution events. A returned error is reported for the outer invocation; a helper that fails before returning successfully has no separate completion event. A crash cannot produce a completion event. Events use MQTT QoS 0, are sent only while connected, and are neither queued nor replayed after reconnecting. Boot events may therefore be absent if MQTT is not connected yet. Every execution can produce traffic, including frequent timer/topic handlers and their helper calls.
+
+## Flow Temperature Limit:
+
+Topic | Response/Description
+--- | ---
+flowlimit/state | Read-only, retained: `0` = off (no limit), `1` = on, `2` = on, but the watchdog stopped correcting a value (curve or request of a zone) because the heat pump did not take 3 corrections, `3` = on, but the heat pump has not reported the sensor of a zone in use (`Z1/Z2_Sensor_Settings`) for 5 minutes, so the request temperatures are only covered by the conservative rule below, `4` = both 2 and 3. See the log. Commands are still clamped in every state but 0.
+flowlimit/surface | Read-only, retained: the chosen heating surface, `0` = off, `1` = underfloor heating, `2` = radiators, `3` = custom
+flowlimit/heat_max | Read-only, retained: the maximum heating flow temperature in °C (only applied while `state` is not `0`)
+flowlimit/cool_min | Read-only, retained: the minimum cooling flow temperature in °C (only applied while `state` is not `0`)
+
+The full topics are `<base>/flowlimit/...`, for example `panasonic_heat_pump/flowlimit/heat_max`. They are published on MQTT connection/reconnection, when a value changes, and at the configured full-data resend interval (`updateAllTime`). The limit is set in the settings (tab **Heat pump**, *Flow temperature limit*), not over MQTT.
+
+While a heating surface is chosen, HeishaMon clamps every main command before it is sent, whichever way it comes in (MQTT commands, rules, the web `/command` route, Modbus, `SendRawValue` and, on the large board, the CZ-TAW1 proxy port):
+
+- heat curve targets (`SetCurves` `zoneN.heat.target.high/low`) at most `heat_max`, cool curve targets at least `cool_min`;
+- `SetZ1/Z2HeatRequestTemperature` in direct mode (`Heating_Mode` 1) at most `heat_max`; in compensation curve mode (`Heating_Mode` 0) the shift is lowered until the highest heat curve target of the zone plus the shift is at most `heat_max` (within -5..5). Cooling the same way with `cool_min` and the lowest cool curve target;
+- the request temperatures are never touched in a zone whose sensor (`Z1_Sensor_Settings` / `Z2_Sensor_Settings`) is an internal thermostat or a thermistor: there the request is a room setpoint. While the sensor is not known (before the first data, or not reported) the conservative rule applies: a request outside -5..5 counts as a direct target and is clamped (a room setpoint would then only be touched when `heat_max` is below it), a value within -5..5 passes. Curve targets are always clamped;
+- mode or curve not known (invalid mode bits, a curve byte of the heat pump that is 0), a request outside -5..5 counts as a direct target and is clamped, a shift passes.
+
+The log line of the command says what was clamped, for example `SetZ1HeatRequestTemperature set to 40 [limit: Z1 heat request 40>35]`. When the data of the heat pump shows a value outside the limit (set at the remote controller, or before the limit was switched on), HeishaMon sends one correction, at most every 10 minutes, for the zones in use (`Zones_State`), cooling only while the operating mode can cool. A request is judged against the curve the heat pump reports, so when the heat pump does not take a curve correction the shift is still lowered (to -5 at most). A correction counts only when it could be queued; while it cannot, it is tried with every data block and logged at most once per 10 minutes. After 3 corrections without effect it stops correcting that value (curve or request, per zone and heating or cooling), logs a warning and `flowlimit/state` becomes `2`, until the settings change or a reboot. In listen only mode nothing is corrected.
 
 ## Log Topic:
 
@@ -194,7 +214,7 @@ TOP145 | main/DHW_Capacity_Mode | DHW capacity (0=Standard, 1=Variable; J series
 TOP146 | main/Zone_Configuration | Zone configuration (decimal raw code: 21=one zone, Z1 room; 25=one zone, Z1 pool; 22=two zones, Z2 room; 38=two zones, Z2 pool)
 TOP147 | main/Internal_Heater_Capacity | Configured internal heater capacity (3/6/9 kW; -1=unavailable)
 TOP148 | main/DHW_Heater_Type | DHW heater type (0=internal, 1=external)
-TOP149 | main/SG_Ready_Control | SG Ready control (0=disabled, 1=enabled)
+TOP149 | main/SG_Ready_Control | SG Ready control (0=disabled, 1=enabled, capacity, 2=enabled, power consumption)
 TOP150 | main/Demand_Control | Demand control (0=disabled, 1=enabled)
 TOP151 | main/DHW_Defrost | DHW defrost option (0=no, 1=yes; K/L series)
 TOP152 | main/Dry_Concrete_Target_Temp | Current stage target temperature for concrete drying (°C)
@@ -215,15 +235,60 @@ TOP166 | main/Z1_Active | Actual zone 1 activity (0=inactive, 1=active)
 TOP167 | main/Backup_Heater_Enable | Backup heater custom-menu setting (0=inactive, 1=active)
 TOP168 | main/Cooling_Enable | Cooling custom-menu setting (0=inactive, 1=active)
 TOP169 | main/Heat_Request_Temp_With_Buffer | Heating water shift/direct target including buffer delta (°C)
+TOP170 | main/Static_Pressure | Static pressure option (0=disabled, 1=enabled; installer menu item "Static pressure", byte 31 bits 5-4)
+TOP171 | main/Heating_On_Outdoor_Temp | Outdoor temperature for heating ON (°C; installer menu, byte 108)
+TOP172 | main/Heating_On_Delay | Heating ON delay time (minutes, multiples of 30; byte 109)
+TOP173 | main/DHW_Booster_Delay | Switch-on delay of the external DHW booster heater (minutes; byte 60, only meaningful with DHW tank and external heater)
+TOP174 | main/Efficiency_Stage1_Time | Heating control "efficiency" stage 1 duration (minutes, multiples of 5; byte 33 low nibble)
+TOP175 | main/Efficiency_Stage2_Time | Heating control "efficiency" stage 2 duration (minutes, multiples of 5; byte 33 high nibble)
+TOP176 | main/Efficiency_Stage3_Time | Heating control "efficiency" stage 3 duration (minutes, multiples of 5; byte 34 low nibble)
+TOP177 | main/Sensor_Offset_Remote_Th1 | Sensor calibration offset Th1 (remote), K in steps of 0.5 (byte 35 high nibble)
+TOP178 | main/Sensor_Offset_Outdoor | Sensor calibration offset outdoor sensor, K in steps of 0.5 (byte 35 low nibble)
+TOP179 | main/Anti_Stick_Mode | Anti-stick mode, actuator exercise (0=disabled, 1=enabled; byte 34 bits 7-6)
+TOP180 | main/Bivalent_Operating_Mode | Bivalent operating mode, cloud field "operating mode" (0=auto, 1=SG ready, 2=intelligent; byte 27 bits 5-4). Not the switching behaviour of TOP130
+TOP181 | main/Bivalent_External_Pump | Bivalent external pump, cloud field "external pump" (0=off, 1=on; byte 27 bits 7-6)
+TOP182 | main/Extra_Pump_Use | Extra pump use (0=not used, 1=heating, 2=DHW; byte 31 bits 1-0, derived from the observed values 0x55, 0x5A, 0x5B and 0x57)
+TOP183 | main/Extra_Pump_Mode | Extra pump mode (0=comfort, 1=efficiency; byte 31 bits 3-2, derived like TOP182). Only meaningful when TOP182 is 2 (DHW); 0 is also reported while the pump is not used
+TOP184 | main/SG_Ready_1_DHW_Power | SG ready power consumption setting 1, DHW (kW, 0.1 steps; byte 51)
+TOP185 | main/SG_Ready_1_Heat_Power | SG ready power consumption setting 1, heating (kW; byte 52)
+TOP186 | main/SG_Ready_1_Cool_Power | SG ready power consumption setting 1, cooling (kW; byte 53)
+TOP187 | main/SG_Ready_2_DHW_Power | SG ready power consumption setting 2, DHW (kW; byte 54)
+TOP188 | main/SG_Ready_2_Heat_Power | SG ready power consumption setting 2, heating (kW; byte 55)
+TOP189 | main/SG_Ready_2_Cool_Power | SG ready power consumption setting 2, cooling (kW; byte 56, label by elimination)
+TOP190 | main/SG_Ready_Stop_Power | SG ready consumption limit while the heat pump is stopped (kW; byte 57)
+TOP191 | main/SG_Ready_1_Cool_Capacity | SG ready capacity setting 1, cooling offset (°C; byte 102)
+TOP192 | main/SG_Ready_2_Cool_Capacity | SG ready capacity setting 2, cooling offset (°C; byte 103)
+TOP193 | main/Sensor_Offset_Return | Sensor calibration offset return sensor, K in steps of 0.5 (byte 36 high nibble)
+TOP194 | main/Defrost_Signal | Defrost signal, installer menu System setup (0=no, 1=yes; byte 28 bits 7-6)
+TOP195 | main/Sensor_Offset_DHW_Tank | Sensor calibration offset DHW tank sensor, K in steps of 0.5 (byte 36 low nibble)
+TOP196 | main/Sensor_Offset_Flow | Sensor calibration offset flow sensor, K in steps of 0.5 (byte 37 low nibble)
+TOP197 | main/Heat_Pump_Capacity | Rated heating capacity of the unit (kW)
+TOP198 | main/Heat_Pump_Type | Model type (0=Standard, 1=T-CAP)
 
 The relay states are published on change and after each MQTT (re)connect. Commands go to `gpio/relay/one` and `gpio/relay/two` (without `/state`). The extra GPIOs use the same layout: commands to `gpio/extra/N`, states (retained) on `gpio/extra/N/state`. After a reboot the outputs are restored once from their retained `/state` topics; see the README section *GPIO states and restore at boot*.
 
-The topics above are relative to the configured MQTT base topic. New topics TOP144–TOP169 use the documented normal data block (0x10); availability depends on the heat pump model and configuration. Two-bit status fields use -1 for an unset encoding (00). Z1_Active and Z2_Active are individual activity bits, distinct from Zones_State. Quiet/Powerful actual states are distinct from the configured level/time topics.
+The topics above are relative to the configured MQTT base topic. New topics TOP144-TOP198 use the documented normal data block (0x10); availability depends on the heat pump model and configuration. TOP170–TOP196 were tested on M series only; may work on other series, not tested there. On a model that does not provide one of their bytes (the byte reads 0), the topic shows a value outside the range of the setting (for example -128 °C, -0.1 kW, -5 minutes or -4.0 K), like the existing topics. Two-bit status fields use -1 for an unset encoding (00). Z1_Active and Z2_Active are individual activity bits, distinct from Zones_State. Quiet/Powerful actual states are distinct from the configured level/time topics.
 
 
 
 
 All Topics related with state can have also value -1 - unknown - but only in abnormal situations.
+
+### Topic groups
+
+The main topics are split into groups. In Settings, under *Topic groups*, every group except the basic one can be switched off. A switched off topic is not published to MQTT, not sent over the websocket and left out of `/json`, but it is still decoded: rules (`@Name`), Modbus and `/json?topic=` keep working. The installer settings group is off by default. Values that were published before a group was switched off stay retained on the broker until you remove them.
+
+| Group | Settings key | Default | Topics |
+|---|---|---|---|
+| Basic (always on) | - | on | TOP0-20, 26, 38-41, 44, 92, 160-161, 197-198 |
+| Heating & cooling | `topics_heatcool` | on | TOP22-24, 27-33, 36, 42, 45, 56, 72-77, 79-81, 94, 124, 127, 166, 169 |
+| Zone 2 | `topics_zone2` | on | TOP34-35, 37, 43, 57, 82-89, 118, 123, 128, 165 |
+| DHW & heaters | `topics_dhw_heaters` | on | TOP25, 58-61, 68-71, 78, 90-91, 96-98, 140, 151, 158-159 |
+| Diagnostics | `topics_diagnostics` | on | TOP21, 49-55, 62-67, 93, 115-117, 125-126, 142 |
+| Buffer, solar & pool | `topics_buffer_solar_pool` | on | TOP46-48, 101-105, 113-114, 144, 152-153 |
+| Bivalent | `topics_bivalent` | on | TOP129-138, 164, 180-181 |
+| External control & SG ready | `topics_external_sgready` | on | TOP110, 119-122, 149-150, 154-157, 162-163, 184-192 |
+| Installer settings | `topics_installer` | off | TOP95, 99-100, 106-109, 111-112, 139, 141, 143, 145-148, 167-168, 170-179, 182-183, 193-196 |
 
 ## Extra Sensor Topics:
 Some heatpumps (K/L series and newer) send an additional "extra data block" on top of the normal data block. HeishaMon detects this automatically at boot and, if available, starts requesting and decoding it as well. These extra topics provide separate, more precise power consumption/production values (Watt) per mode, published under the `extra/` topic prefix. If your heatpump does not support the extra data block, these topics will not be published.
@@ -318,11 +383,70 @@ SET52 | SetCoolToHeatTemp | Outdoor temperature for automatic cool-to-heat switc
 SET53 | SetRoomOperationMaxTime | Maximum room heating operation time when alternating with DHW; readback TOP158 | 30..7620 minutes, multiples of 30 (wire range)
 SET54 | SetDHWHeatupMaxTime | Maximum DHW heat-up time; readback TOP159 | integer 1..254 minutes (wire range)
 SET55 | SetQuietModeSchedule | Enable/disable the existing quiet-mode schedule; readback TOP3 | 0=off, 1=on
+SET56 | SetOptionalPCB | Optional PCB connectivity in the installer menu (not the optional PCB emulation); readback TOP110. Shared byte, see below | 0=no, 1=yes
+SET57 | SetAntiFreezeMode | Anti freezing option; readback TOP109. Shared byte, see below | 0=off, 1=on
+SET58 | SetLiquidType | Circulation liquid; readback TOP107. Shared byte, see below | 0=water, 1=glycol
+SET59 | SetStaticPressure | Static pressure option; readback TOP170. Shared byte, see below | 0=disabled, 1=enabled
+SET60 | SetDefrostSignal | Defrost signal, installer menu System setup; readback TOP194. Shared byte, see below | 0=no, 1=yes
+SET61 | SetInternalHeaterCapacity | Back-up heater capacity; readback TOP147. Shared byte, see below | 3, 6 or 9 (kW); the manuals list 3 / 6 / 9 kW depending on the model, a unit may offer fewer
+SET62 | SetZoneType | Zone 1 type room / pool; readback TOP146. Shared byte, see below | 0=room, 1=pool
+SET63 | SetZ1SensorSettings | Zone 1 sensor type; readback TOP111. Shared byte, see below | 0=water temperature, 1=external thermostat, 2=internal thermostat, 3=thermistor
+SET64 | SetSensorOffsetRemoteTh1 | Sensor offset Th1 (remote); readback TOP177. Shared byte, see below | -3.5..3.5 K in steps of 0.5, e.g. `-1.5` (wire range); installer menu -3..3 K
+SET65 | SetSensorOffsetOutdoor | Sensor offset outdoor sensor; readback TOP178. Shared byte, see below | -3.5..3.5 K in steps of 0.5, e.g. `-1.5` (wire range); installer menu -3..3 K
+SET66 | SetSensorOffsetReturn | Sensor offset return sensor; readback TOP193. Shared byte, see below | -3.5..3.5 K in steps of 0.5, e.g. `-1.5` (wire range); installer menu -3..3 K
+SET67 | SetSensorOffsetFlow | Sensor offset flow sensor; readback TOP196. Shared byte, see below | -3.5..3.5 K in steps of 0.5, e.g. `-1.5` (wire range); installer menu -3..3 K
+SET68 | SetSensorOffsetDhwTank | Sensor offset DHW tank sensor; readback TOP195. Shared byte, see below | -3.5..3.5 K in steps of 0.5, e.g. `-1.5` (wire range); installer menu -3..3 K
+SET69 | SetHeatingOnOutdoorTemp | Outdoor temperature for heating ON; readback TOP171. The installer menu keeps it below the heating OFF temperature (SetHeatingOffOutdoorTemp) | integer -127..127 °C (wire range); installer menu from 5 °C, below the heating OFF temperature
+SET70 | SetHeatingOnDelay | Heating ON delay time; readback TOP172 | 30..7620 minutes, multiples of 30 (wire range); installer menu 30..1440 minutes
+SET71 | SetHeatingWaterMode | Water temperature mode for heating; readback TOP76. Shared byte, see below | 0=compensation curve, 1=direct
+SET72 | SetCoolingWaterMode | Water temperature mode for cooling; readback TOP81. Shared byte, see below | 0=compensation curve, 1=direct
+SET73 | SetEfficiencyStage1Time | Efficiency stage 1 duration; readback TOP174. Shared byte, see below | 0..70 minutes, multiples of 5 (wire range); installer menu 0..60 minutes
+SET74 | SetEfficiencyStage2Time | Efficiency stage 2 duration; readback TOP175. Shared byte, see below | 0..70 minutes, multiples of 5 (wire range); no limit in the manuals, 0..60 minutes seen on the test unit
+SET75 | SetEfficiencyStage3Time | Efficiency stage 3 duration; readback TOP176. Shared byte, see below | 0..70 minutes, multiples of 5 (wire range); no limit in the manuals, 0..30 minutes seen on the test unit
+SET76 | SetDHWInstalled | DHW tank connection; readback TOP100. Shared byte, see below | 0=no, 1=yes
+SET77 | SetDHWHeaterType | Tank heater type; readback TOP148. Shared byte, see below | 0=internal, 1=external
+SET78 | SetDHWBoosterDelay | Switch-on delay of the external DHW booster heater; readback TOP173 | integer 1..254 minutes (wire range); installer menu 20..180 minutes in steps of 5
+SET79 | SetDHWDefrost | Use tank water for defrost; readback TOP151. Shared byte, see below | 0=no, 1=yes
+SET80 | SetExtraPump | Extra pump use; readback TOP182. Shared byte, see below | 0=not used, 1=heating, 2=DHW
+SET81 | SetExtraPumpMode | Extra pump mode; readback TOP183. Shared byte, see below | 0=comfort, 1=efficiency
+SET82 | SetRoomHolidayShiftTemp | Room heating shift in holiday mode; readback TOP45 | integer -127..127 K (wire range)
+SET83 | SetDHWHolidayShiftTemp | DHW shift in holiday mode; readback TOP25 | integer -127..127 K (wire range)
+SET84 | SetSolarMode | Solar connection mode; readback TOP101. Shared byte, see below | 0=disabled, 1=buffer, 2=DHW
+SET85 | SetSolarOnDelta | Solar connection: delta T for tank ON; readback TOP102 | integer -127..127 K (wire range); installer menu 5..15 K
+SET86 | SetSolarOffDelta | Solar connection: delta T for tank OFF; readback TOP103 | integer -127..127 K (wire range); installer menu 2..10 K
+SET87 | SetSolarFrostProtection | Solar connection: anti-freeze temperature; readback TOP104 | integer -127..127 °C (wire range); installer menu -20..10 °C
+SET88 | SetSolarHighLimit | Solar connection: tank high limit; readback TOP105 | integer -127..127 °C (wire range); installer menu 70..90 °C
+SET89 | SetPoolDelta | Pool delta T; readback TOP153 | integer -127..127 K (wire range); installer menu 0..10 K
+SET90 | SetBivalentAPHeat | Bivalent "heating" in advanced parallel mode; readback TOP132. Shared byte, see below | 0=no, 1=yes
+SET91 | SetBivalentAPDHW | Bivalent "DHW" in advanced parallel mode; readback TOP133. Shared byte, see below | 0=no, 1=yes
+SET92 | SetBivalentOperatingMode | Bivalent operating mode; readback TOP180. Shared byte, see below | 0=auto, 1=SG ready, 2=intelligent
+SET93 | SetBivalentExternalPump | Bivalent external pump; readback TOP181. Shared byte, see below | 0=off, 1=on
+SET94 | SetBivalentAPStartDelay | Delay for the bivalent heat source start in advanced parallel mode; readback TOP136 | integer 1..254 minutes (wire range); no limit in the manuals, 5..250 minutes in steps of 5 seen on the test unit
+SET95 | SetBivalentAPStopDelay | Delay for the bivalent heat source stop in advanced parallel mode; readback TOP137 | integer 1..254 minutes (wire range); no limit in the manuals, 5..250 minutes in steps of 5 seen on the test unit
+SET96 | SetDryConcrete | Dry concrete (screed drying) program on / off; readback TOP144. Shared byte, see below | 0=off, 1=on
+SET97 | SetSGReadyMode | SG ready; readback TOP149. Shared byte, see below | 0=off, 1=on, capacity, 2=on, power consumption
+SET98 | SetSGReadyHeatCapacity1 | SG ready capacity setting 1, heating; readback TOP154 | integer 0..254 % (wire range); installer menu 50..150 %
+SET99 | SetSGReadyDHWCapacity1 | SG ready capacity setting 1, DHW; readback TOP155 | integer 0..254 % (wire range); installer menu 50..150 %
+SET100 | SetSGReadyCoolCapacity1 | SG ready capacity setting 1, cooling offset; readback TOP191 | integer -127..127 °C (wire range); installer menu -15..0 °C
+SET102 | SetSGReadyHeatCapacity2 | SG ready capacity setting 2, heating; readback TOP156 | integer 0..254 % (wire range); installer menu 50..150 %
+SET103 | SetSGReadyDHWCapacity2 | SG ready capacity setting 2, DHW; readback TOP157 | integer 0..254 % (wire range); installer menu 50..150 %
+SET104 | SetSGReadyCoolCapacity2 | SG ready capacity setting 2, cooling offset; readback TOP192 | integer -127..127 °C (wire range); installer menu -15..0 °C
+SET105 | SetSGReadyHeatPower1 | SG ready power consumption setting 1, heating; readback TOP185 | 0.1..25.4 kW in steps of 0.1 (wire range); installer menu 0.5..10.0 kW
+SET106 | SetSGReadyDHWPower1 | SG ready power consumption setting 1, DHW; readback TOP184 | 0.1..25.4 kW in steps of 0.1 (wire range); installer menu 0.5..10.0 kW
+SET107 | SetSGReadyCoolPower1 | SG ready power consumption setting 1, cooling; readback TOP186 | 0.1..25.4 kW in steps of 0.1 (wire range); installer menu 0.5..10.0 kW
+SET108 | SetSGReadyHeatPower2 | SG ready power consumption setting 2, heating; readback TOP188 | 0.1..25.4 kW in steps of 0.1 (wire range); installer menu 0.5..10.0 kW
+SET109 | SetSGReadyDHWPower2 | SG ready power consumption setting 2, DHW; readback TOP187 | 0.1..25.4 kW in steps of 0.1 (wire range); installer menu 0.5..10.0 kW
+SET110 | SetSGReadyCoolPower2 | SG ready power consumption setting 2, cooling; readback TOP189 | 0.1..25.4 kW in steps of 0.1 (wire range); installer menu 0.5..10.0 kW
+SET111 | SetSGReadyStopPower | SG ready consumption limit while the heat pump is stopped; readback TOP190 | 0.1..25.4 kW in steps of 0.1 (wire range); installer menu 0.5..10.0 kW
+SET112 | SetDemandControlEnable | Demand control option in the installer menu (not the optional PCB value of SetDemandControl); readback TOP150. Shared byte, see below | 0=disabled, 1=enabled
 
 SET51–SET55 require complete integer payloads; empty, malformed, out-of-range or invalid-step values are rejected without sending a telegram. The ranges above describe the nonzero protocol encoding, not verified installer-menu limits. Use settings supported by your model; the heat pump may reject values outside its own menu range. These writes follow the documented telegram examples but have not been hardware-tested here. SetQuietModeSchedule toggles the existing schedule and does not configure its times or change the quiet level.
 
 Example: publish `21` to `panasonic_heat_pump/commands/SetHeatToCoolTemp`, `90` to `panasonic_heat_pump/commands/SetRoomOperationMaxTime`, or `1` to `panasonic_heat_pump/commands/SetQuietModeSchedule` (replace the base topic as configured).
 
+SET56–SET112 were tested on M series only; may work on other series, not tested there. They are installer-menu commands: HeishaMon only accepts them while the topic group "Installer settings" is switched on (Settings, Topic groups); otherwise the command is ignored and logged. SET101 is not used: the SET numbers follow the Modbus command ID + 1, and ID 100 is reserved for SetReset. The commands require complete payloads (the sensor offsets also accept one decimal `.0` or `.5`, the SG ready power limits one decimal); empty, malformed, out-of-range or invalid-step values are rejected without sending a telegram. As for SET51–SET55, the ranges above describe the nonzero protocol encoding of the field, not the installer-menu limits; the heat pump may reject or change values outside its own menu range. Where the Panasonic manuals give an installer-menu range, it is listed after the accepted range ("installer menu"); HeishaMon does not enforce it. The 0.5 K step of the sensor offsets comes from the encoding, not from the manuals. The commands do not check other settings or the heat pump state, so check the readback topic.
+
+**Shared-byte commands:** bytes 5, 20, 21, 22, 24, 25, 26, 27, 28, 30, 31, 33, 34, 35, 36 and 37 hold several settings. A zero bit pair or nibble means "no change" for that field, so each command sends only its own bit pair or nibble and leaves the rest of the byte 0, like SetBivalentControl. A bit pair is sent as b01 / b10 (b11 for a third value). SetExtraPump 0 and 1 send use and mode together (nibble 0x5 / 0xA), SetExtraPump 2 sends only the use pair; SetExtraPumpMode sends only the mode pair.
 
 *If you operate your heatpump in water mode with direct temperature setup: topics ending xxxRequestTemperature will set the absolute target temperature.*
 

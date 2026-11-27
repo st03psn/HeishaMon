@@ -56,6 +56,9 @@
 #endif
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
+#if defined(ESP32) && !defined(strncasecmp_P)
+  #define strncasecmp_P strncasecmp
+#endif
 #ifndef ERR_OK
   #define ERR_OK 0
 #endif
@@ -74,25 +77,206 @@ struct webserver_client_t clients[WEBSERVER_MAX_CLIENTS];
 static tcp_pcb *async_server = NULL;
 static WiFiServer sync_server(0);
 #endif
+static uint8_t webserver_busy = 0; // set while webserver_loop() runs
 static uint8_t *rbuffer = NULL;
 
 /*
-  safe write is necessary for esp8266 so it doesn't block
-  on esp32 wifi is multithreaded, not necessary but also not implemented on availableforWrite so skip it there
+  ESP32 synchronous HTTP TX staging.
+
+  Socket sends may accept only part of a response. Stage HTTP fragments in
+  wire order and resume delivery across webserver_loop() iterations, without
+  blocking the main loop on a slow receiver.
 */
+#if defined(ESP32)
+  #include "httpstls.h"
+#endif
+#ifdef ESP32
+#include "lwip/sockets.h"
+#include <errno.h>
+static WiFiServer tls_server(0);  // HTTPS: same client slots, same request path
+static uint8_t tls_listening = 0;
+static uint8_t tls_paused = 0;   // connections wait in the backlog while a new certificate is loaded
+#define WEB_TLS_STEP_BUDGET_MS 20  // after a handshake step this long no other one in the same webserver_loop() pass
+static uint16_t webserver_tls_read(struct webserver_t *client, uint8_t *buf, uint16_t size);
+static void webserver_tls_accept(void);
+// One fixed staging buffer for each possible client (no per-request malloc/free).
+static const uint16_t WEB_TX_CAPACITY = MTU_SIZE + 64;
+static const uint16_t WEB_TX_FLUSH_LIMIT = 1500;
+static const uint32_t WEB_TX_STALL_TIMEOUT_MS = 5000;
+static uint8_t web_tx_pool[WEBSERVER_MAX_CLIENTS][WEB_TX_CAPACITY];
+static uint8_t web_tx_busy[WEBSERVER_MAX_CLIENTS] = {0};
+
+typedef enum {
+  WEB_TX_DONE = 0,
+  WEB_TX_PENDING = 1,
+  WEB_TX_FAILED = -1
+} web_tx_status_t;
+
+static web_tx_status_t web_tx_fail(struct webserver_t *client) {
+  client->tx_failed = 1;
+  client->step = WEBSERVER_CLIENT_CLOSE;
+  client->tx_used = 0;
+  return WEB_TX_FAILED;
+}
+
+static int8_t web_tx_acquire(struct webserver_t *client) {
+  if(client->tx_data != NULL) {
+    return 0;
+  }
+  for(uint8_t i=0;i<WEBSERVER_MAX_CLIENTS;i++) {
+    if(web_tx_busy[i] == 0) {
+      web_tx_busy[i] = 1;
+      client->tx_data = web_tx_pool[i];
+      client->tx_used = 0;
+      client->tx_last_progress = millis();
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static void web_tx_release(struct webserver_t *client) {
+  if(client->tx_data == NULL) {
+    return;
+  }
+  for(uint8_t i=0;i<WEBSERVER_MAX_CLIENTS;i++) {
+    if(client->tx_data == &web_tx_pool[i][0]) {
+      web_tx_busy[i] = 0;
+      break;
+    }
+  }
+  client->tx_data = NULL;
+  client->tx_used = 0;
+}
+
+static int32_t web_tx_enqueue(struct webserver_t *client, const uint8_t *buf, uint16_t len) {
+  if(len == 0) {
+    return 0;
+  }
+  if(web_tx_acquire(client) == -1) {
+    Serial.println("WEB TX buffer unavailable; closing client");
+    web_tx_fail(client);
+    return -1;
+  }
+  if(client->tx_used > WEB_TX_CAPACITY || len > WEB_TX_CAPACITY - client->tx_used) {
+    Serial.printf("WEB TX queue overflow queued=%u new=%u; closing client\n",
+      (unsigned int)client->tx_used, (unsigned int)len);
+    web_tx_fail(client);
+    return -1;
+  }
+  if(client->tx_used == 0) {
+    client->tx_last_progress = millis();
+  }
+  memcpy(client->tx_data + client->tx_used, buf, len);
+  client->tx_used += len;
+  return (int32_t)len;
+}
+
+/*
+ * Flush pending TX data.
+ * WEB_TX_DONE:    all data has been sent.
+ * WEB_TX_PENDING: more data remains; retry on next loop iteration.
+ * WEB_TX_FAILED:  transmission failed; client will be closed.
+ */
+static web_tx_status_t web_tx_flush(struct webserver_t *client) {
+  if(client->tx_used == 0) {
+    return WEB_TX_DONE;
+  }
+
+  if(client->tx_data == NULL || client->tx_used > WEB_TX_CAPACITY) {
+    Serial.println("WEB TX invalid buffer state; closing client");
+    return web_tx_fail(client);
+  }
+
+  if(client->client == NULL) {
+    Serial.println("WEB TX client unavailable; closing client");
+    return web_tx_fail(client);
+  }
+
+  int fd = client->client->fd();
+  if(fd < 0) {
+    Serial.println("WEB TX invalid socket; closing client");
+    return web_tx_fail(client);
+  }
+
+  uint16_t attempt = client->tx_used < WEB_TX_FLUSH_LIMIT ? client->tx_used : WEB_TX_FLUSH_LIMIT;
+  int n = 0;
+  if(client->tlsconn != NULL) {
+    n = httpstls_write(client->tlsconn, client->tx_data, attempt);
+    if(n == 0) {
+      n = -1;
+      errno = EAGAIN;  // the record is partly on its way: the same bytes again next time
+    } else if(n < 0) {
+      errno = EIO;
+    }
+  } else {
+    n = lwip_send(fd, client->tx_data, attempt, MSG_DONTWAIT);
+  }
+
+  if(n > 0) {
+    if((uint16_t)n > attempt) {
+      Serial.printf("WEB TX invalid send length=%d; closing client\n", n);
+      return web_tx_fail(client);
+    }
+
+    client->tx_used -= (uint16_t)n;
+
+    if(client->tx_used > 0) {
+      memmove(client->tx_data, client->tx_data + n, client->tx_used);
+    }
+
+    client->tx_last_progress = millis();
+
+    if(client->is_websocket == 0) {
+      client->lastseen = millis();
+    }
+  } else if(n < 0) {
+    // Save errno before doing anything that might overwrite it.
+    int err = errno;
+
+    if(err != EAGAIN && err != EWOULDBLOCK && err != EINTR && err != ENOMEM) {
+      Serial.printf("WEB TX socket error errno=%d; closing client\n", err);
+      return web_tx_fail(client);
+    }
+  } else {
+    // No progress is possible with pending data.
+    Serial.println("WEB TX socket returned zero; closing client");
+    return web_tx_fail(client);
+  }
+
+  if(client->tx_used == 0) {
+    return WEB_TX_DONE;
+  }
+
+  if((uint32_t)(millis() - client->tx_last_progress) > WEB_TX_STALL_TIMEOUT_MS) {
+    Serial.printf("WEB TX stalled for %lu ms remaining=%u; closing client\n",
+      (unsigned long)(millis() - client->tx_last_progress),
+      (unsigned int)client->tx_used);
+    return web_tx_fail(client);
+  }
+
+  return WEB_TX_PENDING;
+}
+#endif
+
 static int16_t safe_write(struct webserver_t *client, const uint8_t *buf, uint16_t len) {
 #if defined(ESP8266)
   uint32_t start = millis();
   while(client->client->availableForWrite() == 0) {
     if((unsigned long)(millis() - start) > 1000) {
-      // client is too slow, give up
       client->step = WEBSERVER_CLIENT_CLOSE;
       return -1;
     }
     yield();
   }
 #endif
-  return client->client->write(buf, len);
+#if defined(ESP32)
+  return web_tx_enqueue(client, buf, len);
+#else
+  const int16_t written = client->client->write(buf, len);
+  if (written != len) client->step = WEBSERVER_CLIENT_CLOSE;
+  return written;
+#endif
 }
 
 static int16_t safe_write_P(struct webserver_t *client, PGM_P buf, uint16_t len) {
@@ -100,14 +284,19 @@ static int16_t safe_write_P(struct webserver_t *client, PGM_P buf, uint16_t len)
   uint32_t start = millis();
   while(client->client->availableForWrite() == 0) {
     if((unsigned long)(millis() - start) > 1000) {
-      // client is too slow, give up
       client->step = WEBSERVER_CLIENT_CLOSE;
       return -1;
     }
     yield();
   }
 #endif
-  return client->client->write_P((char *)buf, len);
+#if defined(ESP32)
+  return web_tx_enqueue(client, (const uint8_t *)buf, len);
+#else
+  const int16_t written = client->client->write_P((char *)buf, len);
+  if (written != len) client->step = WEBSERVER_CLIENT_CLOSE;
+  return written;
+#endif
 }
 
 #if defined(ESP8266) || defined(ESP32)
@@ -199,7 +388,19 @@ static int webserver_parse_post(struct webserver_t *client, uint16_t size) {
      * & delimiter
      */
 
-    unsigned char *ptr1 = (unsigned char *)memchr(&client->buffer[pos+1], '&', size-(pos+1));
+    /*
+     * An argument never continues past the end of its line. Without
+     * this limit, the arguments of a request line were searched in
+     * everything that was already buffered, so a '&' in a header or
+     * in the body of a small POST was taken as the end of a GET
+     * argument and the headers in between were thrown away.
+     */
+    uint16_t end = size;
+    if(ptrD != NULL && posD > pos) {
+      end = posD;
+    }
+
+    unsigned char *ptr1 = (unsigned char *)memchr(&client->buffer[pos+1], '&', end-(pos+1));
     if(ptr1 != NULL) {
       uint16_t pos1 = ptr1-client->buffer;
 
@@ -410,7 +611,7 @@ static int webserver_parse_post(struct webserver_t *client, uint16_t size) {
         args.name = &client->buffer[0];
         if(d == ' ') {
           args.value = &client->buffer[pos+1];
-          args.len = size - (pos + 1);
+          args.len = pos1 - (pos + 1); // the value ends at pos1, not at the end of the buffer
           if(pos3 > -1) {
             args.len = pos3 - 1;
           }
@@ -540,288 +741,418 @@ static int webserver_parse_post(struct webserver_t *client, uint16_t size) {
   return 0;
 }
 
-int8_t http_parse_request(struct webserver_t *client, uint8_t **buf, uint16_t *len) {
-  uint16_t hasread = MIN(WEBSERVER_BUFFER_SIZE-client->ptr, *len);
-  uint16_t lastptr = 0xFFFF, lastlen = 0xFFFF;
-  uint8_t lastsubstep = 0xFF;
-  while((*len > 0) || (strnstr(client->buffer, "\r\n\r\n", client->ptr) != NULL)) {
-    /*
-     * A malformed request can leave the parser without any
-     * way to progress while the loop condition stays true
-     * (e.g. a complete request still in the buffer). Bail
-     * out instead of spinning forever and blocking the
-     * main loop.
-     */
-    if(client->ptr == lastptr && *len == lastlen && client->substep == lastsubstep) {
+/*
+ * Request line and headers.
+ *
+ * They are read byte by byte, so a request may be split anywhere over
+ * the TCP reads. What the callback needs to decide about the request
+ * (the path, the query and a few headers) is kept in a small buffer on
+ * the heap (struct webserver_reqbuf_t), each value with its own limit.
+ * Nothing of the request is given to the callback before all headers
+ * are in; then it gets one WEBSERVER_CLIENT_REQUEST event and only after
+ * it accepted that are the query arguments, the body or a websocket
+ * upgrade handled.
+ */
+
+/*
+ * Values kept in the request buffer: the public headers first (same
+ * index as WEBSERVER_HEADER_x), then the ones only the webserver uses.
+ */
+enum {
+  REQ_FIELD_CONTENT_LENGTH = WEBSERVER_HEADER_COUNT,
+  REQ_FIELD_UPGRADE,
+  REQ_FIELD_WS_KEY,
+  REQ_FIELD_WS_VERSION,
+  REQ_FIELD_PATH,
+  REQ_FIELD_QUERY,
+  REQ_FIELD_COUNT
+};
+
+static const uint16_t req_field_max[REQ_FIELD_COUNT] = {
+  WEBSERVER_MAX_HOST,
+  WEBSERVER_MAX_ORIGIN,
+  WEBSERVER_MAX_COOKIE,
+  WEBSERVER_MAX_AUTHORIZATION,
+  WEBSERVER_MAX_CONTENT_TYPE,
+  WEBSERVER_MAX_SEC_FETCH_SITE,
+  12,  // Content-Length
+  32,  // Upgrade
+  32,  // Sec-WebSocket-Key (24 characters)
+  8,   // Sec-WebSocket-Version
+  WEBSERVER_MAX_PATH,
+  WEBSERVER_MAX_QUERY
+};
+
+struct webserver_reqbuf_t {
+  uint16_t cap;                    // bytes allocated for the values (after this struct)
+  uint16_t len;                    // bytes in use
+  uint16_t hbytes;                 // bytes of the request line and headers so far
+  uint16_t truncated;              // bit per field: value was cut
+  uint16_t off[REQ_FIELD_COUNT];   // offset + 1 of the value, 0: not sent
+  int8_t cur;                      // field the current value goes to, -1: none
+};
+
+#define REQ_BUF_STEP 128
+
+static char *reqbuf_data(struct webserver_reqbuf_t *rb) {
+  return (char *)(rb + 1);
+}
+
+static void reqbuf_free(struct webserver_t *client) {
+  if(client->req != NULL) {
+    free(client->req);
+    client->req = NULL;
+  }
+}
+
+static int8_t reqbuf_init(struct webserver_t *client) {
+  reqbuf_free(client);
+  client->req = (struct webserver_reqbuf_t *)malloc(sizeof(struct webserver_reqbuf_t) + REQ_BUF_STEP);
+  if(client->req == NULL) {
+    return -1;
+  }
+  memset(client->req, 0, sizeof(struct webserver_reqbuf_t));
+  client->req->cap = REQ_BUF_STEP;
+  client->req->cur = -1;
+  return 0;
+}
+
+static int8_t reqbuf_put(struct webserver_t *client, char c) {
+  struct webserver_reqbuf_t *rb = client->req;
+  if(rb->len >= rb->cap) {
+    struct webserver_reqbuf_t *n = (struct webserver_reqbuf_t *)realloc(rb, sizeof(struct webserver_reqbuf_t) + rb->cap + REQ_BUF_STEP);
+    if(n == NULL) {
       return -1;
     }
-    lastptr = client->ptr;
-    lastlen = *len;
-    lastsubstep = client->substep;
+    n->cap += REQ_BUF_STEP;
+    client->req = rb = n;
+  }
+  reqbuf_data(rb)[rb->len++] = c;
+  return 0;
+}
 
-    hasread = MIN(WEBSERVER_BUFFER_SIZE-client->ptr, (*len));
-    memcpy(&client->buffer[client->ptr], &(*buf)[0], hasread);
+static int8_t reqbuf_start(struct webserver_t *client, uint8_t field) {
+  client->req->off[field] = client->req->len + 1;
+  client->req->cur = field;
+  return 0;
+}
 
-    client->ptr += hasread;
-    memmove(&(*buf)[0], &(*buf)[hasread], (*len)-hasread);
+/*
+ * Add a byte to the current value: 0 stored, 1 the value is full (the
+ * byte is not stored), -1 out of memory.
+ */
+static int8_t reqbuf_add(struct webserver_t *client, char c) {
+  struct webserver_reqbuf_t *rb = client->req;
+  if(rb->cur < 0) {
+    return 0;
+  }
+  if((uint16_t)(rb->len - (rb->off[(uint8_t)rb->cur] - 1)) >= req_field_max[(uint8_t)rb->cur]) {
+    rb->truncated |= (1 << rb->cur);
+    return 1;
+  }
+  return reqbuf_put(client, c);
+}
 
-    *len -= hasread;
+static int8_t reqbuf_end(struct webserver_t *client) {
+  struct webserver_reqbuf_t *rb = client->req;
+  if(rb->cur < 0) {
+    return 0;
+  }
+  uint16_t start = rb->off[(uint8_t)rb->cur] - 1;
+  char *d = reqbuf_data(rb);
+  while(rb->len > start && (d[rb->len-1] == ' ' || d[rb->len-1] == '\t')) {
+    rb->len--;
+  }
+  rb->cur = -1;
+  return reqbuf_put(client, '\0');
+}
 
-    /*
-     * Request method
-     */
-    if(client->substep == 0) {
-      if(memcmp_P(client->buffer, PSTR("GET "), 4) == 0) {
-        client->method = 0;
-        if(client->callback != NULL) {
-          client->step = WEBSERVER_CLIENT_REQUEST_METHOD;
-          if(client->callback != NULL) {
-            if(client->callback(client, (void *)"GET") == -1) {
-              client->step = WEBSERVER_CLIENT_CLOSE;
-              return -1;
-            }
+static char *reqbuf_get(struct webserver_reqbuf_t *rb, uint8_t field) {
+  if(rb == NULL || rb->off[field] == 0) {
+    return NULL;
+  }
+  return &reqbuf_data(rb)[rb->off[field] - 1];
+}
+
+static int8_t req_header_field(const char *name) {
+  if(strcasecmp_P(name, PSTR("Host")) == 0) {
+    return WEBSERVER_HEADER_HOST;
+  } else if(strcasecmp_P(name, PSTR("Origin")) == 0) {
+    return WEBSERVER_HEADER_ORIGIN;
+  } else if(strcasecmp_P(name, PSTR("Cookie")) == 0) {
+    return WEBSERVER_HEADER_COOKIE;
+  } else if(strcasecmp_P(name, PSTR("Authorization")) == 0) {
+    return WEBSERVER_HEADER_AUTHORIZATION;
+  } else if(strcasecmp_P(name, PSTR("Content-Type")) == 0) {
+    return WEBSERVER_HEADER_CONTENT_TYPE;
+  } else if(strcasecmp_P(name, PSTR("Sec-Fetch-Site")) == 0) {
+    return WEBSERVER_HEADER_SEC_FETCH_SITE;
+  } else if(strcasecmp_P(name, PSTR("Content-Length")) == 0) {
+    return REQ_FIELD_CONTENT_LENGTH;
+  } else if(strcasecmp_P(name, PSTR("Upgrade")) == 0) {
+    return REQ_FIELD_UPGRADE;
+  } else if(strcasecmp_P(name, PSTR("Sec-WebSocket-Key")) == 0) {
+    return REQ_FIELD_WS_KEY;
+  } else if(strcasecmp_P(name, PSTR("Sec-WebSocket-Version")) == 0) {
+    return REQ_FIELD_WS_VERSION;
+  }
+  return -1;
+}
+
+/*
+ * States of the request parser (client->substep while the step is
+ * WEBSERVER_CLIENT_READ_HEADER).
+ */
+enum {
+  REQ_METHOD = 0,
+  REQ_PATH,
+  REQ_QUERY,
+  REQ_VERSION,
+  REQ_HEADER_NAME,
+  REQ_HEADER_SPACE,
+  REQ_HEADER_VALUE,
+  REQ_HEADER_END,  // '\r' of the empty line seen
+  REQ_DONE
+};
+
+#define REQ_NAME_MAX 32 // longer header names are none of the ones that are kept
+
+/*
+ * Returns the number of bytes used from buf (the rest is the start of the
+ * body or of the websocket data) or -1 for a request that is not valid or
+ * too large. client->substep is REQ_DONE when all headers are in.
+ */
+static int32_t http_parse_request(struct webserver_t *client, const uint8_t *buf, uint16_t len) {
+  uint16_t i = 0;
+
+  if(client->req == NULL) {
+    if(reqbuf_init(client) == -1) {
+      return -1;
+    }
+    client->substep = REQ_METHOD;
+    client->ptr = 0;
+  }
+
+  for(i=0;i<len && client->substep != REQ_DONE;i++) {
+    char c = (char)buf[i];
+
+    if(++client->req->hbytes > WEBSERVER_MAX_HEADER_SIZE) {
+      return -1;
+    }
+
+    switch(client->substep) {
+      case REQ_METHOD: {
+        if(c == ' ') {
+          client->buffer[client->ptr] = 0;
+          if(strcmp_P((char *)client->buffer, PSTR("GET")) == 0) {
+            client->method = WEBSERVER_METHOD_GET;
+          } else if(strcmp_P((char *)client->buffer, PSTR("POST")) == 0) {
+            client->method = WEBSERVER_METHOD_POST;
+          } else {
+            return -1;
           }
-          client->step = WEBSERVER_CLIENT_READ_HEADER;
+          client->ptr = 0;
+          reqbuf_start(client, REQ_FIELD_PATH);
+          client->substep = REQ_PATH;
+        } else if(c < 'A' || c > 'Z' || client->ptr >= 7) {
+          /*
+           * Unsupported request method (HEAD, OPTIONS, binary
+           * probes from network scanners, etc.)
+           */
+          return -1;
+        } else {
+          client->buffer[client->ptr++] = c;
         }
-        memmove(&client->buffer[0], &client->buffer[4], client->ptr-4);
-        client->ptr -= 4;
-        client->substep = 1;
-      }
-      if(memcmp_P(client->buffer, PSTR("POST "), 5) == 0) {
-        client->method = 1;
-        client->reqtype = 0;
-        client->step = WEBSERVER_CLIENT_REQUEST_METHOD;
-        if(client->callback != NULL) {
-          if(client->callback(client, (void *)"POST") == -1) {
-            client->step = WEBSERVER_CLIENT_CLOSE;
+      } break;
+      case REQ_PATH:
+      case REQ_QUERY: {
+        if(c == ' ' || (c == '?' && client->substep == REQ_PATH)) {
+          if(client->req->len == client->req->off[REQ_FIELD_PATH] - 1) {
+            return -1; // empty path
+          }
+          if(reqbuf_end(client) == -1) {
+            return -1;
+          }
+          if(c == '?') {
+            reqbuf_start(client, REQ_FIELD_QUERY);
+            client->substep = REQ_QUERY;
+          } else {
+            client->substep = REQ_VERSION;
+          }
+        } else if(c == '\r' || c == '\n' || c == '\0') {
+          return -1;
+        } else if(reqbuf_add(client, c) != 0) {
+          return -1; // URI too long (or out of memory): never cut a path or a query
+        }
+      } break;
+      case REQ_VERSION: {
+        if(c == '\n') {
+          client->buffer[client->ptr] = 0;
+          if(client->ptr > 0 && client->buffer[client->ptr-1] == '\r') {
+            client->buffer[--client->ptr] = 0;
+          }
+          if(strncmp_P((char *)client->buffer, PSTR("HTTP/1."), 7) != 0) {
+            return -1;
+          }
+          client->ptr = 0;
+          client->substep = REQ_HEADER_NAME;
+        } else if(client->ptr >= 15) {
+          return -1;
+        } else {
+          client->buffer[client->ptr++] = c;
+        }
+      } break;
+      case REQ_HEADER_NAME: {
+        if(c == ':') {
+          int8_t field = -1;
+          if(client->ptr > 0 && client->ptr < REQ_NAME_MAX) {
+            client->buffer[client->ptr] = 0;
+            field = req_header_field((char *)client->buffer);
+          }
+          if(field >= 0 && client->req->off[field] != 0) {
+            if(field == REQ_FIELD_CONTENT_LENGTH) {
+              return -1; // two lengths: which one is right?
+            }
+            field = -1; // only the first of a header is used
+          }
+          if(field >= 0) {
+            reqbuf_start(client, field);
+          }
+          client->ptr = 0;
+          client->substep = REQ_HEADER_SPACE;
+        } else if(client->ptr == 0 && c == '\r') {
+          client->substep = REQ_HEADER_END;
+        } else if(client->ptr == 0 && c == '\n') {
+          client->substep = REQ_DONE;
+        } else if(c == '\r' || c == '\n') {
+          return -1; // header line without a ':'
+        } else {
+          if(client->ptr < REQ_NAME_MAX) {
+            client->buffer[client->ptr] = c;
+          }
+          if(client->ptr < 0xFFFF) {
+            client->ptr++;
+          }
+        }
+      } break;
+      case REQ_HEADER_SPACE:
+      case REQ_HEADER_VALUE: {
+        if(c == '\n') {
+          if(reqbuf_end(client) == -1) {
+            return -1;
+          }
+          client->substep = REQ_HEADER_NAME;
+        } else if(c == '\r') {
+          // the '\n' follows
+        } else if(client->substep == REQ_HEADER_SPACE && (c == ' ' || c == '\t')) {
+          // leading white space
+        } else {
+          client->substep = REQ_HEADER_VALUE;
+          if(reqbuf_add(client, c) == -1) {
             return -1;
           }
         }
-        client->step = WEBSERVER_CLIENT_READ_HEADER;
-        memmove(&client->buffer[0], &client->buffer[5], client->ptr-5);
-        client->ptr -= 5;
-        client->substep = 1;
-      }
-      if(client->substep == 0) {
-        /*
-         * Unsupported request method (HEAD, OPTIONS, binary
-         * probes from network scanners, etc.)
-         */
-        if(client->ptr >= 5 || memchr(client->buffer, '\n', client->ptr) != NULL) {
+      } break;
+      case REQ_HEADER_END: {
+        if(c != '\n') {
           return -1;
         }
-        return 1;
-      }
-    }
-      /*
-       * Request URI
-       */
-    if(client->substep == 1) {
-      unsigned char *ptr1 = (unsigned char *)memchr(client->buffer, '?', client->ptr);
-      unsigned char *ptr2 = (unsigned char *)memchr(client->buffer, ' ', client->ptr);
-      if(ptr2 == NULL || (ptr1 != NULL && ptr2 > ptr1)) {
-        if(ptr1 == NULL) {
-          if(client->ptr == WEBSERVER_BUFFER_SIZE) {
-            // Request URI two long
-            return -1;
-          } else {
-            return 1;
-          }
-        } else {
-          uint16_t pos = ptr1-client->buffer;
-          client->buffer[pos] = 0;
-          client->substep = 2;
-          client->step = WEBSERVER_CLIENT_REQUEST_URI;
-          if(client->callback != NULL) {
-            if(client->callback(client, client->buffer) == -1) {
-              client->step = WEBSERVER_CLIENT_CLOSE;
-              return -1;
-            }
-          }
-          memmove(&client->buffer[0], &client->buffer[pos+1], client->ptr-(pos+1));
-          client->ptr -= (pos+1);
-        }
-      } else {
-        uint16_t pos = ptr2-client->buffer;
-        client->buffer[pos] = 0;
-        client->substep = 2;
-        client->step = WEBSERVER_CLIENT_REQUEST_URI;
-        if(client->callback != NULL) {
-          if(client->callback(client, client->buffer) == -1) {
-            client->step = WEBSERVER_CLIENT_CLOSE;
-            return -1;
-          }
-        }
-        client->buffer[pos] = ' ';
-        memmove(&client->buffer[0], &client->buffer[pos], client->ptr-(pos));
-        client->ptr -= pos;
-      }
-    }
-      /*
-       * Parse GET/POST
-       */	
-    if(client->substep == 2) {
-      client->step = WEBSERVER_CLIENT_ARGS;
-      int ret = webserver_parse_post(client, client->ptr);
-      client->step = WEBSERVER_CLIENT_READ_HEADER;
-
-      if(ret == -1) {
-        return -1; /*LCOV_EXCL_LINE*/
-      }
-
-      if(ret == 1) {
-        continue;
-      }
-
-      if(client->ptr >= 4) {
-        if(memcmp_P(client->buffer, PSTR(" HTTP/1."), 8) == 0) {
-          client->substep = 3;
-        } else {
-          continue;
-        }
-      }
-    }
-      /*
-       * Cleanup request from buffer
-       */	
-    if(client->substep == 3) {
-      uint16_t i = 0;
-      while(i < client->ptr-2) {
-        if(memcmp_P(&client->buffer[i], PSTR("\r\n"), 2) == 0) {
-          memmove(&client->buffer[0], &client->buffer[i+2], client->ptr-(i+2));
-          client->ptr -= (i + 2);
-          client->substep = 4;
-          break;
-        }
-        i++;
-      }
-    }
-      /*
-       * Get headers
-       */	
-    if(client->substep == 4) {
-      unsigned char *ptrEnd = (unsigned char *)strnstr(client->buffer, "\r\n\r\n", client->ptr);
-      uint16_t posEnd = client->ptr;
-      if(ptrEnd != NULL) {
-        posEnd = (ptrEnd-client->buffer) + 4;
-      } 
-      unsigned char *ptr = (unsigned char *)memchr(client->buffer, ':', posEnd);
-
-      while(ptr != NULL) {
-        struct arguments_t args;
-        uint16_t i = ptr-client->buffer, x = 0;
-        client->buffer[i] = 0;
-        args.name = &client->buffer[0];
-        args.value = NULL;
-        x = i;
-        i++;
-        /*
-         * Make sure we can at least compare
-         * the double \r\n\r\n at the end
-         * of the header
-         */
-        while(i <= client->ptr-4) {
-          if(memcmp_P(&client->buffer[i], PSTR("\r\n"), 2) == 0 ||
-             (client->ptr == WEBSERVER_BUFFER_SIZE && i == WEBSERVER_BUFFER_SIZE-4)) {
-            while(client->buffer[x+1] == ' ') {
-              x++;
-            }
-            args.value = &client->buffer[x+1];
-            args.len = (i-x)-1;
-            if((client->ptr == WEBSERVER_BUFFER_SIZE && i == WEBSERVER_BUFFER_SIZE-4)) {
-              args.len += 2;
-            }
-
-            if(memcmp_P(args.name, PSTR("Content-Length"), 14) == 0) {
-              char tmp[args.len+1];
-              memset(&tmp, 0, args.len+1);
-              memcpy(tmp, &client->buffer[x+1], args.len);
-              client->totallen = atoi(tmp);
-            }
-            if(memcmp_P(args.name, PSTR("Sec-WebSocket-Version"), 21) == 0) {
-              client->is_websocket = 1;
-            }
-            if(memcmp_P(args.name, PSTR("Sec-WebSocket-Key"), 17) == 0) {
-              char tmp[args.len+1];
-              memset(&tmp, 0, args.len+1);
-              memcpy(tmp, &client->buffer[x+1], args.len);
-              if((client->data.websockkey = strdup(tmp)) == NULL) {
-#if defined(ESP8266) || defined(ESP32)
-                loggingSerial.printf("Out of memory %s:#%d\n", __FUNCTION__, __LINE__);
-                ESP.restart();
-                exit(-1);
-#endif
-              }
-            }
-            if(memcmp_P(args.name, PSTR("Content-Type"), 12) == 0) {
-              if(strncasestr(&client->buffer[x+1], "multipart/form-data", client->ptr-(x+1)) != NULL) {
-                client->reqtype = 1;
-                char tmp[args.len+1];
-                memset(&tmp, 0, args.len+1);
-                memcpy(tmp, &client->buffer[x+1], args.len);
-                {
-                  char *ptr = strstr(tmp, "boundary=");
-                  uint8_t pos = (ptr-tmp)+strlen("boundary=");
-                  memmove(&tmp[0], &tmp[pos], args.len-pos);
-                  tmp[args.len-pos] = 0;
-                  if((client->data.boundary = strdup(tmp)) == NULL) {
-#if defined(ESP8266) || defined(ESP32)
-                    loggingSerial.printf("Out of memory %s:#%d\n", __FUNCTION__, __LINE__);
-                    ESP.restart();
-                    exit(-1);
-#endif
-                  }
-                }
-              }
-            }
-            client->step = WEBSERVER_CLIENT_HEADER;
-            if(client->callback != NULL) {
-              if(client->callback(client, &args) == -1) {
-                client->step = WEBSERVER_CLIENT_CLOSE;
-                return -1;
-              }
-            }
-            client->step = WEBSERVER_CLIENT_READ_HEADER;
-
-            client->buffer[i] = 0;
-            if((client->ptr == WEBSERVER_BUFFER_SIZE && i == WEBSERVER_BUFFER_SIZE-4)) {
-              memmove(&client->buffer[x], &client->buffer[i+2], client->ptr-(i+2));
-              client->buffer[x-1] = ':';
-              client->ptr -= (i + 2 - x);
-              posEnd -= (i + 2 - x);
-            } else {
-              memmove(&client->buffer[0], &client->buffer[i+2], client->ptr-(i+2));
-              client->ptr -= (i + 2);
-              posEnd -= (i + 2);
-            }
-            break;
-          }
-          i++;
-        }
-        if(args.value == NULL) {
-          client->buffer[x] = ':';
-          break;
-        }
-        ptr = (unsigned char *)memchr(client->buffer, ':', posEnd);
-      }
-
-      if(client->ptr >= 2 && memcmp_P(client->buffer, PSTR("\r\n"), 2) == 0) {
-        memmove(&client->buffer[0], &client->buffer[2], client->ptr-2);
-        client->ptr -= 2;
-        client->readlen = 0;
-        if(client->ptr == 0 && *len > 0) {
-          client->substep = 5;
-          continue;
-        }
-        return 0;
-      }
-    }
-    if(client->substep == 5) {
-      return 0;
+        client->substep = REQ_DONE;
+      } break;
     }
   }
 
-  return 1;
+  return i;
+}
+
+/*
+ * The query arguments, given to the callback after it accepted the
+ * request. Like before: '+' is a space, %xx is decoded, the name and the
+ * value are terminated with a 0, a name without '=' has value NULL.
+ */
+static int8_t http_parse_query(struct webserver_t *client, char *query) {
+  char *p = query;
+  while(p != NULL && *p != '\0') {
+    char *end = strchr(p, '&');
+    char *next = NULL;
+    if(end != NULL) {
+      next = end + 1;
+    } else {
+      end = p + strlen(p);
+    }
+    if(end > p) {
+      struct arguments_t args;
+      char *eq = (char *)memchr(p, '=', end - p);
+      uint16_t nlen = (eq != NULL) ? (eq - p) : (end - p);
+      int16_t n = urldecode((unsigned char *)p, nlen, (unsigned char *)p, nlen + 1, 1);
+      args.name = (unsigned char *)p;
+      args.value = NULL;
+      args.len = 0;
+      if(n < 0) {
+        return -1;
+      }
+      if(eq != NULL) {
+        uint16_t vlen = end - (eq + 1);
+        int16_t v = urldecode((unsigned char *)(eq + 1), vlen, (unsigned char *)(eq + 1), vlen + 1, 1);
+        if(v < 0) {
+          return -1;
+        }
+        args.value = (unsigned char *)(eq + 1);
+        args.len = v;
+      }
+      if(client->callback != NULL) {
+        if(client->callback(client, &args) == -1) {
+          return -1;
+        }
+      }
+    }
+    p = next;
+  }
+  return 0;
+}
+
+/*
+ * "multipart/form-data; boundary=xyz" -> client->data.boundary =
+ * "\r\n--xyz". -1 when there is no valid boundary.
+ */
+static int8_t http_multipart_boundary(struct webserver_t *client, const char *ctype) {
+  const char *p = ctype;
+  const char *b = NULL;
+  while((p = strchr(p, '=')) != NULL) {
+    if(p - ctype >= 8 && strncasecmp_P(p - 8, PSTR("boundary"), 8) == 0) {
+      b = p + 1;
+      break;
+    }
+    p++;
+  }
+  if(b == NULL) {
+    return -1;
+  }
+  uint8_t quoted = (*b == '"');
+  if(quoted) {
+    b++;
+  }
+  uint16_t blen = 0;
+  while(b[blen] != '\0' && ((quoted && b[blen] != '"') || (!quoted && b[blen] != ';' && b[blen] != ' ' && b[blen] != '\t'))) {
+    if(b[blen] == '\r' || b[blen] == '\n') {
+      return -1;
+    }
+    blen++;
+  }
+  if(blen == 0 || blen > 70 || (quoted && b[blen] != '"')) {
+    return -1;
+  }
+  if(client->data.boundary != NULL) {
+    free(client->data.boundary);
+  }
+  if((client->data.boundary = (char *)malloc(blen + 5)) == NULL) {
+    return -1;
+  }
+  memcpy(client->data.boundary, "\r\n--", 4);
+  memcpy(&client->data.boundary[4], b, blen);
+  client->data.boundary[blen + 4] = 0;
+  client->mpdlen = blen + 4;
+  return 0;
 }
 
 int http_parse_body(struct webserver_t *client, char *buf, uint16_t len) {
@@ -871,378 +1202,212 @@ char *strnstr(const char *haystack, const char *needle, size_t len) {
   return NULL;
 }
 
-int http_parse_multipart_body(struct webserver_t *client, unsigned char *buf, uint16_t len) {
-  uint16_t hasread = MIN(WEBSERVER_BUFFER_SIZE-client->ptr, len);
-  uint16_t rpos = 0, loop = 1;
-  while((rpos < len) || ((loop == 1) && (client->ptr > 0))) {
-    hasread = MIN(WEBSERVER_BUFFER_SIZE-client->ptr, len-rpos);
-    memcpy(&client->buffer[client->ptr], &buf[rpos], hasread);
-    client->ptr += hasread;
-    rpos += hasread;
-    loop = 1;
-	
-    while(loop) {
-      switch(client->substep) {
-        // Boundary
-        case 0: {
-          unsigned char *ptr = strnstr(client->buffer, client->data.boundary, client->ptr);
-          unsigned char *ptr1 = (unsigned char *)memchr(client->buffer, '=', client->ptr);
-          uint16_t pos1 = 0;
-          if(ptr1 != NULL) {
-            pos1 = (ptr1-client->buffer)+1;
-          }
-          if(ptr != NULL) {
-            uint16_t pos = (ptr-client->buffer)+strlen(client->data.boundary);
-			
-            if(pos1 > pos) {
-              /*
-               * Only compensate for the key at the
-               * beginning of the buffer when at least
-               * one key has been encountered. This is
-               * the case when the boundary is placed
-               * after the key.
-               */
-              pos1 = 0;
-            }
-            if(pos+1 <= client->ptr) {
-              if(client->buffer[pos] == '\r' && client->buffer[pos+1] == '\n') {
-                memmove(&client->buffer[0], &client->buffer[pos+1], client->ptr-(pos+1));
-                client->ptr = client->ptr-(pos+1);
-                client->buffer[client->ptr] = 0;
-                /*
-                 * pos1 is NOT subtracted here: it exists to compensate for a
-                 * field-name marker that case 4/case 6's short-name path used
-                 * to (wrongly) credit into readlen. Now that those cases
-                 * correctly exclude the marker themselves (see their fixes
-                 * below), there is nothing left here to compensate for -
-                 * subtracting pos1 would double-discount it and desync
-                 * readlen from the true byte count whenever a field's name
-                 * marker is still retained in the buffer.
-                 */
-                client->readlen += (pos+1);
-                client->substep = 1;
-              }
-            }
-            if(pos+3 <= client->ptr) {
-              if(client->buffer[pos] == '-' && client->buffer[pos+1] == '-' &&
-                client->buffer[pos+2] == '\r' && client->buffer[pos+3] == '\n') {
-                // See the comment on the mid-boundary branch above for why
-                // pos1 is not subtracted here either.
-                client->readlen += (pos+4);
-                if(client->readlen == client->totallen) {
-                  if(client->data.boundary != NULL) {
-                    free(client->data.boundary);
-                    client->data.boundary = NULL;
-                  }
-                  return 0;
-                } else {
-                  // Error, content length does not match end boundary
-                  return -1;
-                }
-              }
-            }
-          } else if(client->ptr < WEBSERVER_BUFFER_SIZE) {
-            loop = 0;
-          } else {
-            /*
-             * We encountered the boundary delimiter, but
-             * it wasn't the one from this request, but it
-             * was part of the POST body
-             */
-            client->substep = 8;
-          }
-          if(client->substep == 0) {
-            loop = 0;
-          }
-        } break;
-        // Content-Disposition
-        case 1: {
-          unsigned char *ptr = strncasestr(client->buffer, "content-disposition:", client->ptr);
-          if(ptr != NULL) {
-            uint16_t pos = (ptr-client->buffer)+strlen("content-disposition:");
-            while(client->buffer[pos++] == ' ');
-            pos--;
-            memmove(&client->buffer[0], &client->buffer[pos], client->ptr-(pos));
-            client->ptr = client->ptr-(pos);
-            client->buffer[client->ptr] = 0;
-            client->readlen += pos;
-            client->substep = 2;
-          } else {
-            loop = 0;
-          }
-        } break;
-        // End of content-disposition
-        case 2: {
-          unsigned char *ptr = (unsigned char *)memchr(client->buffer, ';', client->ptr);
-          if(ptr != NULL) {
-            uint16_t pos = (ptr-client->buffer+1);
-            while(client->buffer[pos++] == ' ');
-            pos--;
-            memmove(&client->buffer[0], &client->buffer[pos], client->ptr-(pos));
-            client->ptr -= pos;
-            client->buffer[client->ptr] = 0;
-            client->readlen += pos;
-            client->substep = 3;
-          } else {
-            loop = 0;
-          }
-        } break;
-        // Name
-        case 3: {
-          unsigned char *ptr = strncasestr(client->buffer, "name=\"", client->ptr);
-          if(ptr != NULL) {
-            uint16_t pos = (ptr-client->buffer)+strlen("name=\"");
-            memmove(&client->buffer[0], &client->buffer[pos], client->ptr-(pos));
-            client->ptr = client->ptr-(pos);
-            client->readlen += pos;
-            client->substep = 6;
-          } else {
-            loop = 0;
-          }
-        } break;
-        // Filename etc.
-        case 4: {
-          unsigned char *ptr = strncasestr(client->buffer, "\";", client->ptr);
-          if(ptr != NULL) {
-            uint16_t pos = (ptr-client->buffer);
-            // First try to find \r\n\r\n (end of all headers)
-            unsigned char *ptr1 = strnstr(&client->buffer[pos], "\r\n\r\n", client->ptr-pos);
-            if(ptr1 != NULL) {
-                // Double CRLF found - skip directly to data
-                client->buffer[pos++] = '=';
-                uint16_t pos1 = (ptr1-client->buffer);
-                uint16_t newlen = client->ptr-((pos1+4)-pos);
-                /*
-                 * The memmove must only copy the bytes that are actually
-                 * still valid past pos1+4 (client->ptr-(pos1+4)), NOT
-                 * newlen: newlen is the FINAL ptr value, which already
-                 * accounts for the retained "name=" marker staying at
-                 * buffer position 0..pos-1. Using newlen as the copy length
-                 * here reads past the end of the valid buffered content
-                 * into stale memory.
-                 */
-                memmove(&client->buffer[pos], &client->buffer[pos1+4], client->ptr-(pos1+4));
-                client->ptr = newlen;
-                /*
-                 * Only credit the actual header bytes consumed
-                 * ((pos1+4)-pos), not the full (pos1+4): the retained
-                 * "name=" marker (0..pos-1) stays physically in the buffer
-                 * for case 7/8 to use later, so it must NOT also be counted
-                 * as "consumed" here - doing so double-counts those bytes
-                 * (once via readlen here, again via ptr since they're still
-                 * buffered).
-                 */
-                client->readlen += ((pos1+4)-pos);
-                client->substep = 7;  // skip case 5 entirely, go straight to data
-            } else {
-                // Single \r\n - if more headers follow, go to case 5
-                ptr1 = strncasestr(&client->buffer[pos], "\r\n", client->ptr-pos);
-                if(ptr1 != NULL) {
-                    if (((ptr1-client->buffer) + 4) >= client->ptr) {
-                        //CRLF on end of buffer, wait for two more to make sure we are not at end of header
-					    loop = 0;
-                    } else {
-                        client->buffer[pos++] = '=';
-                        uint16_t pos1 = (ptr1-client->buffer);
-                        uint16_t newlen = client->ptr-((pos1+2)-pos);
-                        // See the double-CRLF branch above for why the
-                        // memmove length and readlen credit both exclude pos.
-                        memmove(&client->buffer[pos], &client->buffer[pos1+2], client->ptr-(pos1+2));
-                        client->ptr = newlen;
-                       client->readlen += ((pos1+2)-pos);
-                        client->substep = 5;
-                    }
-                  } else {
-                      client->substep = 6;
-                }
-            }
-          } else {
-            loop = 0;
-          }
-        } break;
-        // Content-type
-        case 5: {
-          unsigned char *ptr = (unsigned char *)memchr(client->buffer, '=', client->ptr);
-          if(ptr != NULL) {
-            uint16_t pos = (ptr-client->buffer)+1;
+/*
+ * multipart/form-data body.
+ *
+ * Read as a stream, so a body may be split anywhere over the TCP reads,
+ * also inside a boundary. The delimiter is "\r\n--<boundary>" (the first
+ * one, at the start of the body, has no "\r\n" before it). Because '\r'
+ * is only the first byte of the delimiter, a partial match that fails can
+ * simply be given back as data.
+ *
+ * client->buffer holds the name of the current field (0 terminated,
+ * client->mpname long) followed by the part headers or the value being
+ * collected. A value is given to the callback (WEBSERVER_CLIENT_ARGS)
+ * when the buffer is full and when the field ends, so a value that fits
+ * in the buffer always arrives in one piece. A callback that returns -1
+ * closes the connection.
+ */
+enum {
+  MP_PREAMBLE = 0,  // before the first delimiter
+  MP_AFTER_DELIM,   // a delimiter: "\r\n" (a part follows) or "--" (the end)
+  MP_AFTER_DASH,    // "-" after a delimiter
+  MP_AFTER_CR,      // "\r" after a delimiter
+  MP_HEADERS,       // the headers of a part
+  MP_DATA,          // the value of a part
+  MP_EPILOGUE       // after the last delimiter
+};
 
-            if((client->ptr - pos) >= 4) {
-              unsigned char *ptr1 = strnstr(&client->buffer[pos], "\r\n\r\n", client->ptr-pos);
-              if(ptr1 != NULL) {
-                uint16_t pos1 = (ptr1-client->buffer)+4;
-                uint16_t newlen = client->ptr-(pos1-pos);
-                memmove(&client->buffer[pos], &client->buffer[pos1], newlen);
-                client->ptr = newlen;
-                client->readlen += (pos1-pos);
-                client->substep = 7;
-              } else {
-                loop = 0;
-              }
-            } else {
-              loop = 0;
-            }
-          } else {
-            loop = 0;
-          }
-        } break;
-        // Name
-        case 6: {
-          if(client->ptr >= 2) {
-            unsigned char *ptr = strnstr(client->buffer, "\";", client->ptr);
-            if(ptr != NULL) {
-              unsigned char *ptr1 = strnstr(client->buffer, "\r\n", client->ptr);
-              if(ptr1 != NULL) {
-                client->substep = 4;
-              } else {
-                loop = 0;
-              }
-            } else {
-              unsigned char *ptr1 = strnstr(client->buffer, "\"\r\n", client->ptr);
-              if(ptr1 != NULL) {
-                uint16_t pos = (ptr1-client->buffer);
-                /*
-                 * Since we're increasing the pos
-                 * right after, check for 5 positions
-                 */
-                if((client->ptr - pos) >= 5) {
-                  client->buffer[pos++] = '=';;
-                  unsigned char *ptr2 = strnstr(&client->buffer[pos], "\r\n\r\n", client->ptr-pos);
-                  if(ptr2 != NULL) {
-                    uint16_t pos1 = (ptr2-client->buffer)+4;
+#define MP_NAME_MAX 32
 
-                    // See the case 4 double-CRLF branch for why pos is
-                    // excluded from the readlen credit here too.
-                    memmove(&client->buffer[pos], &client->buffer[pos1], client->ptr-pos1);
-                    client->ptr -= (pos1-pos);
-                    client->readlen += (pos1-pos);
-                    client->substep = 7;
-                  } else {
-                    loop = 0;
-                  }
-                } else {
-                  loop = 0;
-                }
-              } else {
-                loop = 0;
-              }
-            }
-          } else {
-            loop = 0;
-          }
-        } break;
-        // Value
-        case 8:
-        case 7: {
-          unsigned char *ptr = strnstr(client->buffer, "\r\n--", client->ptr);
-          if(ptr != NULL && client->substep != 8) {
-            uint16_t pos = (ptr-client->buffer);
-            ptr = (unsigned char *)memchr(client->buffer, '=', client->ptr);
-            uint16_t vlen = 0;
+static int8_t mp_emit(struct webserver_t *client) {
+  struct arguments_t args;
+  uint16_t base = client->mpname + 1;
 
-            if(ptr != NULL) {
-              vlen = (ptr-client->buffer);
-            } else {
-              // error
-              return -1; /*LCOV_EXCL_LINE*/
-            }
-			struct arguments_t args;
-			client->buffer[vlen] = 0;
+  client->buffer[client->ptr] = 0;
+  args.name = &client->buffer[0];
+  args.value = &client->buffer[base];
+  args.len = client->ptr - base;
+  client->ptr = base;
+  client->mpemitted = 1;
 
-			args.name = &client->buffer[0];
-			args.value = &client->buffer[vlen+1];
-			args.len = pos-(vlen+1);
-
-			if(client->callback != NULL) {
-				uint8_t ret = client->callback(client, &args);
-				if(ret == -1) {
-					return -1;
-				}
-			}
-
-			client->buffer[vlen] = '=';
-			memmove(&client->buffer[vlen+1], &client->buffer[pos], client->ptr-pos);
-			client->readlen += (pos-(vlen+1));
-			client->ptr -= (pos-(vlen+1));
-            client->substep = 0;
-		  } else if(client->ptr == WEBSERVER_BUFFER_SIZE) {
-            uint8_t ending = 0;
-            uint8_t dash = 0;
-            /*
-             * Double check that the CR / LN don't belong
-             * to the boundary delimiter.
-             */
-            if(strncmp((char *)&client->buffer[client->ptr-1], "\r", 1) == 0) {
-              ending = 1;
-            }
-            if(strncmp((char *)&client->buffer[client->ptr-2], "\r\n", 2) == 0) {
-              ending = 2;
-            }
-            if(strncmp((char *)&client->buffer[client->ptr-3], "\r\n\r", 3) == 0) {
-              ending = 3;
-            }
-            if(strncmp((char *)&client->buffer[client->ptr-3], "\r\n-", 3) == 0) {
-              ending = 3;
-              dash = 1;
-            }
-            if(client->substep == 8) {
-              client->substep = 7;
-            }
-            unsigned char *ptr = (unsigned char *)memchr(client->buffer, '=', client->ptr);
-            if(ptr != NULL) {
-              uint16_t pos = (ptr-client->buffer);
-
-              struct arguments_t args;
-              client->buffer[pos] = 0;
-
-              args.name = &client->buffer[0];
-              args.value = &client->buffer[pos+1];
-              args.len = (client->ptr-ending)-(pos+1);
-		  
-              if(client->callback != NULL) {
-                uint8_t ret = client->callback(client, &args);
-                if(ret == -1) {
-                  return -1;
-                }
-              }
-              client->buffer[pos] = '=';
-              if(ending == 1) {
-                client->buffer[pos+1] = '\r';
-              }
-              if(ending == 2) {
-                client->buffer[pos+1] = '\r';
-                client->buffer[pos+2] = '\n';
-              }
-              if(ending == 3) {
-                client->buffer[pos+1] = '\r';
-                client->buffer[pos+2] = '\n';
-                client->buffer[pos+3] = '\r';
-                if(dash) {
-                  client->buffer[pos+3] = '-';
-                }
-              }
-              client->readlen += ((client->ptr-(pos+1))-ending);
-              client->ptr = pos+1+ending;
-              loop = 0;
-            } else {
-              // error
-              return -1;
-            }
-          } else {
-			loop = 0;
-		  }
-        } break;
-      }
+  if(client->callback != NULL) {
+    if(client->callback(client, &args) == -1) {
+      return -1;
     }
   }
-
   return 0;
 }
 
-#ifdef __linux__
-static char *code_to_text(uint16_t code) {
-#else
+static int8_t mp_data(struct webserver_t *client, const uint8_t *buf, uint16_t len) {
+  while(len > 0) {
+    if(client->ptr >= WEBSERVER_BUFFER_SIZE - 1) {
+      if(mp_emit(client) == -1) {
+        return -1;
+      }
+    }
+    uint16_t n = MIN(len, (WEBSERVER_BUFFER_SIZE - 1) - client->ptr);
+    memcpy(&client->buffer[client->ptr], buf, n);
+    client->ptr += n;
+    buf += n;
+    len -= n;
+  }
+  return 0;
+}
+
+/*
+ * The name of a part from its Content-Disposition header line (0
+ * terminated, at client->buffer[client->mpname + 1]).
+ */
+static void mp_header_line(struct webserver_t *client) {
+  char *line = (char *)&client->buffer[client->mpname + 1];
+  if(strncasecmp_P(line, PSTR("Content-Disposition:"), 20) != 0) {
+    return;
+  }
+  char *p = line + 20;
+  while((p = strchr(p, '=')) != NULL) {
+    if(p - line >= 25 && strncasecmp_P(p - 4, PSTR("name"), 4) == 0 &&
+      (p[-5] == ';' || p[-5] == ' ' || p[-5] == '\t') && p[1] == '"') {
+      char *name = p + 2;
+      char *end = strchr(name, '"');
+      uint16_t n = (end == NULL) ? 0 : (end - name);
+      if(n > MP_NAME_MAX) {
+        n = 0; // too long for a field this firmware knows
+      }
+      memmove(&client->buffer[0], name, n);
+      client->buffer[n] = 0;
+      client->mpname = n;
+      return;
+    }
+    p++;
+  }
+}
+
+int http_parse_multipart_body(struct webserver_t *client, unsigned char *buf, uint16_t len) {
+  const char *delim = client->data.boundary;
+  uint16_t i = 0;
+
+  if(delim == NULL) {
+    return -1;
+  }
+  if(client->totallen - client->readlen < len) {
+    len = client->totallen - client->readlen; // bytes after the body are not used
+  }
+
+  while(i < len) {
+    switch(client->substep) {
+      case MP_PREAMBLE:
+      case MP_DATA: {
+        /*
+         * The value up to the next '\r' that is not part of a match
+         * can be copied at once.
+         */
+        if(client->mpmatch == 0 && client->substep == MP_DATA && buf[i] != '\r') {
+          uint8_t *cr = (uint8_t *)memchr(&buf[i], '\r', len - i);
+          uint16_t n = (cr == NULL) ? (len - i) : (cr - &buf[i]);
+          if(mp_data(client, &buf[i], n) == -1) {
+            return -1;
+          }
+          i += n;
+          break;
+        }
+        char c = (char)buf[i++];
+        if(c == delim[client->mpmatch]) {
+          if(++client->mpmatch == client->mpdlen) {
+            client->mpmatch = 0;
+            if(client->substep == MP_DATA && (client->ptr > client->mpname + 1 || client->mpemitted == 0)) {
+              if(mp_emit(client) == -1) {
+                return -1;
+              }
+            }
+            client->substep = MP_AFTER_DELIM;
+          }
+          break;
+        }
+        if(client->mpmatch > 0) {
+          if(client->substep == MP_DATA) {
+            if(mp_data(client, (const uint8_t *)delim, client->mpmatch) == -1) {
+              return -1;
+            }
+          }
+          client->mpmatch = 0;
+        }
+        if(c == delim[0]) {
+          client->mpmatch = 1;
+        } else if(client->substep == MP_DATA) {
+          if(mp_data(client, (const uint8_t *)&c, 1) == -1) {
+            return -1;
+          }
+        }
+      } break;
+      case MP_AFTER_DELIM: {
+        char c = (char)buf[i++];
+        if(c == '-') {
+          client->substep = MP_AFTER_DASH;
+        } else if(c == '\r') {
+          client->substep = MP_AFTER_CR;
+        } else if(c != ' ' && c != '\t') {
+          return -1;
+        }
+      } break;
+      case MP_AFTER_DASH: {
+        if(buf[i++] != '-') {
+          return -1;
+        }
+        client->substep = MP_EPILOGUE;
+      } break;
+      case MP_AFTER_CR: {
+        if(buf[i++] != '\n') {
+          return -1;
+        }
+        client->mpname = 0;
+        client->buffer[0] = 0;
+        client->ptr = 1;
+        client->mpemitted = 0;
+        client->substep = MP_HEADERS;
+      } break;
+      case MP_HEADERS: {
+        char c = (char)buf[i++];
+        if(c == '\n') {
+          if(client->ptr > client->mpname + 1 && client->buffer[client->ptr-1] == '\r') {
+            client->ptr--;
+          }
+          if(client->ptr == client->mpname + 1) {
+            client->mpmatch = 0;
+            client->substep = MP_DATA; // empty line: the value follows
+          } else {
+            client->buffer[client->ptr] = 0;
+            mp_header_line(client);
+            client->ptr = client->mpname + 1;
+          }
+        } else if(client->ptr < WEBSERVER_BUFFER_SIZE - 1) {
+          client->buffer[client->ptr++] = c; // a longer line is cut, the name comes first
+        }
+      } break;
+      case MP_EPILOGUE: {
+        i = len;
+      } break;
+    }
+  }
+
+  client->readlen += len;
+  if(client->readlen == client->totallen && client->substep != MP_EPILOGUE) {
+    return -1; // the body ended before the last delimiter
+  }
+  return 0;
+}
+
 static PGM_P code_to_text(uint16_t code) {
-#endif
   /* LCOV_EXCL_START*/
   switch(code) {
     case 100:
@@ -1317,6 +1482,8 @@ static PGM_P code_to_text(uint16_t code) {
       return PSTR("Range not satisfiable");
     case 417:
       return PSTR("Expectation Failed");
+    case 429:
+      return PSTR("Too Many Requests");
     case 500:
       return PSTR("Internal Server Error");
     case 501:
@@ -1459,6 +1626,9 @@ static int webserver_process_send(struct webserver_t *client) {
           client->lastseen = millis();
         }
       }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
     }
     i += n;
   }
@@ -1495,6 +1665,9 @@ static int webserver_process_send(struct webserver_t *client) {
                   client->lastseen = millis();
                 }
               }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
             }
           } else {
             if(client->async == 1) {
@@ -1505,6 +1678,9 @@ static int webserver_process_send(struct webserver_t *client) {
                   client->lastseen = millis();
                 }
               }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
             }
           }
           i += tmp->size;
@@ -1549,6 +1725,9 @@ static int webserver_process_send(struct webserver_t *client) {
                   client->lastseen = millis();
                 }
               }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
             }
           } else {
             if(client->async == 1) {
@@ -1559,6 +1738,9 @@ static int webserver_process_send(struct webserver_t *client) {
                   client->lastseen = millis();
                 }
               }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
             }
           }
           i += client->totallen;
@@ -1583,6 +1765,9 @@ static int webserver_process_send(struct webserver_t *client) {
                 client->lastseen = millis();
               }
             }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
           }
         } else {
           if(client->async == 1) {
@@ -1593,6 +1778,9 @@ static int webserver_process_send(struct webserver_t *client) {
                 client->lastseen = millis();
               }
             }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
           }
         }
         i += (tmp->size-client->ptr);
@@ -1636,6 +1824,9 @@ static int webserver_process_send(struct webserver_t *client) {
                 client->lastseen = millis();
               }
             }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
           }
         } else {
           if(client->async == 1) {
@@ -1646,6 +1837,9 @@ static int webserver_process_send(struct webserver_t *client) {
                 client->lastseen = millis();
               }
             }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
           }
         }
         client->ptr += client->totallen;
@@ -1661,6 +1855,9 @@ static int webserver_process_send(struct webserver_t *client) {
             client->lastseen = millis();
           }
         }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
       }
     }
   }
@@ -1707,6 +1904,9 @@ static int webserver_process_send(struct webserver_t *client) {
                 client->lastseen = millis();
               }
             }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
           }
           i += 5;
         } else {
@@ -1718,6 +1918,9 @@ static int webserver_process_send(struct webserver_t *client) {
                 client->lastseen = millis();
               }
             }
+      // Abort this response immediately if the TCP client stalled or accepted
+      // only part of the requested bytes. Cleanup happens on the next pass.
+      if(client->step == WEBSERVER_CLIENT_CLOSE) return -1;
           }
           i += 4;
         }
@@ -1999,13 +2202,102 @@ static void send_websocket_handshake(struct webserver_t *client, const char *key
   }
 }
 
+/*
+ * A websocket message waits in the send list until webserver_loop() sends it, one packet
+ * for each pass. A burst of messages (all topics changing at once) is queued in a single
+ * pass, and on the ESP8266 that used up the heap. So there a client that already has
+ * WEBSOCKET_MAX_QUEUE nodes waiting (two for each message) is first sent what it has, and
+ * only misses the new message when that doesn't make room in time.
+ */
+#ifndef WEBSOCKET_FLUSH_TIMEOUT
+  #define WEBSOCKET_FLUSH_TIMEOUT 250 // ms to wait for a slow client before a message is dropped
+#endif
+#ifndef WEBSOCKET_FLUSH_HOLDOFF
+  #define WEBSOCKET_FLUSH_HOLDOFF 2000 // ms without waiting again after a client was too slow
+#endif
+#ifndef WEBSOCKET_FLUSH_SIZE
+  #define WEBSOCKET_FLUSH_SIZE 256 // bytes for each send, small because this runs deep in the stack
+#endif
+#ifndef WEBSOCKET_MAX_QUEUE
+  #if defined(ESP8266)
+    #define WEBSOCKET_MAX_QUEUE 40
+  #else
+    #define WEBSOCKET_MAX_QUEUE 0 // no limit, the ESP32 has the memory for a full burst
+  #endif
+#endif
+
+static uint8_t websocket_queue_full(struct webserver_t *client) {
+#if WEBSERVER_MAX_SENDLIST == 0 && WEBSOCKET_MAX_QUEUE > 0
+  uint16_t nr = 0;
+  struct sendlist_t *tmp = client->sendlist;
+  while(tmp != NULL) {
+    if(++nr >= WEBSOCKET_MAX_QUEUE) {
+      return 1;
+    }
+    tmp = tmp->next;
+  }
+#endif
+  return 0;
+}
+
+/*
+ * Send the waiting messages of one websocket client, like the sending step of
+ * webserver_loop() does, until there is room again. Returns 0 when there is room.
+ * Not while the webserver is busy with a request itself (an upload for example).
+ */
+static uint8_t websocket_make_room(struct webserver_t *client) {
+  if(websocket_queue_full(client) == 0) {
+    return 0;
+  }
+#if defined(ESP8266) && WEBSERVER_MAX_SENDLIST == 0
+  /*
+   * A client that didn't take its messages in time is not waited for again for
+   * a while, or a burst of messages would wait the timeout for each of them.
+   */
+  static unsigned long gaveup = 0;
+  static uint8_t hasgivenup = 0;
+  if(hasgivenup == 1 && (unsigned long)(millis() - gaveup) >= WEBSOCKET_FLUSH_HOLDOFF) {
+    hasgivenup = 0;
+  }
+  if(webserver_busy == 0 && hasgivenup == 0 && client->async == 0) {
+    uint32_t start = millis();
+    while(websocket_queue_full(client) == 1 && client->step == WEBSERVER_CLIENT_SENDING) {
+      if((unsigned long)(millis() - start) >= WEBSOCKET_FLUSH_TIMEOUT) {
+        hasgivenup = 1;
+        gaveup = millis();
+        break;
+      }
+      /*
+       * Only send what the TCP stack takes right now, so the write
+       * itself never waits and the timeout above is the real limit.
+       */
+      if(client->client->availableForWrite() < WEBSOCKET_FLUSH_SIZE) {
+        yield();
+        continue;
+      }
+      client->totallen = WEBSOCKET_FLUSH_SIZE;
+      if(webserver_process_send(client) <= 0) {
+        break;
+      }
+    }
+  }
+#endif
+  return websocket_queue_full(client);
+}
+
 void websocket_write_P(struct webserver_t *client, PGM_P data, uint16_t data_len) {
+  if(websocket_make_room(client)) {
+    return;
+  }
   websocket_send_header(client, WEBSOCKET_OPCODE_TEXT, data_len);
   webserver_send_content_P(client, data, data_len);
   client->step = WEBSERVER_CLIENT_SENDING;
 }
 
 void websocket_write(struct webserver_t *client, char *data, uint16_t data_len) {
+  if(websocket_make_room(client)) {
+    return;
+  }
   websocket_send_header(client, WEBSOCKET_OPCODE_TEXT, data_len);
   webserver_send_content(client, (char *)data, data_len);
   client->step = WEBSERVER_CLIENT_SENDING;
@@ -2071,25 +2363,42 @@ int websocket_read(struct webserver_t *client, unsigned char *buf, ssize_t buf_l
   int opcode = buf[0] & 0xF;
 
   memset(&mask, '\0', 4);
+  /*
+   * Only a whole frame in this read is used: one that is cut off (or
+   * claims to be longer than what was read) is dropped, so nothing is
+   * read or written past the received data.
+   */
+  if(buf_len < 6) {
+    return -1;
+  }
   packet_length = ((unsigned char)buf[1]) & 0x7F;
 
   index_first_mask = 2;
   if(packet_length == 126) {
+    if(buf_len < 8) {
+      return -1;
+    }
     index_first_mask = 4;
     packet_length = buf[2] << 8 | buf[3];
   } else if(packet_length == 127) {
-    if(buf[2] != 0 || buf[3] != 0 || buf[4] != 0 || buf[5] != 0) {
+    if(buf_len < 14 || buf[2] != 0 || buf[3] != 0 || buf[4] != 0 || buf[5] != 0) {
       /*
        * Packet length too big
        */
       return -1;
     } else {
-      packet_length = buf[6] << 24 | buf[7] << 16 | buf[8] << 8 | buf[9];
+      packet_length = (uint32_t)buf[6] << 24 | (uint32_t)buf[7] << 16 | (uint32_t)buf[8] << 8 | buf[9];
     }
     index_first_mask = 10;
   }
+  if(buf_len < index_first_mask + 4) {
+    return -1;
+  }
   memcpy(mask, &buf[index_first_mask], 4);
   index_first_data_byte = index_first_mask + 4;
+  if(packet_length > (uint32_t)(buf_len - index_first_data_byte)) {
+    return -1;
+  }
 
   for(i = index_first_data_byte, j = 0; i < buf_len && i < packet_length + index_first_data_byte; i++, j++) {
     buf[j] = buf[i] ^ mask[j % 4];
@@ -2126,45 +2435,131 @@ int websocket_read(struct webserver_t *client, unsigned char *buf, ssize_t buf_l
   return packet_length;
 }
 
+/*
+ * All headers are in: give the request to the callback and, when it is
+ * accepted, give it the query arguments and prepare the body or the
+ * websocket upgrade. -1 closes the connection.
+ */
+static int8_t webserver_request_ready(struct webserver_t *client) {
+  struct webserver_reqbuf_t *rb = client->req;
+  struct webserver_request_t request;
+  uint8_t i = 0;
+  int8_t ret = WEBSERVER_ACCEPT;
+
+  memset(&request, 0, sizeof(request));
+  request.method = client->method;
+  request.tls = client->tls;
+  request.path = reqbuf_get(rb, REQ_FIELD_PATH);
+  request.query = reqbuf_get(rb, REQ_FIELD_QUERY);
+  if(request.query == NULL) {
+    request.query = "";
+  }
+  for(i=0;i<WEBSERVER_HEADER_COUNT;i++) {
+    request.header[i] = reqbuf_get(rb, i);
+  }
+  request.truncated = rb->truncated & ((1 << WEBSERVER_HEADER_COUNT) - 1);
+
+  const char *clen = reqbuf_get(rb, REQ_FIELD_CONTENT_LENGTH);
+  if(clen != NULL) {
+    uint32_t n = 0;
+    uint8_t digits = 0;
+    for(;*clen != '\0';clen++, digits++) {
+      if(*clen < '0' || *clen > '9' || digits >= 9) {
+        return -1;
+      }
+      n = (n * 10) + (*clen - '0');
+    }
+    if(digits == 0) {
+      return -1;
+    }
+    request.content_length = n;
+  }
+
+  /*
+   * A websocket upgrade only on its own path, and only a complete one.
+   */
+  const char *upgrade = reqbuf_get(rb, REQ_FIELD_UPGRADE);
+  const char *key = reqbuf_get(rb, REQ_FIELD_WS_KEY);
+  const char *version = reqbuf_get(rb, REQ_FIELD_WS_VERSION);
+  if(client->method == WEBSERVER_METHOD_GET && strcmp_P(request.path, PSTR(WEBSERVER_WEBSOCKET_PATH)) == 0 &&
+     upgrade != NULL && strcasecmp_P(upgrade, PSTR("websocket")) == 0 &&
+     key != NULL && strlen(key) == 24 && version != NULL && strcmp_P(version, PSTR("13")) == 0) {
+    request.websocket = 1;
+  }
+
+  client->totallen = (client->method == WEBSERVER_METHOD_POST) ? request.content_length : 0;
+  client->readlen = 0;
+  client->ptr = 0;
+  client->substep = 0;
+
+  if(client->callback != NULL) {
+    client->step = WEBSERVER_CLIENT_REQUEST;
+    ret = client->callback(client, &request);
+    if(ret == -1) {
+      return -1;
+    }
+  }
+
+  if(ret != WEBSERVER_ACCEPT) {
+    /*
+     * Rejected: no query arguments, no body processing and no upgrade.
+     * A body is read (and thrown away) before the answer is sent, so
+     * the client sees the answer and not a reset connection.
+     */
+    client->rejected = 1;
+    reqbuf_free(client);
+    client->step = (client->totallen > 0) ? WEBSERVER_CLIENT_ARGS : WEBSERVER_CLIENT_WRITE;
+    return 0;
+  }
+
+  client->step = WEBSERVER_CLIENT_ARGS;
+  if(http_parse_query(client, reqbuf_get(rb, REQ_FIELD_QUERY)) == -1) {
+    return -1;
+  }
+
+  if(request.websocket == 1) {
+    client->is_websocket = 1;
+    client->lastping = millis();
+    send_websocket_handshake(client, key);
+    reqbuf_free(client);
+    client->step = WEBSERVER_CLIENT_WEBSOCKET;
+    return 0;
+  }
+
+  if(client->method == WEBSERVER_METHOD_POST) {
+    const char *ctype = request.header[WEBSERVER_HEADER_CONTENT_TYPE];
+    client->reqtype = 0;
+    if(ctype != NULL && strncasecmp_P(ctype, PSTR("multipart/form-data"), 19) == 0) {
+      client->reqtype = 1;
+      if((request.truncated & (1 << WEBSERVER_HEADER_CONTENT_TYPE)) != 0 ||
+         http_multipart_boundary(client, ctype) == -1) {
+        return -1; // no (or a cut) boundary: the body can't be read
+      }
+      client->substep = MP_PREAMBLE;
+      client->mpmatch = 2; // the first delimiter has no "\r\n" before it
+    }
+  }
+  reqbuf_free(client);
+
+  client->step = (client->totallen > 0) ? WEBSERVER_CLIENT_ARGS : WEBSERVER_CLIENT_WRITE;
+  return 0;
+}
+
 uint8_t webserver_sync_receive(struct webserver_t *client, uint8_t *rbuffer, uint16_t size) {
   if(client->step == WEBSERVER_CLIENT_READ_HEADER) {
-    int8_t ret = http_parse_request(client, &rbuffer, &size);
+    int32_t ret = http_parse_request(client, rbuffer, size);
     if(ret == -1) {
       client->step = WEBSERVER_CLIENT_CLOSE;
       return 0;
     }
-    if(ret == 0) {
-      if(client->is_websocket == 1 && client->data.websockkey != NULL) {
-        client->is_websocket = 1;
-        client->lastping = millis();
-        send_websocket_handshake(client, (char *)client->data.websockkey);
-        free(client->data.websockkey);
-        client->data.websockkey = NULL;
-        client->step = WEBSERVER_CLIENT_WEBSOCKET;
-      }
-      if(client->method == 1) {
-         client->step = WEBSERVER_CLIENT_ARGS;
-         if(client->reqtype == 0) {
-          client->readlen = 0;
-          if(http_parse_body(client, (char *)rbuffer, size) == -1) {
-            client->step = WEBSERVER_CLIENT_CLOSE;
-          }
-        } else if(client->reqtype == 1) {
-          client->substep = 0;
-          if(http_parse_multipart_body(client, (unsigned char *)rbuffer, size) == -1) {
-            client->step = WEBSERVER_CLIENT_CLOSE;
-          }
-        }
-        if(client->readlen == client->totallen) {
-          client->step = WEBSERVER_CLIENT_WRITE;
-        }
-
-        if(client->step == WEBSERVER_CLIENT_ARGS) {
-          return 1;
-        }
-      } else if(client->step != WEBSERVER_CLIENT_WEBSOCKET) {
-        client->step = WEBSERVER_CLIENT_WRITE;
-      }
+    rbuffer += ret;
+    size -= ret;
+    if(client->substep != REQ_DONE) {
+      return 0;
+    }
+    if(webserver_request_ready(client) == -1) {
+      client->step = WEBSERVER_CLIENT_CLOSE;
+      return 0;
     }
   }
 
@@ -2173,18 +2568,35 @@ uint8_t webserver_sync_receive(struct webserver_t *client, uint8_t *rbuffer, uin
   }
 
   if(client->step == WEBSERVER_CLIENT_ARGS) {
-    if(client->reqtype == 0) {
-      if(http_parse_body(client, (char *)rbuffer, size) == -1) {
-        client->step = WEBSERVER_CLIENT_CLOSE;
-      }
-    } else if(client->reqtype == 1) {
-      if(http_parse_multipart_body(client, (unsigned char *)rbuffer, size) == -1) {
-        client->step = WEBSERVER_CLIENT_CLOSE;
+    if(client->totallen - client->readlen < size) {
+      size = client->totallen - client->readlen; // bytes after the body are not used
+    }
+    if(size > 0) {
+      if(client->rejected == 1) {
+        client->readlen += size;
+      } else if(client->reqtype == 0) {
+        if(http_parse_body(client, (char *)rbuffer, size) == -1) {
+          client->step = WEBSERVER_CLIENT_CLOSE;
+          return 0;
+        }
+      } else {
+        if(http_parse_multipart_body(client, (unsigned char *)rbuffer, size) == -1) {
+          client->step = WEBSERVER_CLIENT_CLOSE;
+          return 0;
+        }
       }
     }
 
-    if(client->readlen == client->totallen) {
+    if(client->readlen >= client->totallen) {
+      if(client->data.boundary != NULL) {
+        free(client->data.boundary);
+        client->data.boundary = NULL;
+      }
+      client->ptr = 0;
+      client->substep = 0;
       client->step = WEBSERVER_CLIENT_WRITE;
+    } else {
+      return 1;
     }
   }
 
@@ -2271,6 +2683,15 @@ err_t webserver_poll(void *arg, struct tcp_pcb *pcb) {
 #endif
 
 void webserver_reset_client(struct webserver_t *client) {
+#if defined(ESP32)
+  if(client->tlsconn != NULL) {
+    httpstls_conn_free(client->tlsconn);
+    client->tlsconn = NULL;
+  }
+  web_tx_release(client);
+  client->tx_last_progress = 0;
+  client->tx_failed = 0;
+#endif
 #if defined(ESP8266) || defined(ESP32)
   if(client->pcb != NULL) {
     tcp_close(client->pcb);
@@ -2297,6 +2718,7 @@ void webserver_reset_client(struct webserver_t *client) {
   client->lastping = 0;
   client->content = 0;
   client->is_websocket = 0;
+  client->tls = 0;
   client->userdata = NULL;
 
   struct sendlist_t *tmp = NULL;
@@ -2325,10 +2747,12 @@ void webserver_reset_client(struct webserver_t *client) {
     free(client->data.boundary);
     client->data.boundary = NULL;
   }
-  if(client->data.websockkey != NULL) {
-    free(client->data.websockkey);
-    client->data.websockkey = NULL;
-  }
+  reqbuf_free(client);
+  client->rejected = 0;
+  client->mpemitted = 0;
+  client->mpmatch = 0;
+  client->mpdlen = 0;
+  client->mpname = 0;
 
 #if WEBSERVER_MAX_SENDLIST == 0
   client->sendlist = NULL;
@@ -2364,9 +2788,27 @@ err_t webserver_client(void *arg, tcp_pcb *pcb, err_t err) {
 }
 #endif
 
+/*
+ * Let every other open connection be closed by webserver_loop() (with its
+ * WEBSERVER_CLIENT_CLOSE callback), for example after the web password
+ * changed: a request or websocket accepted before must not go on.
+ */
+void webserver_close_others(struct webserver_t *keep) {
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    if(&clients[i].data != keep && clients[i].data.step != 0) {
+      clients[i].data.step = WEBSERVER_CLIENT_CLOSE;
+    }
+  }
+}
+
 void webserver_loop(void) {
   uint16_t size = 0;
   uint8_t i = 0;
+
+  webserver_busy = 1;
+#if defined(ESP32)
+  unsigned long tls_spent = 0;  // ms of handshake steps in this pass
+#endif
 
   for(i=0;i<WEBSERVER_MAX_CLIENTS;i++) {
     /*
@@ -2386,6 +2828,28 @@ void webserver_loop(void) {
     if(clients[i].data.step == 0 || clients[i].data.async == 1) {
       continue;
     }
+
+#if defined(ESP32)
+    /*
+     * A previous staging failure must remain fatal even when callbacks
+     * have overwritten the client's step after an unsuccessful enqueue.
+     */
+    if(clients[i].data.tx_failed) {
+      clients[i].data.step = WEBSERVER_CLIENT_CLOSE;
+      clients[i].data.tx_used = 0;
+    }
+    /*
+     * Flush pending bytes before generating another HTTP sendlist batch.
+     * A CLOSE response must be drained before the client is stopped.
+     */
+    if(clients[i].data.tx_used > 0) {
+      web_tx_status_t flush_status = web_tx_flush(&clients[i].data);
+      if(flush_status != WEB_TX_DONE) {
+        continue;
+      }
+      // Once drained, only stage the next batch; do not send it here.
+    }
+#endif
 
     if(clients[i].data.is_websocket == 1) {
       if((unsigned long)(millis() - clients[i].data.lastping) > WEBSERVER_CLIENT_PING_INTERVAL) {
@@ -2407,6 +2871,29 @@ void webserver_loop(void) {
     }
     switch(clients[i].data.step) {
       case WEBSERVER_CLIENT_CONNECTING: {
+#if defined(ESP32)
+        if(clients[i].data.tlsconn != NULL) {
+          // HTTPS: the handshake first, one step at a time (a step can block loop() for tens of ms)
+          if(httpstls_conn_age(clients[i].data.tlsconn) > HTTPSTLS_HANDSHAKE_TIMEOUT_MS) {
+            clients[i].data.step = WEBSERVER_CLIENT_CLOSE;
+            break;
+          }
+          if(tls_spent < WEB_TLS_STEP_BUDGET_MS) {
+            unsigned long t = millis();
+            int r = httpstls_handshake(clients[i].data.tlsconn);
+            tls_spent += (unsigned long)(millis() - t) + 1;
+            if(r == HTTPSTLS_DONE) {
+              clients[i].data.step = WEBSERVER_CLIENT_READ_HEADER;
+              clients[i].data.lastseen = millis();
+              clients[i].data.ptr = 0;
+              memset(&clients[i].data.buffer, 0, WEBSERVER_BUFFER_SIZE);
+            } else if(r == HTTPSTLS_FAIL) {
+              clients[i].data.step = WEBSERVER_CLIENT_CLOSE;
+            }
+          }
+          break;
+        }
+#endif
         if(clients[i].data.client->available()) {
           clients[i].data.step = WEBSERVER_CLIENT_READ_HEADER;
         }
@@ -2416,13 +2903,20 @@ void webserver_loop(void) {
       case WEBSERVER_CLIENT_ARGS:
       case WEBSERVER_CLIENT_WEBSOCKET:
       case WEBSERVER_CLIENT_READ_HEADER: {
+#if defined(ESP32)
+        if(clients[i].data.tlsconn != NULL) {
+          size = webserver_tls_read(&clients[i].data, rbuffer, WEBSERVER_READ_SIZE);
+          if(size > 0) {
+            clients[i].data.lastseen = millis();
+            webserver_sync_receive(&clients[i].data, rbuffer, size);
+          }
+          break;
+        }
+#endif
         if(clients[i].data.client->connected() || clients[i].data.client->available()) {
           if(clients[i].data.client->available()) {
             uint8_t *p = (uint8_t *)rbuffer;
-            size = clients[i].data.client->read(
-              p,
-              WEBSERVER_READ_SIZE
-            );
+            size = clients[i].data.client->read(p, WEBSERVER_READ_SIZE);
           }
         } else if(!clients[i].data.client->connected()) {
           clients[i].data.step = WEBSERVER_CLIENT_CLOSE;
@@ -2470,6 +2964,12 @@ void webserver_loop(void) {
         if(clients[i].data.callback != NULL) {
           clients[i].data.callback(&clients[i].data, NULL);
         }
+#if defined(ESP32)
+        if(clients[i].data.tlsconn != NULL) {
+          httpstls_conn_free(clients[i].data.tlsconn);  // close_notify while the socket is still open
+          clients[i].data.tlsconn = NULL;
+        }
+#endif
 
         clients[i].data.client->stop();
         webserver_reset_client(&clients[i].data);
@@ -2502,7 +3002,124 @@ void webserver_loop(void) {
     }
   }
 #endif
+#if defined(ESP32)
+  if(tls_listening && !tls_paused && tls_server.hasClient()) {
+    webserver_tls_accept();
+  }
+#endif
+  webserver_busy = 0;
 }
+
+#if defined(ESP32)
+/* > 0: bytes; 0: nothing now; a closed or broken connection is set to WEBSERVER_CLIENT_CLOSE */
+static uint16_t webserver_tls_read(struct webserver_t *client, uint8_t *buf, uint16_t size) {
+  int n = httpstls_read(client->tlsconn, buf, size);
+  if(n < 0) {
+    client->step = WEBSERVER_CLIENT_CLOSE;
+    return 0;
+  }
+  return (uint16_t)n;
+}
+
+/* A new HTTPS connection: a free slot, the cap and the memory, else it is closed right away */
+static void webserver_tls_accept(void) {
+  WiFiClient c = tls_server.accept();
+  if(!c) {
+    return;
+  }
+  uint8_t slot = WEBSERVER_MAX_CLIENTS;
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    if(clients[i].data.client == NULL && clients[i].data.pcb == NULL) {
+      slot = i;
+      break;
+    }
+  }
+  if(slot == WEBSERVER_MAX_CLIENTS || httpstls_stats.active >= HTTPSTLS_MAX_CONN) {
+    httpstls_stats.refused_cap++;
+    c.stop();
+    return;
+  }
+  if(!webserver_tls_admit()) {
+    httpstls_stats.refused_memory++;
+    c.stop();
+    return;
+  }
+  struct webserver_t *client = &clients[slot].data;
+  webserver_reset_client(client);
+  client->client = new WiFiClient(c);
+  if(client->client == NULL) {
+    c.stop();
+    return;
+  }
+  client->tlsconn = httpstls_conn_new(client->client->fd());
+  if(client->tlsconn == NULL) {
+    httpstls_stats.refused_memory++;  // the record buffers did not fit
+    client->client->stop();
+    delete client->client;
+    client->client = NULL;
+    return;
+  }
+  client->tls = 1;
+  client->async = 0;
+  client->lastseen = millis();
+  client->step = WEBSERVER_CLIENT_CONNECTING;
+  client->client->setNoDelay(true);
+  loggingSerial.print("New HTTPS client: ");
+  loggingSerial.print(client->client->remoteIP());
+  loggingSerial.print(":");
+  loggingSerial.println(client->client->remotePort());
+}
+
+int8_t webserver_tls_start(int port) {
+  if(!httpstls_ready()) {
+    return -1;
+  }
+  if(!tls_listening) {
+    tls_server.begin(port);
+    tls_listening = 1;
+    loggingSerial.print("HTTPS webserver started at port: ");
+    loggingSerial.println(port);
+  }
+  return 0;
+}
+
+void webserver_tls_stop(void) {
+  if(tls_listening) {
+    tls_server.end();
+    tls_listening = 0;
+  }
+}
+
+bool webserver_tls_running(void) {
+  return tls_listening != 0;
+}
+
+void webserver_tls_pause(bool pause) {
+  tls_paused = pause ? 1 : 0;
+}
+
+void webserver_tls_close_all(void) {
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    struct webserver_t *c = &clients[i].data;
+    if(c->tlsconn != NULL && c->step != 0) {
+      c->step = WEBSERVER_CLIENT_CLOSE;
+      c->tx_used = 0;  // nothing more is sent
+    }
+  }
+}
+
+void webserver_tls_close_idle(void) {
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    struct webserver_t *c = &clients[i].data;
+    if(c->tlsconn == NULL || c->step == 0 || c->step == WEBSERVER_CLIENT_CLOSE || c->tx_used > 0) {
+      continue;
+    }
+    if(c->is_websocket || c->step == WEBSERVER_CLIENT_CONNECTING || (c->step == WEBSERVER_CLIENT_READ_HEADER && c->req == NULL)) {
+      c->step = WEBSERVER_CLIENT_CLOSE;  // the page reconnects (websocket) or the browser retries
+    }
+  }
+}
+#endif
 
 int8_t webserver_start(int port, webserver_cb_t *callback, uint8_t async) {
   uint8_t i = 0;

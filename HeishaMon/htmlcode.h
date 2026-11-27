@@ -95,6 +95,11 @@ body{
   text-decoration:none;
 }
 .topbar-logo span{color:var(--text-secondary);font-weight:400}
+.topbar-desc{
+  color:var(--text-secondary);font-size:14px;
+  padding-left:16px;border-left:1px solid var(--border);
+  max-width:40vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
 .hamburger{
   background:none;border:none;
   color:var(--text-secondary);
@@ -140,6 +145,7 @@ body{
 .sidemenu-nav a:hover{background:var(--bg-elevated);color:var(--text-primary)}
 .sidemenu-nav a.danger{color:var(--red)}
 .sidemenu-nav a.danger:hover{background:var(--red-glow)}
+.sidemenu-nav a[aria-current="page"]{color:var(--accent);background:var(--accent-glow)}
 .sidemenu-nav .nav-icon{width:16px;text-align:center;opacity:.7}
 .sidemenu-footer{
   padding:16px 20px;
@@ -351,6 +357,17 @@ input:disabled + .theme-slider-compact {
 .offset-edit:focus{outline:none;border-color:var(--border-focus);box-shadow:0 0 0 2px var(--accent-glow)}
 .tab-pane{display:none}
 .tab-pane.active{display:block}
+/* start page centered like the settings page; the console keeps the full width */
+#statusBar,nav.tabnav:not(#settings_tabs),.tab-pane:not(#Console){max-width:780px;margin-left:auto;margin-right:auto}
+/* heat pump values as two lines per topic: name and value, below topic and description */
+#Heatpump thead{display:none}
+#heishavalues tr{display:grid;grid-template-columns:1fr auto;column-gap:10px;row-gap:2px;padding:8px 16px;border-bottom:1px solid rgba(42,48,64,.4)}
+#heishavalues td{padding:0;border:0;font-size:13px}
+#heishavalues td:nth-child(1){grid-column:1;grid-row:2;font-size:10.5px;color:var(--text-muted)}
+#heishavalues td:nth-child(2){grid-column:1;grid-row:1}
+#heishavalues td:nth-child(3){grid-column:2;grid-row:1;text-align:right;font-weight:600}
+#heishavalues td:nth-child(4){grid-column:2;grid-row:2;text-align:right;font-size:10.5px;color:var(--text-muted)}
+#heishavalues td[colspan]{grid-column:1/-1;grid-row:1}
 .settings-grid{
   display:grid;
   gap:0;
@@ -391,6 +408,7 @@ input:disabled + .theme-slider-compact {
 .setting-input[type=password]{letter-spacing:2px}
 select.setting-input{appearance:auto}
 .setting-hint{font-size:11px;color:var(--text-muted);margin-left:8px}
+.setting-desc{grid-column:-2/-1;font-size:11px;color:var(--text-muted);margin-top:-10px;line-height:1.5}
 .setting-row .checkbox-wrap{display:flex;align-items:center;gap:8px}
 .checkbox-wrap input[type=checkbox]{width:17px;height:17px;accent-color:var(--accent);cursor:pointer}
 .radio-group{display:flex;gap:16px;flex-wrap:wrap}
@@ -516,6 +534,10 @@ progress::-webkit-progress-value{background:var(--accent);border-radius:3px;tran
 @media(max-width:600px){
   .setting-row{grid-template-columns:1fr;gap:4px}
   .setting-label{text-align:left}
+  /* settings with a checkbox: label and checkbox on one line, the hint below */
+  .setting-row:has(.checkbox-wrap){grid-template-columns:1fr auto;row-gap:2px}
+  .setting-row:has(.checkbox-wrap)>div{display:contents!important}
+  .setting-row:has(.checkbox-wrap) .setting-hint{grid-column:1/-1;margin:0!important}
   .tabnav{padding:10px 12px 0;gap:2px}
   .tabnav button{padding:9px 14px;font-size:13px}
   .main-content{padding:16px 12px 32px}
@@ -745,7 +767,18 @@ static const char webBodyStart[] FLASHPROG = R"====(
     </label>
   </div>
   
-  <nav class='sidemenu-nav' id='sideNav'></nav>
+  <nav class='sidemenu-nav' id='sideNav'>
+    <a href="/"><span class="nav-icon" aria-hidden="true">&#8962;</span> Home</a>
+    <a href="/firmware"><span class="nav-icon" aria-hidden="true">&#8679;</span> Firmware</a>
+    <a href="/reboot" onclick="return confirm('Reboot the device?')"><span class="nav-icon" aria-hidden="true">&#8635;</span> Reboot</a>
+    <a href="/rules"><span class="nav-icon" aria-hidden="true">&#8881;</span> Rules</a>
+    <a href="/settings"><span class="nav-icon" aria-hidden="true">&#9881;</span> Settings</a>
+)===="
+#ifdef ESP32
+R"====(    <a href="/modbus"><span class="nav-icon" aria-hidden="true">&#9432;</span> Modbus registers</a>
+)===="
+#endif
+R"====(  </nav>
   <div class='sidemenu-footer'>
     <a href='https://github.com/heishamon/HeishaMon' target='_blank'>GitHub</a>
   </div>
@@ -754,9 +787,25 @@ static const char webBodyStart[] FLASHPROG = R"====(
   <div class='topbar-left'>
     <button class='hamburger' onclick='toggleMenu()'>&#9776;</button>
     <a class='topbar-logo' href='/'>Heisha<span>Mon</span></a>
+)====";
+
+// second half, the optional description is injected between the two parts
+static const char webBodyStart2[] FLASHPROG = R"====(
   </div>
-  <div class='topbar-right'></div>
+  <div class='topbar-right'>)====";
+
+// end of the top bar; with the login on a "Log out" link goes in front of it
+static const char webBodyStartLogout[] FLASHPROG = "<a href='/logout' class='btn btn-ghost'>Log out</a>";
+static const char webBodyStart3[] FLASHPROG = R"====(</div>
 </header>
+)====";
+
+// start page while no web password is set
+static const char webBodyRootLoginOff[] FLASHPROG = R"====(
+<div class='firmware-warning' style='margin:16px 24px 0'>
+  <strong>No web password is set.</strong> Every device in your network can control this HeishaMon, change its settings and upload firmware,
+  and the first one to set a web password owns the login. <a href='/security'>Set a web password now</a> (Settings &rarr; System &rarr; Access &amp; security)
+</div>
 )====";
 
 static const char webFooter[] FLASHPROG = "</body></html>";
@@ -766,6 +815,15 @@ static const char webFooter[] FLASHPROG = "</body></html>";
 // ─────────────────────────────────────────────────────────────────────────────
 static const char menuJS[] FLASHPROG = R"====(
 <script>
+document.addEventListener('DOMContentLoaded', function(){
+  // /security (Access & security) belongs to the System tab of the settings
+  var here = window.location.pathname === '/security' ? '/settings' : window.location.pathname;
+  document.querySelectorAll('#sideNav a').forEach(function(link){
+    if (link.getAttribute('href') === here) {
+      link.setAttribute('aria-current', 'page');
+    }
+  });
+});
 function toggleMenu(){
   var m=document.getElementById('sideMenu');
   var o=document.getElementById('menuOverlay');
@@ -865,9 +923,9 @@ function attemptReconnect(){
 }
 function startWebsockets(){
   if(typeof MozWebSocket!='undefined'){
-    oWebsocket=new MozWebSocket('ws://'+location.host);
+    oWebsocket=new MozWebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/ws');
   } else if(typeof WebSocket!='undefined'){
-    oWebsocket=new WebSocket('ws://'+location.host+'/ws');
+    oWebsocket=new WebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/ws');
   }
   if(oWebsocket){
     oWebsocket.onopen=function(){bConnected=true;};
@@ -1322,24 +1380,8 @@ document.addEventListener('DOMContentLoaded', function() {
 // Side nav links for root page (injected via JS on load below)
 // We build the nav + status bar in one block, then the tab panes.
 
-// Side nav links and status bar for root page
+// Status bar for root page
 static const char webBodyRoot1[] FLASHPROG = R"====(
-<script>
-document.addEventListener('DOMContentLoaded',function(){
-  var nav=document.getElementById('sideNav');
-  nav.innerHTML=`
-<a href="/firmware"><span class="nav-icon">&#8679;</span> Firmware</a>
-<a href="/reboot" onclick="return confirm('Reboot the device?')"><span class="nav-icon">&#8635;</span> Reboot</a>
-<a href="/rules"><span class="nav-icon">&#8881;</span> Rules</a>
-<a href="/settings"><span class="nav-icon">&#9881;</span> Settings</a>
-)===="
-#ifdef ESP32
-R"====(<a href="/modbus"><span class="nav-icon">&#9432;</span> Modbus</a>
-)===="
-#endif
-R"====(`;
-});
-</script>
 <div class='main-content'>
 <div class='statusbar' id='statusBar'>
   <div class='status-chip'><span class='status-dot'></span><span class='chip-label'>WiFi</span><span class='chip-value' id='wifi'>—</span><span style='color:var(--text-muted);font-size:11px'>%</span></div>
@@ -1523,6 +1565,24 @@ function updateGPIORowVisibility(){
     row.style.display=loOn?'':'none';
   });
 }
+function openSettingsTab(name){
+  document.querySelectorAll('#settings_form .panel').forEach(function(p){
+    p.style.display=p.getAttribute('data-tab')==name?'':'none';
+  });
+  document.querySelectorAll('#settings_tabs button').forEach(function(b){
+    b.classList.toggle('active',b.getAttribute('data-tab')==name);
+  });
+  try{history.replaceState(null,'','#'+name);}catch(e){}
+}
+(function(){
+  // open the tab from the address, and the tab of a field the browser refuses on save
+  var name=location.hash.substring(1);
+  openSettingsTab(document.querySelector("#settings_tabs button[data-tab='"+name+"']")?name:'basic');
+  document.querySelector('#settings_form form').addEventListener('invalid',function(e){
+    var p=e.target.closest('.panel');
+    if(p)openSettingsTab(p.getAttribute('data-tab'));
+  },true);
+})();
 function changeMinWatt(port){
   var ppkwh=document.getElementById('s0_ppkwh_'+port).value;
   var interval=document.getElementById('s0_interval_'+port).value;
@@ -1563,33 +1623,39 @@ static const char caUploadJS[] PROGMEM = R"====(
 )====";
 #endif
 
-static const char webBodySettings1[] FLASHPROG = R"====(
-<script>
-document.addEventListener('DOMContentLoaded',function(){
-  var nav=document.getElementById('sideNav');
-  nav.innerHTML=`
-<a href="/"><span class="nav-icon">&#8634;</span> Home</a>
-<a href="/firmware"><span class="nav-icon">&#8679;</span> Firmware</a>
-<a href="/reboot" onclick="return confirm('Reboot the device?')"><span class="nav-icon">&#8635;</span> Reboot</a>
-<a href="/rules"><span class="nav-icon">&#8881;</span> Rules</a>
-`;
-});
-</script>
-)====";
-
 static const char settingsForm1[] FLASHPROG = R"====(
 <div class='main-content' style='max-width:780px;margin:0 auto'>
 <div id='loading_settings' class='loading-overlay'>
   <div class='spinner'></div> Loading settings…
 </div>
 <div id='settings_form' style='display:none'>
+  <nav class='tabnav' id='settings_tabs' style='padding:0 0 14px;background:none'>
+    <button type='button' data-tab='basic' onclick="openSettingsTab('basic')">Basic</button>
+    <button type='button' data-tab='heatpump' onclick="openSettingsTab('heatpump')">Heat pump</button>
+    <button type='button' data-tab='io' onclick="openSettingsTab('io')">Sensors &amp; GPIO</button>
+    <button type='button' data-tab='advanced' onclick="openSettingsTab('advanced')">Advanced</button>
+    <button type='button' data-tab='system' onclick="openSettingsTab('system')">System</button>
+  </nav>
   <form accept-charset='UTF-8' action='/savesettings' method='POST'>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='system' id='access_panel' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Access &amp; security</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><label class='setting-label'>Status</label><span id='access_status'>&hellip;</span></div>
+    <div class='setting-row'><a href='/security' class='btn btn-primary'>Open Access &amp; security</a><span class='setting-hint'>Web password, API key, host names and HTTPS.</span></div>
+  </div></div>
+  <div class='panel' data-tab='basic' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Network</h3></div>
   <div class='settings-grid'>
     <div class='setting-row'>
       <label class='setting-label'>Hostname</label>
-      <input type='text' name='wifi_hostname' maxlength='39' class='setting-input' value=''>
+      <input type='text' name='wifi_hostname' id='wifi_hostname_id' maxlength='32' pattern='[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?' class='setting-input' value=''>
+      <div class='setting-desc'>Name of this HeishaMon on the network: letters, digits and '-' (up to 32).</div>
+      <div class='setting-desc' id='wifi_hostname_msg' style='display:none;color:var(--red)'></div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Description</label>
+      <input type='text' name='description' maxlength='63' class='setting-input' value=''>
+      <div class='setting-desc'>Free text shown in the web interface, for example where this HeishaMon is installed.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>WiFi SSID</label>
@@ -1599,19 +1665,17 @@ static const char settingsForm1[] FLASHPROG = R"====(
           <option hidden selected value=''>Select SSID</option>
         </select>
       </div>
+      <div class='setting-desc'>Type the name of your WiFi network or pick it from the list of networks found.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>WiFi Password</label>
       <input type='password' name='wifi_password' maxlength='64' class='setting-input' value=''>
     </div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Update Authentication</h3></div>
+  <div class='panel' data-tab='system' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Arduino OTA password</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'>
-      <label class='setting-label'>Update Username</label>
-      <span style='font-size:12.5px;color:var(--text-muted)'>admin</span>
-    </div>
+    <div class='setting-row'><span class='setting-hint'>Only for firmware updates over the network from the Arduino IDE or arduino-cli (ArduinoOTA, port 8266). ArduinoOTA only runs after a restart while the web login is off and this password is not the default "heisha". The firmware upload of the web interface doesn't use it.</span></div>
     <div class='setting-row'>
       <label class='setting-label'>Current Password</label>
       <div style='display:flex;align-items:center;gap:10px'>
@@ -1622,26 +1686,31 @@ static const char settingsForm1[] FLASHPROG = R"====(
     <div class='setting-row'>
       <label class='setting-label'>New Password</label>
       <input type='password' name='new_ota_password' maxlength='39' class='setting-input' value=''>
+      <div class='setting-desc'>Fill in the current password as well to change it.</div>
     </div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='basic' style='margin-bottom:16px'>
   <div class='panel-header'><h3>MQTT</h3></div>
   <div class='settings-grid'>
     <div class='setting-row'>
       <label class='setting-label'>Topic Base</label>
       <input type='text' name='mqtt_topic_base' maxlength='127' class='setting-input' value=''>
+      <div class='setting-desc'>First part of every MQTT topic, default panasonic_heat_pump. Give each HeishaMon its own.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Server</label>
       <input type='text' name='mqtt_server' maxlength='64' class='setting-input' value=''>
+      <div class='setting-desc'>IP address or hostname of the MQTT broker.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Port</label>
       <input type='number' name='mqtt_port' maxlength='5' class='setting-input' value=''>
+      <div class='setting-desc'>Default 1883, with TLS usually 8883.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Username</label>
       <input type='text' name='mqtt_username' maxlength='64' class='setting-input' value=''>
+      <div class='setting-desc'>Username and password are only needed when the broker asks for a login.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Password</label>
@@ -1653,9 +1722,7 @@ static const char settingsForm1[] FLASHPROG = R"====(
   R"====(
 <div class='setting-row'>
   <label class='setting-label'>Use TLS (port 8883)</label>
-  <div class='checkbox-wrap'>
-    <input type='checkbox' id='mqtt_tls_enabled' name='mqtt_tls_enabled' value='enabled'>
-  </div>
+  <div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' id='mqtt_tls_enabled' name='mqtt_tls_enabled' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Encrypted connection to the broker, checked with the root CA certificate below.</span></div>
 </div>
 
 <div class='setting-row'>
@@ -1667,7 +1734,8 @@ static const char settingsForm1[] FLASHPROG = R"====(
     </div>
     <div id='ca_file_name' style='margin-top:4px;font-size:11px;color:var(--text-muted)'>No file selected</div>
   </div>
-</div>
+  <div class='setting-desc'>The root CA that signed the certificate of the broker, as a PEM file.</div>
+    </div>
 
 <div class='setting-row'>
   <label class='setting-label'>CA Certificate Actions</label>
@@ -1682,12 +1750,13 @@ static const char settingsForm1[] FLASHPROG = R"====(
 
 R"====(
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='system' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Time</h3></div>
   <div class='settings-grid'>
     <div class='setting-row'>
       <label class='setting-label'>NTP Servers</label>
       <input type='text' name='ntp_servers' maxlength='253' class='setting-input' value='' placeholder='Comma separated'>
+      <div class='setting-desc'>Where the time comes from, default pool.ntp.org.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Timezone</label>
@@ -1699,9 +1768,10 @@ R"====(
 #ifdef ESP8266
 static const char settingsForm2[] FLASHPROG = R"====(
       </select>
+      <div class='setting-desc'>Local time is used by the rules (%hour, %minute) and in the log.</div>
     </div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='heatpump' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Polling</h3></div>
   <div class='settings-grid'>
     <div class='setting-row'>
@@ -1710,6 +1780,7 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <input type='number' name='waitTime' class='setting-input' value='' style='width:80px'>
         <span class='setting-hint'>seconds (min 5)</span>
       </div>
+      <div class='setting-desc'>How often the heat pump is asked for its data. Default 5.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>MQTT retransmit interval</label>
@@ -1717,29 +1788,82 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <input type='number' name='updateAllTime' class='setting-input' value='' style='width:80px'>
         <span class='setting-hint'>seconds</span>
       </div>
+      <div class='setting-desc'>A value is published as soon as it changes. This is how often all values are sent again, also the unchanged ones. Default 300. A low value does not give faster updates, it only floods the broker and your home automation.</div>
     </div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Behavior</h3></div>
+  <div class='panel' data-tab='heatpump' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Heat pump connection</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>WiFi hotspot when disconnected</label><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug log to MQTT from start</label><div class='checkbox-wrap'><input type='checkbox' name='logMqtt' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug hexdump from start</label><div class='checkbox-wrap'><input type='checkbox' name='logHexdump' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug log to serial1 (GPIO2)</label><div class='checkbox-wrap'><input type='checkbox' name='logSerial1' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Emulate optional PCB</label><div class='checkbox-wrap'><input type='checkbox' name='optionalPCB' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Enable Opentherm processing</label><div class='checkbox-wrap'><input type='checkbox' onclick='updateGPIORowVisibility()' name='opentherm' value='enabled'></div></div>
+    <div class='setting-row'><label class='setting-label'>Emulate optional PCB</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='optionalPCB' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>HeishaMon acts as the optional PCB (CZ-NS4P), for commands such as SG ready and demand control. Don't enable with a real optional PCB installed.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Enable Opentherm processing</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' onclick='updateGPIORowVisibility()' name='opentherm' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Reads an OpenTherm thermostat connected to HeishaMon, for use in the rules and on MQTT.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Listen only (parallel CZ-TAW1)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' onclick='updateGPIORowVisibility()' name='listenonly' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>For a HeishaMon wired parallel to a CZ-TAW1: it only listens and never sends, so commands don't work.</span></div></div>
+  </div></div>
+  <div class='panel' data-tab='heatpump' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Flow temperature limit</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><span class='setting-hint'>HeishaMon never sends a heating flow target above the maximum or a cooling flow target below the minimum, whichever way the command comes in (MQTT, rules, web, Modbus, CZ-TAW1, raw). Curve targets and direct targets are clamped, a curve shift is lowered as far as needed. A value outside the limit set at the remote controller is corrected, at most every 10 minutes. Off: no limit.</span></div>
+    <div class='setting-row'>
+      <label class='setting-label'>Heating surface</label>
+      <select name='flowlimit_surface' class='setting-input' onchange="var m={1:35,2:55}[this.value];if(m)document.getElementsByName('flowlimit_heat_max')[0].value=m">
+        <option value='0'>Off (no limit)</option>
+        <option value='1'>Underfloor heating (max 35 &deg;C)</option>
+        <option value='2'>Radiators (max 55 &deg;C)</option>
+        <option value='3'>Custom</option>
+      </select>
+      <div class='setting-desc'>35 &deg;C is the recommended maximum for underfloor heating. 55 &deg;C for radiators is a common design value, not a standard: check it against the design of your system.</div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Max heating flow</label>
+      <div style='display:flex;align-items:center;gap:8px'>
+        <input type='number' name='flowlimit_heat_max' class='setting-input' min='20' max='65' value='' style='width:80px'>
+        <span class='setting-hint'>&deg;C (20 to 65)</span>
+      </div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Min cooling flow</label>
+      <div style='display:flex;align-items:center;gap:8px'>
+        <input type='number' name='flowlimit_cool_min' class='setting-input' min='5' max='25' value='' style='width:80px'>
+        <span class='setting-hint'>&deg;C (5 to 25, default 16)</span>
+      </div>
+      <div class='setting-desc'>Against condensation. Applies whenever a heating surface is chosen.</div>
+    </div>
+  </div></div>
+  <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Topic groups</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><span class='setting-hint'>Switched off groups are not published to MQTT or shown on the main page. Rules and Modbus still see all values. The basic topics are always published.</span></div>
+    <div class='setting-row'><label class='setting-label'>Heating &amp; cooling</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_heatcool' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>zone 1, curves, setpoints</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Zone 2</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_zone2' value='enabled'></div></div></div>
+    <div class='setting-row'><label class='setting-label'>DHW &amp; heaters</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_dhw_heaters' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>heater states, sterilization, delays</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Diagnostics</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_diagnostics' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>refrigerant circuit, fans, pressures</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Buffer, solar &amp; pool</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_buffer_solar_pool' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>also dry concrete</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Bivalent</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_bivalent' value='enabled'></div></div></div>
+    <div class='setting-row'><label class='setting-label'>External control &amp; SG ready</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_external_sgready' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>also demand control, optional PCB</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Installer settings</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_installer' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>static installer menu settings; also allows the installer commands (SET56 and up)</span></div></div>
+  </div></div>
+  <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Network options</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><label class='setting-label'>Setup hotspot while no WiFi is configured</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Without a stored WiFi name HeishaMon opens the open hotspot HeishaMon-Setup. Once a WiFi is configured the hotspot only starts with a short press of the boot button (for 10 minutes), never by itself.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Setup hotspot automatically when WiFi is lost (less secure)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot_auto' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Opens the open hotspot HeishaMon-Setup whenever the network can't be reached, as older versions did. Anybody nearby can then reach the web interface. Only for devices whose boot button you cannot reach.</span></div></div>
+  </div></div>
+  <div class='panel' data-tab='system' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Debug</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><label class='setting-label'>Debug log to MQTT from start</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='logMqtt' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Publishes the debug log on the MQTT topic log from boot on.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Debug hexdump from start</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='logHexdump' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Adds every datagram as hex to the log. Only for protocol debugging, it is a lot of data.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Debug log to serial1 (GPIO2)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='logSerial1' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Writes the log to GPIO2 (serial1, send only).</span></div></div>
+  </div></div>
+  <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Rules</h3></div>
+  <div class='settings-grid'>
     <div class='setting-row'><label class='setting-label'>Force load rules on boot</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='force_rules' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Rules load normally, but skip after crashes to prevent boot loops. Enable to override.</span></div></div>
     <div class='setting-row'><label class='setting-label'>Publish rule executions to MQTT</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='rules_mqtt_events' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Debug aid: one rules/executed event per rule run.</span></div></div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Listen Only</h3></div>
-  <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Listen only (parallel CZ-TAW1)</label><div class='checkbox-wrap'><input type='checkbox' onclick='updateGPIORowVisibility()' name='listenonly' value='enabled'></div></div>
-  </div></div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='io' style='margin-bottom:16px'>
   <div class='panel-header'><h3>1-Wire DS18B20</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Use 1-Wire DS18B20</label><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideDallasTable(this)' name='use_1wire' value='enabled'></div></div>
+    <div class='setting-row'><label class='setting-label'>Use 1-Wire DS18B20</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideDallasTable(this)' name='use_1wire' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Reads DS18B20 temperature sensors on the 1-Wire port.</span></div></div>
   </div>
   <div id='dallassettings' style='display:none'>
   <div class='settings-grid'>
@@ -1749,6 +1873,7 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <input type='number' name='waitDallasTime' class='setting-input' value='' style='width:80px'>
         <span class='setting-hint'>seconds (min 5)</span>
       </div>
+      <div class='setting-desc'>How often the sensors are read. Default 5.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>1-Wire MQTT retransmit</label>
@@ -1756,6 +1881,7 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <input type='number' name='updataAllDallasTime' class='setting-input' value='' style='width:80px'>
         <span class='setting-hint'>seconds</span>
       </div>
+      <div class='setting-desc'>How often all temperatures are sent again, also the unchanged ones. Default 300.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Temperature resolution</label>
@@ -1765,31 +1891,33 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <label><input type='radio' id='11-bit' name='dallasResolution' value='11'> 11-bit</label>
         <label><input type='radio' id='12-bit' name='dallasResolution' value='12'> 12-bit</label>
       </div>
+      <div class='setting-desc'>12-bit is the most precise (0.06&deg;C) and the slowest to read, 9-bit the fastest (0.5&deg;C). Default 12-bit.</div>
     </div>
   </div></div>
   </div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='io' style='margin-bottom:16px'>
   <div class='panel-header'><h3>S0 kWh Metering</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Use S0 kWh metering</label><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideS0Table(this)' name='use_s0' value='enabled'></div></div>
+    <div class='setting-row'><label class='setting-label'>Use S0 kWh metering</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideS0Table(this)' name='use_s0' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Counts the pulses of up to two kWh meters with an S0 output.</span></div></div>
   </div>
   <div id='s0settings' style='display:none'>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Port 1 imp/kWh</label><input type='number' id='s0_ppkwh_1' onchange='changeMinWatt(1)' name='s0_1_ppkwh' class='setting-input' value=''></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_1' onchange='changeMinWatt(1)' name='s0_1_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_1' name='s0_1_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_1' name='s0_1_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_1'>—</span> W</span></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 imp/kWh</label><input type='number' id='s0_ppkwh_2' onchange='changeMinWatt(2)' name='s0_2_ppkwh' class='setting-input' value=''></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_2' onchange='changeMinWatt(2)' name='s0_2_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_2' name='s0_2_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_2' name='s0_2_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_2'>—</span> W</span></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 imp/kWh</label><input type='number' id='s0_ppkwh_1' onchange='changeMinWatt(1)' name='s0_1_ppkwh' class='setting-input' value=''><div class='setting-desc'>Pulses per kWh, printed on the meter.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_1' onchange='changeMinWatt(1)' name='s0_1_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div><div class='setting-desc'>Below the standby threshold the power is only reported once per this interval.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_1' name='s0_1_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div><div class='setting-desc'>Shorter pulses are ignored as noise.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_1' name='s0_1_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div><div class='setting-desc'>Longer pulses are ignored.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_1'>—</span> W</span><div class='setting-desc'>The lowest power that still gives a pulse within the standby interval.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 imp/kWh</label><input type='number' id='s0_ppkwh_2' onchange='changeMinWatt(2)' name='s0_2_ppkwh' class='setting-input' value=''><div class='setting-desc'>Pulses per kWh, printed on the meter.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_2' onchange='changeMinWatt(2)' name='s0_2_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div><div class='setting-desc'>Below the standby threshold the power is only reported once per this interval.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_2' name='s0_2_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div><div class='setting-desc'>Shorter pulses are ignored as noise.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_2' name='s0_2_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div><div class='setting-desc'>Longer pulses are ignored.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_2'>—</span> W</span><div class='setting-desc'>The lowest power that still gives a pulse within the standby interval.</div></div>
   </div></div>
   </div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='io' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Extra GPIO</h3></div>
   <div class='settings-grid'>
+    <div class='setting-row'><span class='setting-hint'>Inputs are published on MQTT and can be read in the rules, outputs are switched from MQTT or the rules.</span></div>
     <div class='setting-row gpio-row ot-conflict-gpio'><label class='setting-label'>GPIO 1 (pin 1)</label><select name='gpio_1_mode' class='setting-input'><option value='0'>Input (pull-up)</option><option value='1'>Input</option><option value='2'>Output</option></select></div>
     <div class='setting-row gpio-row ot-conflict-gpio'><label class='setting-label'>GPIO 2 (pin 3)</label><select name='gpio_2_mode' class='setting-input'><option value='0'>Input (pull-up)</option><option value='1'>Input</option><option value='2'>Output</option></select></div>
     <div class='setting-row gpio-row'><label class='setting-label'>GPIO 3 (pin 16)</label><select name='gpio_3_mode' class='setting-input'><option value='0'>Input (pull-up)</option><option value='1'>Input</option><option value='2'>Output</option></select></div>
@@ -1812,7 +1940,7 @@ static const char settingsForm2[] FLASHPROG = R"====(
       </select>
     </div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='heatpump' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Polling</h3></div>
   <div class='settings-grid'>
     <div class='setting-row'>
@@ -1821,6 +1949,7 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <input type='number' name='waitTime' class='setting-input' value='' style='width:80px'>
         <span class='setting-hint'>seconds (min 5)</span>
       </div>
+      <div class='setting-desc'>How often the heat pump is asked for its data. Default 5.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>MQTT retransmit interval</label>
@@ -1828,37 +1957,91 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <input type='number' name='updateAllTime' class='setting-input' value='' style='width:80px'>
         <span class='setting-hint'>seconds</span>
       </div>
+      <div class='setting-desc'>A value is published as soon as it changes. This is how often all values are sent again, also the unchanged ones. Default 300. A low value does not give faster updates, it only floods the broker and your home automation.</div>
     </div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Behavior</h3></div>
+  <div class='panel' data-tab='heatpump' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Heat pump connection</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>WiFi hotspot when disconnected</label><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug log to MQTT from start</label><div class='checkbox-wrap'><input type='checkbox' name='logMqtt' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug hexdump from start</label><div class='checkbox-wrap'><input type='checkbox' name='logHexdump' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug log USB</label><div class='checkbox-wrap'><input type='checkbox' name='logSerial1' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Emulate optional PCB</label><div class='checkbox-wrap'><input type='checkbox' name='optionalPCB' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Enable Opentherm processing</label><div class='checkbox-wrap'><input type='checkbox' name='opentherm' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Enable CZ-TAW1 proxy port</label><div class='checkbox-wrap'><input type='checkbox' name='proxy' value='enabled'></div></div>
+    <div class='setting-row'><label class='setting-label'>Emulate optional PCB</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='optionalPCB' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>HeishaMon acts as the optional PCB (CZ-NS4P), for commands such as SG ready and demand control. Don't enable with a real optional PCB installed.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Enable Opentherm processing</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='opentherm' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Reads an OpenTherm thermostat connected to HeishaMon, for use in the rules and on MQTT.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Enable CZ-TAW1 proxy port</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='proxy' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>The port for a CZ-TAW1 behind HeishaMon, so the Panasonic cloud keeps working.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Block settings changes from CZ-TAW1</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='proxyBlockWrites' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>The CZ-TAW1 (Panasonic cloud) can still read the heat pump, but its commands are not passed on.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Listen only (parallel CZ-TAW1)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='listenonly' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>For a HeishaMon wired parallel to a CZ-TAW1: it only listens and never sends, so commands don't work.</span></div></div>
+  </div></div>
+  <div class='panel' data-tab='heatpump' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Flow temperature limit</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><span class='setting-hint'>HeishaMon never sends a heating flow target above the maximum or a cooling flow target below the minimum, whichever way the command comes in (MQTT, rules, web, Modbus, CZ-TAW1, raw). Curve targets and direct targets are clamped, a curve shift is lowered as far as needed. A value outside the limit set at the remote controller is corrected, at most every 10 minutes. Off: no limit.</span></div>
+    <div class='setting-row'>
+      <label class='setting-label'>Heating surface</label>
+      <select name='flowlimit_surface' class='setting-input' onchange="var m={1:35,2:55}[this.value];if(m)document.getElementsByName('flowlimit_heat_max')[0].value=m">
+        <option value='0'>Off (no limit)</option>
+        <option value='1'>Underfloor heating (max 35 &deg;C)</option>
+        <option value='2'>Radiators (max 55 &deg;C)</option>
+        <option value='3'>Custom</option>
+      </select>
+      <div class='setting-desc'>35 &deg;C is the recommended maximum for underfloor heating. 55 &deg;C for radiators is a common design value, not a standard: check it against the design of your system.</div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Max heating flow</label>
+      <div style='display:flex;align-items:center;gap:8px'>
+        <input type='number' name='flowlimit_heat_max' class='setting-input' min='20' max='65' value='' style='width:80px'>
+        <span class='setting-hint'>&deg;C (20 to 65)</span>
+      </div>
+    </div>
+    <div class='setting-row'>
+      <label class='setting-label'>Min cooling flow</label>
+      <div style='display:flex;align-items:center;gap:8px'>
+        <input type='number' name='flowlimit_cool_min' class='setting-input' min='5' max='25' value='' style='width:80px'>
+        <span class='setting-hint'>&deg;C (5 to 25, default 16)</span>
+      </div>
+      <div class='setting-desc'>Against condensation. Applies whenever a heating surface is chosen.</div>
+    </div>
+  </div></div>
+  <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Topic groups</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><span class='setting-hint'>Switched off groups are not published to MQTT or shown on the main page. Rules and Modbus still see all values. The basic topics are always published.</span></div>
+    <div class='setting-row'><label class='setting-label'>Heating &amp; cooling</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_heatcool' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>zone 1, curves, setpoints</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Zone 2</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_zone2' value='enabled'></div></div></div>
+    <div class='setting-row'><label class='setting-label'>DHW &amp; heaters</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_dhw_heaters' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>heater states, sterilization, delays</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Diagnostics</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_diagnostics' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>refrigerant circuit, fans, pressures</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Buffer, solar &amp; pool</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_buffer_solar_pool' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>also dry concrete</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Bivalent</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_bivalent' value='enabled'></div></div></div>
+    <div class='setting-row'><label class='setting-label'>External control &amp; SG ready</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_external_sgready' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>also demand control, optional PCB</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Installer settings</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='topics_installer' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>static installer menu settings; also allows the installer commands (SET56 and up)</span></div></div>
+  </div></div>
+  <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Network options</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><label class='setting-label'>Setup hotspot while no WiFi is configured</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Without a stored WiFi name HeishaMon opens the open hotspot HeishaMon-Setup. Once a WiFi is configured the hotspot only starts with a short press of the boot button (for 10 minutes), never by itself.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Setup hotspot automatically when WiFi is lost (less secure)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot_auto' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Opens the open hotspot HeishaMon-Setup whenever the network can't be reached, as older versions did. Anybody nearby can then reach the web interface. Only for devices whose boot button you cannot reach.</span></div></div>
     <div class='setting-row'><label class='setting-label'>Ethernet module (W5500)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='ethernet' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Disable on boards without the ethernet module to skip the W5500 probe and leave GPIO10-15 untouched. Needs a reboot.</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Force rules on boot</label><div class='checkbox-wrap'><input type='checkbox' name='force_rules' value='enabled'></div></div>
+  </div></div>
+  <div class='panel' data-tab='system' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Debug</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><label class='setting-label'>Debug log to MQTT from start</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='logMqtt' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Publishes the debug log on the MQTT topic log from boot on.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Debug hexdump from start</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='logHexdump' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Adds every datagram as hex to the log. Only for protocol debugging, it is a lot of data.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Debug log USB</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='logSerial1' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Writes the log to the USB serial port.</span></div></div>
+  </div></div>
+  <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
+  <div class='panel-header'><h3>Rules</h3></div>
+  <div class='settings-grid'>
+    <div class='setting-row'><label class='setting-label'>Force rules on boot</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='force_rules' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Rules load normally, but skip after crashes to prevent boot loops. Enable to override.</span></div></div>
     <div class='setting-row'><label class='setting-label'>Publish rule executions to MQTT</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='rules_mqtt_events' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Debug aid: one rules/executed event per rule run.</span></div></div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Modbus TCP</h3></div>
   <div class='settings-grid'>
     <div class='setting-row'><label class='setting-label'>Enable Modbus TCP server (port 502)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='modbus' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>No authentication, so only enable on a trusted network.</span></div></div>
     <div class='setting-row'><label class='setting-label'>Allow Modbus writes</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='modbusWrites' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Lets Modbus clients send heat pump commands (including SetReset) and switch the relays.</span></div></div>
   </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Listen Only</h3></div>
-  <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Listen only (parallel CZ-TAW1)</label><div class='checkbox-wrap'><input type='checkbox' name='listenonly' value='enabled'></div></div>
-  </div></div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='io' style='margin-bottom:16px'>
   <div class='panel-header'><h3>1-Wire DS18B20</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Use 1-Wire DS18B20</label><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideDallasTable(this)' name='use_1wire' value='enabled'></div></div>
+    <div class='setting-row'><label class='setting-label'>Use 1-Wire DS18B20</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideDallasTable(this)' name='use_1wire' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Reads DS18B20 temperature sensors on the 1-Wire port.</span></div></div>
   </div>
   <div id='dallassettings' style='display:none'>
   <div class='settings-grid'>
@@ -1868,6 +2051,7 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <input type='number' name='waitDallasTime' class='setting-input' value='' style='width:80px'>
         <span class='setting-hint'>seconds (min 5)</span>
       </div>
+      <div class='setting-desc'>How often the sensors are read. Default 5.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>1-Wire MQTT retransmit</label>
@@ -1875,6 +2059,7 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <input type='number' name='updataAllDallasTime' class='setting-input' value='' style='width:80px'>
         <span class='setting-hint'>seconds</span>
       </div>
+      <div class='setting-desc'>How often all temperatures are sent again, also the unchanged ones. Default 300.</div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Temperature resolution</label>
@@ -1884,31 +2069,33 @@ static const char settingsForm2[] FLASHPROG = R"====(
         <label><input type='radio' id='11-bit' name='dallasResolution' value='11'> 11-bit</label>
         <label><input type='radio' id='12-bit' name='dallasResolution' value='12'> 12-bit</label>
       </div>
+      <div class='setting-desc'>12-bit is the most precise (0.06&deg;C) and the slowest to read, 9-bit the fastest (0.5&deg;C). Default 12-bit.</div>
     </div>
   </div></div>
   </div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='io' style='margin-bottom:16px'>
   <div class='panel-header'><h3>S0 kWh Metering</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Use S0 kWh metering</label><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideS0Table(this)' name='use_s0' value='enabled'></div></div>
+    <div class='setting-row'><label class='setting-label'>Use S0 kWh metering</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideS0Table(this)' name='use_s0' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Counts the pulses of up to two kWh meters with an S0 output.</span></div></div>
   </div>
   <div id='s0settings' style='display:none'>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Port 1 imp/kWh</label><input type='number' id='s0_ppkwh_1' onchange='changeMinWatt(1)' name='s0_1_ppkwh' class='setting-input' value=''></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_1' onchange='changeMinWatt(1)' name='s0_1_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_1' name='s0_1_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_1' name='s0_1_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_1'>—</span> W</span></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 imp/kWh</label><input type='number' id='s0_ppkwh_2' onchange='changeMinWatt(2)' name='s0_2_ppkwh' class='setting-input' value=''></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_2' onchange='changeMinWatt(2)' name='s0_2_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_2' name='s0_2_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_2' name='s0_2_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_2'>—</span> W</span></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 imp/kWh</label><input type='number' id='s0_ppkwh_1' onchange='changeMinWatt(1)' name='s0_1_ppkwh' class='setting-input' value=''><div class='setting-desc'>Pulses per kWh, printed on the meter.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_1' onchange='changeMinWatt(1)' name='s0_1_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div><div class='setting-desc'>Below the standby threshold the power is only reported once per this interval.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_1' name='s0_1_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div><div class='setting-desc'>Shorter pulses are ignored as noise.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_1' name='s0_1_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div><div class='setting-desc'>Longer pulses are ignored.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 1 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_1'>—</span> W</span><div class='setting-desc'>The lowest power that still gives a pulse within the standby interval.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 imp/kWh</label><input type='number' id='s0_ppkwh_2' onchange='changeMinWatt(2)' name='s0_2_ppkwh' class='setting-input' value=''><div class='setting-desc'>Pulses per kWh, printed on the meter.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_2' onchange='changeMinWatt(2)' name='s0_2_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div><div class='setting-desc'>Below the standby threshold the power is only reported once per this interval.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_2' name='s0_2_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div><div class='setting-desc'>Shorter pulses are ignored as noise.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_2' name='s0_2_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div><div class='setting-desc'>Longer pulses are ignored.</div></div>
+    <div class='setting-row'><label class='setting-label'>Port 2 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_2'>—</span> W</span><div class='setting-desc'>The lowest power that still gives a pulse within the standby interval.</div></div>
   </div></div>
   </div>
-  <div class='panel' style='margin-bottom:16px'>
+  <div class='panel' data-tab='io' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Extra GPIO</h3></div>
   <div class='settings-grid'>
+    <div class='setting-row'><span class='setting-hint'>Inputs are published on MQTT and can be read in the rules, outputs and the relays are switched from MQTT, the rules or Modbus.</span></div>
     <div class='setting-row'><label class='setting-label'>Relay 1 (pin 21)</label><select class='setting-input' disabled><option value='2' selected>Output</option></select></div>
     <div class='setting-row'><label class='setting-label'>Relay 2 (pin 47)</label><select class='setting-input' disabled><option value='2' selected>Output</option></select></div>
     <div class='setting-row'><label class='setting-label'>GPIO 1 (pin 33)</label><select name='gpio_1_mode' class='setting-input'><option value='0'>Input (pull-up)</option><option value='1'>Input</option><option value='2'>Output</option></select></div>
@@ -1931,6 +2118,39 @@ static const char settingsForm2[] FLASHPROG = R"====(
 // Populate settings form via /getsettings (unchanged logic)
 static const char populategetsettingsJS[] FLASHPROG = R"====(
 <script>
+// A hostname stored by an older version may have characters that are not allowed any more. The
+// pattern of the field would then stop the browser from saving ANY setting, without a visible
+// reason when another tab is open. So while the field still holds that stored name it is not
+// checked (the device keeps the stored name, it never accepts an invalid one), and a message next
+// to the field says what to do. A changed name is checked as always.
+function checkStoredHostname(){
+  var el=document.getElementById('wifi_hostname_id'),msg=document.getElementById('wifi_hostname_msg');
+  if(!el||!msg)return;
+  var stored=el.value,rule=el.getAttribute('pattern'),re=new RegExp('^(?:'+rule+')$');
+  var show=function(text){msg.textContent=text;msg.style.display=text?'block':'none';};
+  if(stored!==''&&!re.test(stored)){
+    el.removeAttribute('pattern');
+    var check=function(){
+      if(el.value===stored){
+        el.setCustomValidity('');
+        show("The stored hostname has characters that are not allowed (only letters, digits and '-', not at the start or end). It is kept as it is until you change it here; other settings can be saved. The web interface does not accept it as a host name: use the IP address.");
+      }else if(re.test(el.value)){
+        el.setCustomValidity('');
+        show('');
+      }else{
+        el.setCustomValidity("Only letters, digits and '-' (not at the start or end)");
+        show("Hostname: only letters, digits and '-' (not at the start or end). Nothing is saved until this is corrected.");
+      }
+    };
+    el.addEventListener('input',check);
+    check();
+  }
+  // an invalid field on a tab that is not shown: say so instead of doing nothing
+  el.addEventListener('invalid',function(){
+    show("Hostname: only letters, digits and '-' (not at the start or end). Nothing is saved until this is corrected (tab Basic).");
+    if(el.offsetParent===null)alert("The hostname (tab Basic) is not valid: only letters, digits and '-'. Nothing was saved.");
+  });
+}
 var getSettings=function(){
   var req=new XMLHttpRequest();
   req.onreadystatechange=function(){
@@ -1960,6 +2180,26 @@ R"====(
           if(el[0].type.indexOf('select')>-1){var ch=el[0].childNodes;for(var x=0;x<ch.length;x++){if(ch[x].value==j[k])ch[x].selected=true;}}
         }
       }
+      var as=document.getElementById('access_status');
+      if(as){
+        var st='Web password: '+(j.web_password_set?'set (login on)':'not set (login off)')+' \u00b7 API key: '+(j.web_apikey_set?'set':'not set');
+)===="
+#ifdef ESP32
+R"====(
+        st+=' \u00b7 HTTPS: '+(j.https==='enabled'?(j.https_running?'on (running)':'on (not running yet)'):'off');
+        var hm=['on','redirect to HTTPS','off'][j.http_mode]||'on';
+        st+=' \u00b7 plain HTTP: '+(j.https_running?hm:'on (setting: '+hm+', once HTTPS runs)');
+)===="
+#else
+R"====(
+        st+=' \u00b7 HTTPS: not available on this board';
+)===="
+#endif
+R"====(
+        as.textContent=st;
+        as.style.color=j.web_password_set?'':'var(--red)';
+      }
+      checkStoredHostname();
       if(typeof updateGPIORowVisibility==='function')updateGPIORowVisibility();
       document.getElementById('loading_settings').style.display='none';
       document.getElementById('settings_form').style.display='block';
@@ -2019,17 +2259,6 @@ setTimeout(refreshWifiScan,500);
 // RULES PAGE
 // ─────────────────────────────────────────────────────────────────────────────
 static const char showRulesPage1[] FLASHPROG = R"====(
-<script>
-document.addEventListener('DOMContentLoaded',function(){
-  var nav=document.getElementById('sideNav');
-  nav.innerHTML=`
-<a href="/"><span class="nav-icon">&#8634;</span> Home</a>
-<a href="/firmware"><span class="nav-icon">&#8679;</span> Firmware</a>
-<a href="/reboot" onclick="return confirm('Reboot the device?')"><span class="nav-icon">&#8635;</span> Reboot</a>
-<a href="/settings"><span class="nav-icon">&#9881;</span> Settings</a>
-`;
-});
-</script>
   <div style='display:flex;'>
     <div id='line-numbers' class='line-numbers'></div>
     <div id='rules' contenteditable='true' spellcheck='false' class='rules-editor'>)====";
@@ -2479,43 +2708,94 @@ function getCursorPosition() {
 // ─────────────────────────────────────────────────────────────────────────────
 static const char showFirmwarePage[] FLASHPROG = R"====(
 <script>
-document.addEventListener('DOMContentLoaded',function(){
-  var nav=document.getElementById('sideNav');
-  nav.innerHTML=`
-<a href="/"><span class="nav-icon">&#8634;</span> Home</a>
-<a href="/reboot" onclick="return confirm('Reboot the device?')"><span class="nav-icon">&#8635;</span> Reboot</a>
-<a href="/rules"><span class="nav-icon">&#8881;</span> Rules</a>
-<a href="/settings"><span class="nav-icon">&#9881;</span> Settings</a>
-`;
-});
-</script>
-<script>
 function getMD5(){
   var fn=document.getElementById('firmware').value;
   var sp=fn.split('-')[2];
   if(sp){var md5=sp.split('.')[0];if(md5.length==32)document.getElementById('md5').value=md5;}
 }
 function reloadHome(){setTimeout(function(){window.location.href='/';},15000);}
-function uploadFile(){
-  document.getElementById('updatebutton').disabled=true;
+function setButtons(off){
+  document.getElementById('updatebutton').disabled=off;
+  document.getElementById('installbutton').disabled=off;
+}
+function sendFirmware(file,name,md5){
+  setButtons(true);
   document.getElementById('status').innerText='';
-  var file=document.getElementById('firmware').files[0];
   var fd=new FormData();
-  fd.append('firmware',file);
-  fd.append('md5',document.getElementById('md5').value);
+  fd.append('firmware',file,name);
+  fd.append('md5',md5);
   var req=new XMLHttpRequest();
   req.upload.addEventListener('progress',function(e){document.getElementById('progressBar').value=Math.round((e.loaded/e.total)*100);},false);
   req.onreadystatechange=function(){
     if(req.readyState===4){
       document.getElementById('status').innerText=req.responseText;
       if(req.responseText.includes('success'))reloadHome();
-      else document.getElementById('updatebutton').disabled=false;
+      else setButtons(false);
     }
   };
   req.open('POST','/firmware');
   req.send(fd);
 }
-</script>
+function uploadFile(){
+  var file=document.getElementById('firmware').files[0];
+  if(!file){document.getElementById('status').innerText='Select a firmware file first.';return;}
+  sendFirmware(file,file.name,document.getElementById('md5').value);
+}
+// The browser gets the release from GitHub and uploads it like a file from disk: the HeishaMon itself never
+// connects to GitHub. The README and the binaries are added to the repository together by the release.
+var fwBase='https://raw.githubusercontent.com/heishamon/HeishaMon/main/binaries/';
+var fwLatest='';
+function fwGet(path,type){
+  return fetch(fwBase+path,{cache:'no-store'}).then(function(r){
+    if(!r.ok)throw new Error('GitHub answered '+r.status+' for '+path);
+    return type=='blob'?r.blob():r.text();
+  });
+}
+function checkLatest(){
+  var el=document.getElementById('latest');
+  fwGet('README.md','text').then(function(t){
+    var m=t.match(/latest production release is (v\d+(?:\.\d+)*)/);
+    if(!m)throw new Error('no release found');
+    fwLatest=m[1];
+    var cur=document.getElementById('sideVersion').textContent.trim();
+    if(cur==fwLatest){
+      el.innerText='This HeishaMon runs the latest release ('+fwLatest+').';
+    }else{
+      el.innerText='The latest release is '+fwLatest+', this HeishaMon runs '+cur+'.';
+      document.getElementById('installbutton').innerText='Download & install '+fwLatest;
+      document.getElementById('installbutton').style.display='';
+    }
+  }).catch(function(){
+    el.innerText='Could not look up the latest release. This browser needs internet access for that.';
+  });
+}
+function installLatest(){
+  var st=document.getElementById('status');
+  var name=fwFile+fwLatest;
+  setButtons(true);
+  st.innerText='Downloading '+fwLatest+' from GitHub...';
+  Promise.all([fwGet(fwDir+name+'.md5','text'),fwGet(fwDir+name+'.bin','blob')]).then(function(r){
+    var md5=r[0].trim().toLowerCase();
+    if(!/^[0-9a-f]{32}$/.test(md5))throw new Error('no valid MD5 checksum for '+fwLatest);
+    if(r[1].size<100000)throw new Error('the downloaded firmware is too small');
+    document.getElementById('md5').value=md5;
+    sendFirmware(r[1],name+'.bin',md5);
+    st.innerText='Uploading '+fwLatest+'...';
+  }).catch(function(e){
+    st.innerText='Download failed: '+e.message;
+    setButtons(false);
+  });
+}
+window.addEventListener('load',checkLatest);
+)===="
+#ifdef ESP32
+R"====(var fwDir='model-type-large/',fwFile='HeishaMon.ino.esp32-';
+)===="
+#else
+R"====(var fwDir='model-type-small/',fwFile='HeishaMon.ino.d1-';
+)===="
+#endif
+R"====(</script>
 <div class='firmware-container'>
   <div class='firmware-info'>
 )===="
@@ -2531,6 +2811,15 @@ R"====(    <strong>Board:</strong> HeishaMon Small (ESP8266)<br>
 )===="
 #endif
 R"====(  </div>
+  <div class='panel' style='margin-bottom:20px'>
+    <div class='panel-header'><h3>Latest Release</h3></div>
+    <div style='padding:24px'>
+      <p id='latest' style='margin:0'>Looking up the latest release...</p>
+      <div style='margin-top:20px'>
+        <button id='installbutton' class='btn btn-primary' style='display:none' onclick='installLatest()'>Download &amp; install</button>
+      </div>
+    </div>
+  </div>
   <div class='panel'>
     <div class='panel-header'><h3>Firmware Update</h3></div>
     <div style='padding:24px'>
@@ -2583,7 +2872,7 @@ static const char webBodySettingsNewWifiWarning[] FLASHPROG = R"====(
 <div class='msg-box'>
   <h2>Reconfiguring WiFi</h2>
   <p>Attempting to connect to the new access point.<br><br>
-  The <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot will be brought down automatically on success.<br><br>
+  The <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot will be brought down automatically on success. If the new access point cannot be reached (wrong name or password), HeishaMon opens the open <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot after about 15 seconds, also when you made this change from your network: connect to it and open http://192.168.4.1 to correct the WiFi data. It closes when nobody was connected for 10 minutes (at the latest after 30 minutes); after that it only starts with a short press of the boot button.<br><br>
   This page will redirect to the device's new address shortly.</p>
 </div>
 )====";
@@ -2600,6 +2889,184 @@ static const char webBodySettingsSaveMessage[] FLASHPROG = R"====(
 <div class='msg-box success'>
   <h2>Settings Saved</h2>
   <p>Configuration has been saved. The device is rebooting…</p>
+</div>
+)====";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WEB LOGIN (login page, the access page /security of the System tab of the settings:
+// sections Web login and HTTPS; new API key)
+// ─────────────────────────────────────────────────────────────────────────────
+static const char webBodyLogin1[] FLASHPROG = R"====(
+</head>
+<body>
+<div class='msg-box' style='max-width:420px'>
+  <h2>HeishaMon</h2>
+)====";
+
+static const char webBodyLoginNoPassword[] FLASHPROG = R"====(
+  <p><strong>No web password is set</strong>, so there is nothing to log in to: every device in your network can use this HeishaMon.
+  Whoever sets the first web password owns the login. <a href='/security'>Set a web password</a> (Settings &rarr; System &rarr; Access &amp; security) &middot; <a href='/'>Home</a></p>
+</div>
+)====";
+
+static const char webBodyLoginForm[] FLASHPROG = R"====(
+  <form method='POST' action='/login'>
+    <p><input type='password' name='password' maxlength='64' class='setting-input' placeholder='Web password' autocomplete='current-password' autofocus required></p>
+    <p><button type='submit' class='btn btn-primary'>Log in</button></p>
+  </form>
+  <p style='font-size:12px;color:var(--text-muted)'>Forgot the password? Hold the boot button of the HeishaMon for more than 10 seconds: this is a factory reset, all settings are lost.</p>
+</div>
+)====";
+
+static const char webBodySecurityOpen[] FLASHPROG = R"====(
+<div class='main-content' style='max-width:780px;margin:0 auto'>
+  <nav class='tabnav' id='settings_tabs' style='padding:0 0 14px;background:none'>
+    <button type='button' onclick="location.href='/settings#basic'">Basic</button>
+    <button type='button' onclick="location.href='/settings#heatpump'">Heat pump</button>
+    <button type='button' onclick="location.href='/settings#io'">Sensors &amp; GPIO</button>
+    <button type='button' onclick="location.href='/settings#advanced'">Advanced</button>
+    <button type='button' class='active' onclick="location.href='/settings#system'">System</button>
+  </nav>
+)====";
+
+static const char webBodySecurityBack[] FLASHPROG = R"====(
+<p style='margin:0 0 12px'><a href='/settings#system'>&larr; Back to System</a></p>
+<h2 id='weblogin' style='font-size:18px;font-weight:500;margin:0 0 12px'>Access &amp; security: Web login <a href='https://github.com/st03psn/HeishaMon#web-login-optional' target='_blank' rel='noopener' style='font-size:12px;font-weight:400'>Details</a></h2>
+)====";
+
+static const char webBodySecurityFirst[] FLASHPROG = R"====(
+<div class='firmware-warning' style='margin-bottom:16px'>
+  <strong>No web password is set:</strong> anyone in your network can use this HeishaMon, and whoever sets the first password owns the login.
+</div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Set the web password (switches the login on)</h3></div>
+<form method='POST' action='/security' class='settings-grid' onsubmit="if(this.password.value!=this.repeat.value){alert('The two passwords are not the same.');return false;}return true;">
+  <input type='hidden' name='action' value='password'>
+  <div class='setting-row'><label class='setting-label'>New web password</label><input type='password' name='password' minlength='8' maxlength='64' class='setting-input' autocomplete='new-password' required></div>
+  <div class='setting-row'><label class='setting-label'>Repeat</label><input type='password' name='repeat' minlength='8' maxlength='64' class='setting-input' autocomplete='new-password' required></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Save and switch the login on</button></div>
+</form></div>
+)====";
+
+static const char webBodySecurityChange[] FLASHPROG = R"====(
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Change the web password</h3></div>
+<form method='POST' action='/security' class='settings-grid' onsubmit="if(this.password.value!=this.repeat.value){alert('The two passwords are not the same.');return false;}return true;">
+  <input type='hidden' name='action' value='password'>
+  <div class='setting-row'><label class='setting-label'>Current web password</label><input type='password' name='current' maxlength='64' class='setting-input' autocomplete='current-password' required></div>
+  <div class='setting-row'><label class='setting-label'>New web password</label><input type='password' name='password' minlength='8' maxlength='64' class='setting-input' autocomplete='new-password' required></div>
+  <div class='setting-row'><label class='setting-label'>Repeat</label><input type='password' name='repeat' minlength='8' maxlength='64' class='setting-input' autocomplete='new-password' required></div>
+  <div class='setting-row'><label class='setting-label'>Keep the API key</label><div class='checkbox-wrap'><input type='checkbox' name='keep_apikey' value='1'></div><div class='setting-desc'>Otherwise the API key is deleted and Home Assistant needs a new one.</div></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Change password</button><span class='setting-hint'>All browsers are logged out.</span></div>
+</form></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Switch the login off</h3></div>
+<form method='POST' action='/security' class='settings-grid' onsubmit="return confirm('Remove the web password? Every device in your network can then use this HeishaMon again.');">
+  <input type='hidden' name='action' value='remove'>
+  <div class='setting-row'><label class='setting-label'>Current web password</label><input type='password' name='current' maxlength='64' class='setting-input' autocomplete='current-password' required></div>
+  <div class='setting-row'><button type='submit' class='btn btn-danger'>Remove the web password</button></div>
+</form></div>
+)====";
+
+static const char webBodySecurityApiKey1[] FLASHPROG = R"====(
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>API key</h3></div>
+<div class='settings-grid'>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>For Home Assistant and scripts while the login is on; it is shown only once.</span></div>
+  <div class='setting-row'><label class='setting-label'>API key</label><span>)====";
+
+static const char webBodySecurityApiKey2[] FLASHPROG = R"====(</span></div>
+  <div class='setting-row'>
+    <form method='POST' action='/security' style='display:inline' onsubmit="return confirm('Make a new API key? The old one stops working.');"><input type='hidden' name='action' value='apikey'><input type='password' name='current' maxlength='64' class='setting-input' placeholder='Current web password' autocomplete='current-password' required> <button type='submit' class='btn btn-primary'>Make a new API key</button></form>
+  </div>
+  <div class='setting-row'>
+    <form method='POST' action='/security' style='display:inline'><input type='hidden' name='action' value='apikey_delete'><input type='password' name='current' maxlength='64' class='setting-input' placeholder='Current web password' autocomplete='current-password' required> <button type='submit' class='btn btn-ghost'>Delete the API key</button></form>
+  </div>
+</div></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Host names</h3></div>
+<form method='POST' action='/security' class='settings-grid'>
+  <input type='hidden' name='action' value='hosts'>
+  <div class='setting-row'><label class='setting-label'>Allowed now</label><span style='overflow-wrap:anywhere'>)====";
+
+static const char webBodySecurityApiKey3[] FLASHPROG = R"====(</span></div>
+  <div class='setting-row'><label class='setting-label'>Extra host names</label><input type='text' name='hosts' maxlength='95' class='setting-input' placeholder='heishamon.fritz.box, heatpump.example.com' value=')====";
+
+static const char webBodySecurityEnd[] FLASHPROG = R"====('><div class='setting-desc'>Other names this device is reached by, for example a reverse proxy or a DNS name of your router.</div></div>
+  <div class='setting-row'><label class='setting-label'>Current web password</label><input type='password' name='current' maxlength='64' class='setting-input' autocomplete='current-password' placeholder='(needed while the login is on)'></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Save host names</button></div>
+</form></div>
+<p style='font-size:12px;color:var(--text-muted)'>Forgot the web password? Only a factory reset helps: hold the boot button for more than 10 seconds.</p>
+)====";
+
+// the HTTPS section of the access page (/https leads here, /security#https)
+static const char webBodyHttpsHead[] FLASHPROG = R"====(
+<h2 id='https' style='font-size:18px;font-weight:500;margin:24px 0 12px'>Access &amp; security: HTTPS <a href='https://github.com/st03psn/HeishaMon#https-large-board-only' target='_blank' rel='noopener' style='font-size:12px;font-weight:400'>Details</a></h2>
+)====";
+
+static const char webBodySecurityClose[] FLASHPROG = R"====(
+<p><a href='/settings#system'>&larr; Back to System</a></p>
+</div>
+)====";
+
+static const char webBodyHttpsNone[] FLASHPROG = R"====(
+<div class='panel' style='margin-bottom:16px'><div class='panel-header'><h3>HTTPS</h3></div>
+<div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>Only on the large board (ESP32-S3): this board has too little RAM for HTTPS.</span></div></div></div>
+)====";
+
+static const char webBodyHttpsForm1[] FLASHPROG = R"====(
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>HTTPS (port 443)</h3></div>
+<form method='POST' action='/https' class='settings-grid'>
+  <input type='hidden' name='action' value='settings'>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>Status: )====";
+
+static const char webBodyHttpsForm2[] FLASHPROG = R"====(</span></div>
+  <div class='setting-row'><label class='setting-label'>HTTPS</label><div class='checkbox-wrap'><input type='checkbox' name='https' value='enabled' )====";
+
+static const char webBodyHttpsForm3[] FLASHPROG = R"====(></div><div class='setting-desc'>Creates its own certificate on first start. Your browser warns once &mdash; compare the fingerprint below.</div></div>
+  <div class='setting-row'><label class='setting-label'>Plain HTTP (port 80)</label><select name='http_mode' class='setting-input'>)====";
+
+static const char webBodyHttpsForm4[] FLASHPROG = R"====(</select><div class='setting-desc'>Redirect: browsers go to HTTPS, the API for Home Assistant stays on HTTP. Off: HTTPS only.</div></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Save</button></div>
+</form></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Certificate</h3></div>
+<div class='settings-grid'>
+)====";
+
+static const char webBodyHttpsCert[] FLASHPROG = R"====(
+  <div class='setting-row'>
+    <form method='POST' action='/https' style='display:inline' onsubmit="return confirm('Make a new certificate? Browsers warn once more.');"><input type='hidden' name='action' value='regenerate'><button type='submit' class='btn btn-ghost'>Make a new certificate</button></form>
+    <span class='setting-hint'>After the hostname or IP changed.</span>
+  </div>
+</div></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Own certificate</h3></div>
+<form method='POST' action='/https' enctype='multipart/form-data' class='settings-grid'>
+  <input type='hidden' name='action' value='upload'>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>PEM files; only EC P-256 or RSA 2048 keys, without a password.</span></div>
+  <div class='setting-row'><label class='setting-label'>Certificate (PEM)</label><input type='file' name='cert' accept='.pem,.crt,.cer' class='setting-input' required></div>
+  <div class='setting-row'><label class='setting-label'>Private key (PEM)</label><input type='file' name='key' accept='.pem,.key' class='setting-input' required></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Upload and use</button></div>
+</form></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Measurements</h3></div>
+<div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>)====";
+
+static const char webBodyHttpsEnd[] FLASHPROG = R"====(</span></div></div></div>
+)====";
+
+static const char webBodyApiKey1[] FLASHPROG = R"====(
+<div class='msg-box success' style='max-width:640px'>
+  <h2>New API key</h2>
+  <p>Copy it now: it is shown only this once. The old key no longer works.</p>
+  <p><code style='font-size:16px;user-select:all;word-break:break-all'>)====";
+
+static const char webBodyApiKey2[] FLASHPROG = R"====(</code></p>
+  <p style='font-size:13px'>Send it with every request as the header <code>Authorization: Bearer &lt;key&gt;</code>, for example<br>
+  <code>curl -H 'Authorization: Bearer &lt;key&gt;' http://heishamon.local/json</code></p>
+  <p><a href='/security'>Back</a></p>
 </div>
 )====";
 
@@ -3544,18 +4011,6 @@ static const char tzDataOptions[] FLASHPROG = R"====(
 
 #ifdef ESP32
 static const char webModbusStart[] FLASHPROG = R"====(
-<script>
-document.addEventListener('DOMContentLoaded',function(){
-  var nav=document.getElementById('sideNav');
-  nav.innerHTML=`
-<a href="/"><span class="nav-icon">&#8634;</span> Home</a>
-<a href="/firmware"><span class="nav-icon">&#8679;</span> Firmware</a>
-<a href="/reboot" onclick="return confirm('Reboot the device?')"><span class="nav-icon">&#8635;</span> Reboot</a>
-<a href="/rules"><span class="nav-icon">&#8881;</span> Rules</a>
-<a href="/settings"><span class="nav-icon">&#9881;</span> Settings</a>
-`;
-});
-</script>
 <style>
 /* Modbus tables scroll inside their own containers, below the page header. */
 .modbus-page thead th{top:0}
