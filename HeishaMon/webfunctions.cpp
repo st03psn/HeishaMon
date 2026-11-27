@@ -548,7 +548,11 @@ void loadSettings(settingsStruct *heishamonSettings) {
           heishamonSettings->rules_mqtt_events = ( jsonDoc[F("rules_mqtt_events")] == "enabled" ) ? true : false;
           heishamonSettings->use_1wire = ( jsonDoc[F("use_1wire")] == "enabled" ) ? true : false;
           heishamonSettings->use_s0 = ( jsonDoc[F("use_s0")] == "enabled" ) ? true : false;
+          // "hotspot": the open setup hotspot while no WiFi is configured (default on). Older versions also opened it
+          // whenever the WiFi was lost; that is now its own setting "hotspot_auto", off unless it was switched on
+          // (so an existing install gets the safe behaviour: the hotspot only starts with the boot button).
           heishamonSettings->hotspot = ( jsonDoc[F("hotspot")] == "disabled" ) ? false : true; //default to true if not found in settings
+          heishamonSettings->hotspot_auto = ( jsonDoc[F("hotspot_auto")] == "enabled" ) ? true : false;
           heishamonSettings->listenonly = ( jsonDoc[F("listenonly")] == "enabled" ) ? true : false;
           heishamonSettings->logMqtt = ( jsonDoc[F("logMqtt")] == "enabled" ) ? true : false;
           heishamonSettings->logHexdump = ( jsonDoc[F("logHexdump")] == "enabled" ) ? true : false;
@@ -684,13 +688,7 @@ void setupWifi(settingsStruct *heishamonSettings) {
 
     wifiBeginStrongest(heishamonSettings->wifi_ssid, heishamonSettings->wifi_password);
   }
-  else {
-    if (heishamonSettings->hotspot) {
-      log_message(_F("Wifi hotspot mode..."));
-      WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-      WiFi.softAP(_F("HeishaMon-Setup"));
-    }
-  }
+  // the setup hotspot is not started here: check_wifi() does that when setupap_update() wants it
 
   if (heishamonSettings->wifi_hostname[0] == '\0') {
     //Set hostname on wifi rather than ESP_xxxxx
@@ -721,14 +719,7 @@ void setupWifi(settingsStruct *heishamonSettings) {
         WiFi.begin(heishamonSettings->wifi_ssid, heishamonSettings->wifi_password);
       }
   }
-  else {
-    if (heishamonSettings->hotspot) {
-      log_message(_F("Wifi hotspot mode..."));
-      WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0)); 
-      WiFi.softAP("HeishaMon-Setup");
-    }
-  }
-
+  // the setup hotspot is not started here: check_wifi() does that when setupap_update() wants it
 
 #endif
 }
@@ -813,6 +804,7 @@ void settingsToJson(JsonDocument &jsonDoc, settingsStruct *heishamonSettings) {
   } else {
     jsonDoc[F("hotspot")] = "disabled";
   }
+  jsonDoc[F("hotspot_auto")] = heishamonSettings->hotspot_auto ? "enabled" : "disabled";
   if (heishamonSettings->listenonly) {
     jsonDoc[F("listenonly")] = "enabled";
   } else {
@@ -1018,6 +1010,7 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   jsonDoc[F("force_rules")] = String("disabled");
   jsonDoc[F("rules_mqtt_events")] = String("disabled");
   jsonDoc[F("hotspot")] = String("disabled");
+  jsonDoc[F("hotspot_auto")] = String("disabled");
   jsonDoc[F("listenonly")] = String("disabled");
   jsonDoc[F("logMqtt")] = String("disabled");
   jsonDoc[F("logHexdump")] = String("disabled");
@@ -1074,6 +1067,8 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
       jsonDoc[F("use_s0")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "hotspot") == 0) {
       jsonDoc[F("hotspot")] = tmp->value;
+    } else if (strcmp(tmp->name.c_str(), "hotspot_auto") == 0) {
+      jsonDoc[F("hotspot_auto")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "listenonly") == 0) {
       jsonDoc[F("listenonly")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "force_rules") == 0) {

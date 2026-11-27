@@ -329,9 +329,13 @@ struct webauth_lock_t {
 static struct webauth_session_t sessions[WEBAUTH_SESSIONS];
 static struct webauth_lock_t locks[WEBAUTH_LOCK_ENTRIES];
 // every address that failed lately, also after its entry made room for another one (Bloom filter):
-// such an address never counts as "without failures" and cannot use the reserve of the budget
-static uint8_t failed_seen[WEBAUTH_FAILED_BITS / 8];
-static unsigned long failed_last = 0;
+// such an address never counts as "without failures" and cannot use the reserve of the budget.
+// Two generations: a failure is written to the current one, every WEBAUTH_LOCK_FORGET_MS the older
+// one is cleared and becomes the current one. So a failure is forgotten 15 to 30 minutes later,
+// also while other addresses keep failing (one filter alone would never forget during a flood).
+static uint8_t failed_seen[2][WEBAUTH_FAILED_BITS / 8];
+static uint8_t failed_gen = 0;        // the generation that is written
+static unsigned long failed_time = 0; // when it became the current one
 struct webauth_known_t {
   uint32_t ip;
   unsigned long last;           // last login
@@ -381,7 +385,8 @@ void webauth_reset(void) {
   memset(locks, 0, sizeof(locks));
   memset(known, 0, sizeof(known));
   memset(failed_seen, 0, sizeof(failed_seen));
-  failed_last = now_ms();
+  failed_gen = 0;
+  failed_time = now_ms();
   bucket = WEBAUTH_BUCKET_SIZE;
   bucket_time = now_ms();
   sweep_time = bucket_time;
@@ -972,18 +977,40 @@ static void seen_bits(uint32_t ip, uint16_t *a, uint16_t *b) {
   *b = (uint16_t)((h >> 16) % WEBAUTH_FAILED_BITS);
 }
 
-static void seen_add(uint32_t ip, unsigned long now) {
-  uint16_t a, b;
-  seen_bits(ip, &a, &b);
-  failed_seen[a >> 3] |= (uint8_t)(1 << (a & 7));
-  failed_seen[b >> 3] |= (uint8_t)(1 << (b & 7));
-  failed_last = now;
+/* the older generation is dropped every WEBAUTH_LOCK_FORGET_MS */
+static void seen_rotate(unsigned long now) {
+  unsigned long age = (unsigned long)(now - failed_time);
+  if(age < WEBAUTH_LOCK_FORGET_MS) {
+    return;
+  }
+  if(age >= 2 * WEBAUTH_LOCK_FORGET_MS) {
+    memset(failed_seen, 0, sizeof(failed_seen));  // nobody looked for two periods: both are old
+    failed_time = now;
+    return;
+  }
+  failed_gen ^= 1;
+  memset(failed_seen[failed_gen], 0, sizeof(failed_seen[failed_gen]));
+  failed_time += WEBAUTH_LOCK_FORGET_MS;
 }
 
-static bool seen_has(uint32_t ip) {
+static void seen_add(uint32_t ip, unsigned long now) {
   uint16_t a, b;
+  seen_rotate(now);
   seen_bits(ip, &a, &b);
-  return (failed_seen[a >> 3] & (1 << (a & 7))) && (failed_seen[b >> 3] & (1 << (b & 7)));
+  failed_seen[failed_gen][a >> 3] |= (uint8_t)(1 << (a & 7));
+  failed_seen[failed_gen][b >> 3] |= (uint8_t)(1 << (b & 7));
+}
+
+static bool seen_has(uint32_t ip, unsigned long now) {
+  uint16_t a, b;
+  seen_rotate(now);
+  seen_bits(ip, &a, &b);
+  for(uint8_t g = 0; g < 2; g++) {
+    if((failed_seen[g][a >> 3] & (1 << (a & 7))) && (failed_seen[g][b >> 3] & (1 << (b & 7)))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /* an address without recent failures (may use the reserve of the budget) */
@@ -992,12 +1019,30 @@ static bool ip_clean(uint32_t ip, unsigned long now) {
   if(l != NULL) {
     return l->fails == 0;  // its own entry decides (a success cleared it)
   }
-  return !seen_has(ip);
+  return !seen_has(ip, now);
+}
+
+bool webauth_lock_clean(uint32_t ip) {
+  return ip_clean(ip, now_ms());
+}
+
+/*
+ * An address that logged in lately (the owner's devices) does not use the
+ * global budget at all: only its own backoff holds it back. Otherwise every
+ * new address of an attacker (each one is "without failures" once) takes a
+ * try out of the reserve and the owner waits for minutes. Nobody else can
+ * get onto that list: it needs the right password.
+ */
+static bool ip_known(uint32_t ip, unsigned long now) {
+  return known_find(ip, now) != NULL;
 }
 
 unsigned long webauth_lock_wait_ms(uint32_t ip) {
   unsigned long now = now_ms();
   unsigned long w = ip_wait(ip, now);
+  if(ip_known(ip, now)) {
+    return w;
+  }
   bucket_refill(now);
   uint8_t need = ip_clean(ip, now) ? 1 : WEBAUTH_BUCKET_RESERVE + 1;
   if(w == 0 && bucket < need) {
@@ -1012,14 +1057,16 @@ bool webauth_lock_check(uint32_t ip) {
   if(ip_wait(ip, now) > 0) {
     return false;  // refused tries do not count as failures
   }
-  bucket_refill(now);
-  // the last tokens are kept for addresses without recent failures (the owner)
-  if(bucket < (ip_clean(ip, now) ? 1 : WEBAUTH_BUCKET_RESERVE + 1)) {
-    return false;
-  }
-  bucket--;
-  if(bucket == WEBAUTH_BUCKET_SIZE - 1) {
-    bucket_time = now;
+  if(!ip_known(ip, now)) {
+    bucket_refill(now);
+    // the last tokens are kept for addresses without recent failures (the owner on a new address)
+    if(bucket < (ip_clean(ip, now) ? 1 : WEBAUTH_BUCKET_RESERVE + 1)) {
+      return false;
+    }
+    bucket--;
+    if(bucket == WEBAUTH_BUCKET_SIZE - 1) {
+      bucket_time = now;
+    }
   }
   // counted as a failure right away: a try whose connection ends before the
   // password came still counts; a success clears it, webauth_lock_refund() gives it back
@@ -1076,7 +1123,7 @@ void webauth_lock_success(uint32_t ip) {
   if(l != NULL) {
     memset(l, 0, sizeof(*l));
   }
-  remember(ip, now);  // from now on its failures are its own  // from now on it never shares the entry of new addresses
+  remember(ip, now);  // from now on its failures are its own and it does not need the global budget
 }
 
 /*
@@ -1098,10 +1145,7 @@ void webauth_tick(void) {
     lock_expire(&locks[i], now);
   }
   known_find(0, now);  // drops the expired ones
-  if((unsigned long)(now - failed_last) >= WEBAUTH_LOCK_FORGET_MS) {
-    memset(failed_seen, 0, sizeof(failed_seen));  // no failure for a while: forget all
-    failed_last = now;
-  }
+  seen_rotate(now);
   bucket_refill(now);
 }
 

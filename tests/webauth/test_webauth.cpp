@@ -1737,6 +1737,196 @@ static void test_store_versions() {
   CHECK(webauth_load(&cur, 7) == WEBAUTH_LOAD_INVALID && webauth_load(NULL, 0) == WEBAUTH_LOAD_INVALID, "short");
 }
 
+/* ---- fourth round (third review) ---- */
+
+// R1: an address that logged in during the last 7 days never depends on the global budget.
+// Before, every new address of an attacker took a try out of the reserve: with 254 addresses
+// (a /24) a known owner address got 21 of 90 logins, the first after 433 s; with 3000, none.
+static void test_known_address_flood() {
+  const uint32_t owner = 0x0a01a8c0;  // 192.168.1.10
+  for(int n : { 254, 3000 }) {
+    for(int typo = 0; typo < 2; typo++) {
+      fresh(true);
+      client_ip = owner;
+      CHECK(!run(post("/login", "password=correct+horse+battery", origin())).cookie().empty(), "owner logs in before the flood");
+      int ok = 0, tries = 0, attacker = 0;
+      unsigned long first = 0, start = auth_now;
+      for(int t = 0; t < 9000; t++) {  // 15 min, 10 wrong logins a second from n addresses in turn
+        auth_now += 100;
+        client_ip = 0xc0a80000u + 100 + (uint32_t)(t % n);
+        if(run(post("/login", "password=g", origin())).status != 429) {
+          attacker++;
+        }
+        if(t % 100 == 37) {
+          client_ip = owner;
+          if(typo && t == 37) {
+            CHECK(run(post("/login", "password=typo", origin())).cookie().empty(), "typo");  // one typo of the owner changes nothing
+            continue;
+          }
+          tries++;
+          if(!run(post("/login", "password=correct+horse+battery", origin())).cookie().empty()) {
+            ok++;
+            if(first == 0) {
+              first = auth_now - start;
+            }
+          }
+        }
+      }
+      client_ip = 0x0501a8c0;
+      printf("  known owner address%s, %d attacking addresses for 15 min: %d of %d logins, first after %lu s; %d attacker password checks\n",
+             typo ? " (one typo first)" : "", n, ok, tries, first / 1000, attacker);
+      CHECK(ok == tries && tries >= 89, "known owner address vs %d addresses: %d of %d logins", n, ok, tries);
+      CHECK(first > 0 && first <= 15000, "known owner address vs %d addresses: first login after %lu ms", n, first);
+      // and the budget of everybody else is not larger for it
+      CHECK(attacker <= (int)(15 * 60 / (WEBAUTH_BUCKET_REFILL_MS / 1000) + WEBAUTH_BUCKET_SIZE), "%d addresses: %d attacker checks", n, attacker);
+    }
+  }
+
+  // the known address has no free ride: its own failures still back it off (somebody who took over
+  // that address gets 3 tries, then 1 s, 2 s, ... up to one try in 5 minutes), with or without budget
+  fresh(true);
+  client_ip = owner;
+  login();
+  int checked = 0;
+  for(int t = 0; t < 3600; t++) {
+    auth_now += 1000;
+    if(run(post("/login", "password=guess" + std::to_string(t), origin())).status != 429) {
+      checked++;
+    }
+  }
+  CHECK(checked <= 3 + 9 + 12 + 2, "wrong passwords from a known address: %d checks in an hour", checked);
+  CHECK(webauth_lock_wait_ms(owner) > 0, "the known address backs off");
+  auth_now += WEBAUTH_LOCK_MAX_MS;
+  CHECK(!run(post("/login", "password=correct+horse+battery", origin())).cookie().empty(), "and gets in again after its backoff");
+  // its tries did not use the budget of the others
+  fresh(true);
+  client_ip = owner;
+  login();  // this first login, from a then unknown address, took one try of the budget
+  auth_now += WEBAUTH_BUCKET_REFILL_MS;
+  for(int i = 0; i < 3; i++) {
+    run(post("/login", "password=wrong", origin()));
+  }
+  int budget = 0;
+  for(int i = 0; i < 2 * WEBAUTH_BUCKET_SIZE; i++) {
+    budget += webauth_lock_check(0x0d000000u + (uint32_t)i);
+  }
+  CHECK(budget == WEBAUTH_BUCKET_SIZE, "budget of the others after 3 failures of a known address: %d", budget);
+  // not known any more after 7 days without a login: the budget counts again
+  fresh(true);
+  client_ip = owner;
+  login();
+  auth_now += WEBAUTH_KNOWN_MS;
+  webauth_tick();
+  for(int i = 0; i < 2 * WEBAUTH_BUCKET_SIZE; i++) {
+    webauth_lock_check(0x0d000000u + (uint32_t)i);
+  }
+  CHECK(!webauth_lock_check(owner) && webauth_lock_wait_ms(owner) > 0, "an address that is not known any more needs the budget");
+  client_ip = 0x0501a8c0;
+
+  // An owner on a NEW address has nothing that tells him from an attacker's new address: this
+  // cannot be solved, only reported. He is never locked out for good by few addresses; against
+  // hundreds of addresses the answer is a device that logged in before (above), or the session.
+  for(int n : { 20, 254, 3000 }) {
+    fresh(true);
+    int ok = 0, tries = 0;
+    unsigned long first = 0, start = auth_now;
+    for(int t = 0; t < 18000; t++) {  // 30 min
+      auth_now += 100;
+      client_ip = 0xc0a80000u + 100 + (uint32_t)(t % n);
+      run(post("/login", "password=g", origin()));
+      if(t % 100 == 37) {
+        tries++;
+        client_ip = 0x0a01a8c0u + ((uint32_t)tries << 8);  // a different new address each time
+        if(!run(post("/login", "password=correct+horse+battery", origin())).cookie().empty()) {
+          ok++;
+          if(first == 0) {
+            first = auth_now - start;
+          }
+        }
+      }
+    }
+    client_ip = 0x0501a8c0;
+    if(ok > 0) {
+      printf("  owner on a NEW address (a try every 10 s), %d attacking addresses for 30 min: %d of %d logins, first after %lu s\n", n, ok, tries, first / 1000);
+    } else {
+      printf("  owner on a NEW address (a try every 10 s), %d attacking addresses for 30 min: no login at all\n", n);
+    }
+    if(n == 20) {
+      CHECK(ok >= 150 && first <= 60000, "new address vs 20 addresses: %d of %d, first after %lu ms", ok, tries, first);
+    }
+  }
+}
+
+// R2: the filter of failed addresses forgets, also while other addresses keep failing
+static void test_failed_filter_forgets() {
+  const uint32_t owner = 0x0a01a8c0;
+  static uint32_t next_drain = 0x0b000000u;
+  auto drain_to_reserve = [] {
+    // addresses with one failure each (so they cannot use the reserve) take the rest of the budget
+    for(int j = 0; j < 2 * WEBAUTH_BUCKET_SIZE; j++) {
+      webauth_lock_failed(++next_drain);
+      webauth_lock_check(next_drain);
+    }
+  };
+  // the reviewer's case: one typo, then one failure of somebody else every 14 minutes
+  fresh(true);
+  client_ip = owner;
+  run(post("/login", "password=typo", origin()));
+  CHECK(!webauth_lock_clean(owner), "an address with a failure is not clean");
+  drain_to_reserve();
+  CHECK(webauth_lock_wait_ms(owner) > 0 && !webauth_lock_check(owner), "right after its failure the address cannot use the reserve");
+  for(int i = 0; i < 8; i++) {
+    auth_now += 14UL * 60 * 1000;
+    webauth_tick();
+    client_ip = 0xc0a80000u + 100 + (uint32_t)i;
+    run(post("/login", "password=g", origin()));
+  }
+  CHECK(webauth_lock_clean(owner), "112 minutes after one typo the address is clean again");
+  drain_to_reserve();
+  CHECK(webauth_lock_wait_ms(owner) == 0 && webauth_lock_check(owner), "and may use the reserve");
+  // bounds: remembered for at least 15 minutes, forgotten after 30 at the latest, whatever else happens
+  for(unsigned long other_every : { 0UL, 10000UL, 60000UL }) {
+    for(unsigned long offset : { 0UL, 7UL * 60 * 1000, 14UL * 60 * 1000 + 59000 }) {
+      fresh(true);
+      auth_now += offset;  // where in the 15 minute period the failure happens
+      webauth_tick();
+      unsigned long start = auth_now;
+      // 16 other addresses after it, so its entry leaves the table and only the filter knows it
+      webauth_lock_failed(owner);
+      for(uint32_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
+        auth_now++;
+        webauth_lock_failed(0x0e000000u + i);
+      }
+      unsigned long forgotten = 0;
+      for(unsigned long t = 1000; t <= 40UL * 60 * 1000 && forgotten == 0; t += 1000) {
+        auth_now = start + t;
+        if(other_every && t % other_every == 0) {
+          webauth_lock_failed(0x0f000000u + (uint32_t)(t / 1000));
+        }
+        if(t % 60000 == 0) {
+          webauth_tick();
+        }
+        if(webauth_lock_clean(owner)) {
+          forgotten = t;
+        }
+      }
+      CHECK(forgotten >= WEBAUTH_LOCK_FORGET_MS && forgotten <= 2 * WEBAUTH_LOCK_FORGET_MS,
+            "failure at +%lu s, others every %lu ms: forgotten after %lu s", offset / 1000, other_every, forgotten / 1000);
+    }
+  }
+  // nobody asks for a long time (no tick either): nothing old is believed
+  fresh(true);
+  webauth_lock_failed(owner);
+  for(uint32_t i = 0; i < WEBAUTH_LOCK_ENTRIES; i++) {
+    auth_now++;
+    webauth_lock_failed(0x0e000000u + i);
+  }
+  CHECK(!webauth_lock_clean(owner), "known to the filter");
+  auth_now += 5UL * WEBAUTH_LOCK_FORGET_MS + 1234;
+  CHECK(webauth_lock_clean(owner), "forgotten after a long silence");
+  client_ip = 0x0501a8c0;
+}
+
 int main(int argc, char **argv) {
   if(argc > 1 && strcmp(argv[1], "--routes") == 0) {
     for(uint8_t i = 0; i < webauth_routes_count; i++) {
@@ -1777,6 +1967,8 @@ int main(int argc, char **argv) {
   test_store_versions();
   test_security_forms();
   test_login_lockout();
+  test_known_address_flood();
+  test_failed_filter_forgets();
   printf("%d checks, %d failed\n", checks, failed);
   return failed == 0 ? 0 : 1;
 }
