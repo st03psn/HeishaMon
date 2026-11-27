@@ -96,7 +96,7 @@ def glue_errors(f: dict) -> list:
         guard = function(ino, "void flowlimitGuard(")
         need(guard, r"flowlimit_apply\(&flowlimit, command, length,", "flowlimitGuard() must apply the limit to the command")
         received = function(ino, "void flowlimitReceived(")
-        need(received, r"flowlimit_update\(&flowlimit, \(const uint8_t \*\)block, DATASIZE\);\s*if \(heishamonSettings\.listenonly\) return;.*flowlimit_watchdog\(",
+        need(received, r"flowlimit_update\(&flowlimit, \(const uint8_t \*\)block, DATASIZE\);\s*char msg\[256\];\s*if \(flowlimit_sensor_check\(&flowlimit, millis\(\), msg, sizeof\(msg\)\)\) log_message\(msg\);\s*if \(heishamonSettings\.listenonly\) return;.*flowlimit_watchdog\(",
              "flowlimitReceived(): update from the data block, no watchdog in listen only mode")
         need(received, r"if \(len > 0 && send_command\(cmd, len\)\) flowlimit_sent\(&flowlimit, millis\(\)\);",
              "flowlimitReceived(): the correction is sent with send_command() and only counted when it was accepted")
@@ -109,6 +109,7 @@ def glue_errors(f: dict) -> list:
     try:
         publish = function(ino, "void publishFlowLimit(")
         need(publish, r'"state", "surface", "heat_max", "cool_min"', "publishFlowLimit(): the four topics")
+        need(publish, r"const int state = flowlimit_state\(&flowlimit\);", "publishFlowLimit(): state from flowlimit_state()")
         need(publish, r'PSTR\("%s/flowlimit/%s"\)', "publishFlowLimit(): topic <base>/flowlimit/<name>")
         need(publish, r"mqtt_client\.publish\(topic, value, true\)", "publishFlowLimit(): retained")
     except ValueError:
@@ -172,6 +173,7 @@ MUTATIONS = [
     ("ino", "          flowlimitReceived(data);\n", ""),
     ("ino", "  if (heishamonSettings.listenonly) return;\n  uint8_t cmd[FLOWLIMIT_DATAGRAM_SIZE];", "  uint8_t cmd[FLOWLIMIT_DATAGRAM_SIZE];"),
     ("ino", "      publishFlowLimit(true);\n", ""),
+    ("ino", "  if (flowlimit_sensor_check(&flowlimit, millis(), msg, sizeof(msg))) log_message(msg);\n", ""),
     ("ino", "mqtt_client.publish(topic, value, true)", "mqtt_client.publish(topic, value, false)"),
     ("wf", '  jsonDoc[F("flowlimit_cool_min")] = heishamonSettings->flowlimitCoolMin;\n', ""),
     ("wf", 'jsonDoc[F("flowlimit_heat_max")] = atoi(tmp->value.c_str());', 'jsonDoc[F("flowlimit_heat_max")] = tmp->value;'),

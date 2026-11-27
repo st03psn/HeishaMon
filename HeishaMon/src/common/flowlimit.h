@@ -25,9 +25,10 @@
  *   - curve mode: the shift is lowered until highest heat curve target + shift <= heat_max
  *     (cooling: raised until lowest cool curve target + shift >= cool_min), within -5..5. The curve is
  *     taken from the same datagram where it sets it, else from the last received data;
- *   - the request of a zone is only touched while its sensor is known to be water temperature or external
- *     thermostat; with an internal thermostat or a thermistor it is a room setpoint (no flow), unknown (no data
- *     yet): left alone. Curve targets are always clamped;
+ *   - the request of a zone is never touched while its sensor is an internal thermostat or a thermistor (a room
+ *     setpoint, no flow). Sensor not known (no data yet, byte 22 = 0, an invalid nibble in the datagram falls
+ *     back to the received sensor): the conservative rule, a request outside -5..5 is a flow target and is
+ *     clamped (a room setpoint is then only touched when heat_max is below it). Curve targets are always clamped;
  *   - mode or curve not known (invalid mode bits, a received curve byte 0): a request outside -5..5 counts as a
  *     direct target, a shift passes.
  *
@@ -60,7 +61,8 @@
 
 #define FLOWLIMIT_RETRY_MS (10UL * 60UL * 1000UL)  // at most one correction per 10 minutes
 #define FLOWLIMIT_MAX_TRIES 3                      // corrections without effect before a part is given up
-#define FLOWLIMIT_DATAGRAM_SIZE 110                // a main command without checksum
+#define FLOWLIMIT_DATAGRAM_SIZE 110
+#define FLOWLIMIT_SENSOR_MS (5UL * 60UL * 1000UL)  // zone sensor missing this long: logged, shown in the state                // a main command without checksum
 
 // the parts the watchdog counts separately: bit (zone * 4 + cooling * 2 + request), curve targets and
 // request apart, so a curve the heat pump does not take does not stop the watch of the request
@@ -90,6 +92,12 @@ struct flowlimit_t {
   uint8_t pending;                 // parts of the correction flowlimit_watchdog() returned last
   uint8_t corrected;               // a correction was sent, last_ms is valid
   uint32_t last_ms;
+  uint8_t logged;                  // the correction was logged at log_ms (once per FLOWLIMIT_RETRY_MS)
+  uint32_t log_ms;
+  // zone sensor not reported
+  uint32_t sensor_since;           // when it was first seen missing
+  uint8_t sensor_unknown;          // 0 reported, 1 missing since sensor_since, 2 missing for FLOWLIMIT_SENSOR_MS:
+                                   // logged once, flowlimit/state shows it
 };
 
 #define FLOWLIMIT_VALID_CURVE(zone, cooling, point) (1u << ((zone) * 4 + (cooling) * 2 + (point)))
@@ -122,5 +130,11 @@ int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, ch
 // The correction flowlimit_watchdog() returned was accepted for sending: count it and start the 10 minutes.
 // Not called (send queue full): the next data block tries again, nothing is counted.
 void flowlimit_sent(struct flowlimit_t *fl, uint32_t now_ms);
+
+// After flowlimit_update(): watches whether the heat pump reports the sensor of the zones in use. Missing for
+// FLOWLIMIT_SENSOR_MS: sets sensor_unknown, writes a warning to log and returns 1 (once, until it is reported).
+int flowlimit_sensor_check(struct flowlimit_t *fl, uint32_t now_ms, char *log, size_t logsize);
+// The value of <base>/flowlimit/state: 0 off, 1 on, 2 a part given up, 3 zone sensor not reported, 4 both.
+int flowlimit_state(const struct flowlimit_t *fl);
 
 #endif

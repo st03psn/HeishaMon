@@ -599,14 +599,14 @@ void publishRulesState(bool force) {
 bool send_command(byte* command, int length);
 
 // The flow temperature limit (src/common/flowlimit.h), retained: <base>/flowlimit/state (0 = off, 1 = on,
-// 2 = on, but a part is no longer corrected because the heat pump did not take the corrections), surface,
+// 2 = a part is no longer corrected, 3 = the zone sensor is not reported, 4 = both), surface,
 // heat_max and cool_min. Published on connect, on a change and every updateAllTime seconds.
 void publishFlowLimit(bool force) {
   static long reported = -1;
   static unsigned long lastPublish = 0;
   const unsigned long now = millis();
   if (!mqtt_client.connected()) return;
-  const int state = flowlimit_on(&flowlimit) ? (flowlimit.given_up ? 2 : 1) : 0;
+  const int state = flowlimit_state(&flowlimit);
   const long signature = ((long)state << 24) | ((long)flowlimit.surface << 16) | ((long)(uint8_t)flowlimit.heat_max << 8) | (uint8_t)flowlimit.cool_min;
   if (!force && reported == signature && (unsigned long)(now - lastPublish) < heishamonSettings.updateAllTime * 1000UL) return;
   const int values[] = { state, flowlimit.surface, flowlimit.heat_max, flowlimit.cool_min };
@@ -632,9 +632,10 @@ void publishFlowLimit(bool force) {
 // whose result (the length) does not depend on the limit.
 void flowlimitReceived(const char *block) {
   flowlimit_update(&flowlimit, (const uint8_t *)block, DATASIZE);
+  char msg[256];
+  if (flowlimit_sensor_check(&flowlimit, millis(), msg, sizeof(msg))) log_message(msg);
   if (heishamonSettings.listenonly) return;
   uint8_t cmd[FLOWLIMIT_DATAGRAM_SIZE];
-  char msg[256];
   int len = flowlimit_watchdog(&flowlimit, millis(), cmd, msg, sizeof(msg));
   if (msg[0] != '\0') log_message(msg);
   // counted as a try only when the command was accepted (sent, buffered or queued), else again next time

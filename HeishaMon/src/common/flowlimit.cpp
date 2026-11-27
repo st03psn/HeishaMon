@@ -50,6 +50,9 @@ void flowlimit_configure(struct flowlimit_t *fl, uint8_t surface, int heat_max, 
     fl->given_up = 0;
     fl->pending = 0;
     fl->corrected = 0;
+    fl->logged = 0;
+    fl->sensor_since = 0;
+    fl->sensor_unknown = 0;
   }
 }
 
@@ -99,22 +102,24 @@ static int modeOf(const struct flowlimit_t *fl, const uint8_t *cmd, int shift, i
 static int sensorOf(const struct flowlimit_t *fl, const uint8_t *cmd, int zone) {
   const int field = (cmd[BYTE_SENSOR] >> (zone * 4)) & 0x0F;
   if (field >= 1 && field <= 4) return field - 1;
-  if (field == 0 && fl->have_data) return fl->sensor[zone];
-  return -1;
+  return fl->have_data ? fl->sensor[zone] : -1;  // 0 (no change) or an invalid field: the received one
 }
 
 static void request(const struct flowlimit_t *fl, uint8_t *cmd, int zone, bool cooling, int mode, int *changes, char *log, size_t logsize) {
   const uint8_t address = pgm_read_byte(cooling ? &coolRequestByte[zone] : &heatRequestByte[zone]);
   if (cmd[address] == 0) return;
-  // with an internal thermostat or a thermistor the request is a room setpoint, not a flow temperature;
-  // sensor not known: not touched
+  // with an internal thermostat or a thermistor the request is a room setpoint, not a flow temperature: not
+  // touched. Sensor not known: the conservative rule below (outside -5..5 it is a target)
   const int sensor = sensorOf(fl, cmd, zone);
-  if (sensor != 0 && sensor != 1) return;
+  if (sensor == 2 || sensor == 3) return;
   const int value = (int)cmd[address] - 128;
   const int limitTemp = cooling ? fl->cool_min : fl->heat_max;
   int limit;
   bool curve = false;
-  if (mode == 1) {
+  if (sensor < 0) {
+    if (value >= -5 && value <= 5) return;
+    limit = limitTemp;
+  } else if (mode == 1) {
     limit = limitTemp;
   } else {
     // the curve of the zone: from this datagram where it sets it, else from the received data
@@ -292,7 +297,9 @@ int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, ch
   // the correction: the received values of the parts corrected now in one datagram, clamped like a command
   // (a request whose curve is corrected in the same datagram is judged against the corrected curve, else
   // against the received one), then only the changed bytes, everything else 0 = no change
-  if (log != NULL && logsize > 0) {
+  // logged at most once per FLOWLIMIT_RETRY_MS, also while send_command() does not accept the correction
+  const bool say = log != NULL && logsize > 0 && (!fl->logged || (uint32_t)(now_ms - fl->log_ms) >= FLOWLIMIT_RETRY_MS);
+  if (say) {
     snprintf_P(log, logsize, PSTR("Flow limit: received value outside the limit (heating max %d, cooling min %d), sending a correction"), fl->heat_max, fl->cool_min);
   }
   receivedParts(fl, send, 0, curves, curvesReceived, NULL, 0);
@@ -301,7 +308,7 @@ int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, ch
     if (curvesReceived[i] != 0) received[i] = curvesReceived[i];
   }
   memcpy(cmd, received, FLOWLIMIT_DATAGRAM_SIZE);
-  flowlimit_apply(fl, cmd, FLOWLIMIT_DATAGRAM_SIZE, log, logsize);
+  flowlimit_apply(fl, cmd, FLOWLIMIT_DATAGRAM_SIZE, say ? log : NULL, say ? logsize : 0);
   uint8_t pending = 0;
   for (int part = 0; part < FLOWLIMIT_PARTS; part++) {
     uint8_t bytes[2];
@@ -314,6 +321,12 @@ int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, ch
     if (cmd[i] == received[i]) cmd[i] = 0;
   }
   fl->pending = pending;
+  if (pending && say) {
+    fl->logged = 1;
+    fl->log_ms = now_ms;
+  } else if (!pending && say) {
+    log[0] = '\0';
+  }
   return pending ? FLOWLIMIT_DATAGRAM_SIZE : 0;
 }
 
@@ -325,4 +338,35 @@ void flowlimit_sent(struct flowlimit_t *fl, uint32_t now_ms) {
   fl->pending = 0;
   fl->corrected = 1;
   fl->last_ms = now_ms;
+}
+
+int flowlimit_sensor_check(struct flowlimit_t *fl, uint32_t now_ms, char *log, size_t logsize) {
+  if (log != NULL && logsize > 0) log[0] = '\0';
+  if (!flowlimit_on(fl) || !fl->have_data) return 0;
+  bool unknown = false;
+  for (int zone = 0; zone < 2; zone++) {
+    if (((fl->zones >> zone) & 1) && fl->sensor[zone] < 0) unknown = true;
+  }
+  if (!unknown) {
+    fl->sensor_since = 0;
+    fl->sensor_unknown = 0;
+    return 0;
+  }
+  if (fl->sensor_unknown == 2) return 0;
+  if (fl->sensor_unknown == 0) {
+    fl->sensor_unknown = 1;
+    fl->sensor_since = now_ms;
+    return 0;
+  }
+  if ((uint32_t)(now_ms - fl->sensor_since) < FLOWLIMIT_SENSOR_MS) return 0;
+  fl->sensor_unknown = 2;
+  if (log != NULL && logsize > 0) {
+    snprintf_P(log, logsize, PSTR("Flow limit: the heat pump does not report the zone sensor (Z1/Z2_Sensor_Settings), the request temperatures are only limited by the conservative rule (a value outside -5..5 is a flow target)."));
+  }
+  return 1;
+}
+
+int flowlimit_state(const struct flowlimit_t *fl) {
+  if (!flowlimit_on(fl)) return 0;
+  return 1 + (fl->given_up ? 1 : 0) + (fl->sensor_unknown == 2 ? 2 : 0);
 }

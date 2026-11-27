@@ -207,8 +207,14 @@ static void test_shift() {
 static void test_unknown() {
   flowlimit_t fl = limit(FLOWLIMIT_FLOOR, 35, 16);  // no data received: the zone sensor is not known
   uint8_t cmd[N];
-  command(cmd); cmd[38] = t(40); cmd[39] = t(8); cmd[75] = t(45);
-  CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 1 && cmd[38] == t(40) && cmd[39] == t(8) && cmd[75] == t(35));
+  // a retained MQTT command at boot: outside -5..5 a target, clamped; a shift passes
+  command(cmd); cmd[38] = t(45); cmd[39] = t(8); cmd[75] = t(45);
+  CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 3 && cmd[38] == t(35) && cmd[39] == t(16) && cmd[75] == t(35));
+  command(cmd); cmd[38] = t(5); cmd[41] = t(-5); cmd[40] = t(21);
+  CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 0 && cmd[38] == t(5) && cmd[41] == t(-5) && cmd[40] == t(21));
+  // the datagram says thermistor: a room setpoint, not touched
+  command(cmd); cmd[22] = 0x04; cmd[38] = t(40);
+  CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 0 && cmd[38] == t(40));
   // the datagram itself says water temperature (SetZ1SensorSettings 0): the unknown mode rule
   command(cmd); cmd[22] = 0x01; cmd[38] = t(40);
   CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 1 && cmd[38] == t(35));
@@ -480,14 +486,23 @@ static void test_review_probes() {
     flowlimit_update(&fl, d.b, sizeof(d.b));
     command(cmd); cmd[38] = t(40); cmd[40] = t(40);
     CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 2 && cmd[38] == t(35) && cmd[40] == t(35));
-    d.b[22] = 0x00;  // not known: left alone
+    d.b[22] = 0x00;  // not known: the conservative rule (direct mode is not trusted for an unknown sensor)
     flowlimit_update(&fl, d.b, sizeof(d.b));
     CHECK(fl.sensor[0] == -1 && fl.sensor[1] == -1);
-    command(cmd); cmd[38] = t(40);
-    CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 0 && cmd[38] == t(40));
+    command(cmd); cmd[38] = t(40); cmd[40] = t(5);
+    CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 1 && cmd[38] == t(35) && cmd[40] == t(5));
     d.b[38] = t(45);
     flowlimit_update(&fl, d.b, sizeof(d.b));
-    CHECK(wd(&fl, 0, cmd, log, sizeof(log)) == 0);
+    CHECK(wd(&fl, 0, cmd, log, sizeof(log)) == N);
+    for (int i = 4; i < N; i++) CHECK(cmd[i] == (i == 38 ? t(35) : 0));
+    // an invalid sensor nibble in a datagram (raw, CZ-TAW1) falls back to the received sensor
+    d.b[22] = 0x41;  // zone 1 water, zone 2 thermistor
+    flowlimit_update(&fl, d.b, sizeof(d.b));
+    command(cmd); cmd[22] = 0xFF; cmd[38] = t(40); cmd[40] = t(40);
+    CHECK(flowlimit_apply(&fl, cmd, N, NULL, 0) == 1 && cmd[38] == t(35) && cmd[40] == t(40));
+    flowlimit_t none = limit(FLOWLIMIT_FLOOR, 35, 16);  // no data: invalid nibble = unknown, the conservative rule
+    command(cmd); cmd[22] = 0x0F; cmd[38] = t(40);
+    CHECK(flowlimit_apply(&none, cmd, N, NULL, 0) == 1 && cmd[38] == t(35));
   }
   // a received byte 0 is no value: cool curve bytes 0 must not turn a cool request of -2 into +5
   {
@@ -565,8 +580,15 @@ static int modelRequest(const flowlimit_t *fl, const block_t *d, bool received, 
   if (cmd[address] == 0) return 0;
   int field = (cmd[22] >> (zone * 4)) & 0x0F;
   int sensor = (field >= 1 && field <= 4) ? field - 1 : -1;
-  if (field == 0 && received) { int r = ((d->b[22] >> (zone * 4)) & 0x0F); sensor = (r >= 1 && r <= 4) ? r - 1 : -1; }
-  if (sensor != 0 && sensor != 1) return cmd[address];
+  if ((field < 1 || field > 4) && received) { int r = ((d->b[22] >> (zone * 4)) & 0x0F); sensor = (r >= 1 && r <= 4) ? r - 1 : -1; }
+  if (sensor == 2 || sensor == 3) return cmd[address];
+  if (sensor < 0) {  // not known: outside -5..5 a target
+    const int value = cmd[address] - 128;
+    const int bound = cooling ? fl->cool_min : fl->heat_max;
+    if (value >= -5 && value <= 5) return cmd[address];
+    if (cooling ? value >= bound : value <= bound) return cmd[address];
+    return bound + 128;
+  }
   const int shift = cooling ? 2 : 0;
   int m = (cmd[28] >> shift) & 3;
   int mode = (m == 1 || m == 2) ? m - 1 : -1;
@@ -639,8 +661,8 @@ static void test_invariant() {
       if (i >= 38 && i <= 41) {
         const int zone = (i - 38) / 2;
         int field = (before[22] >> (zone * 4)) & 0x0F;
-        int sensor = field ? field - 1 : (fl.have_data ? fl.sensor[zone] : -1);
-        ok = ok && (sensor == 0 || sensor == 1);
+        int sensor = (field >= 1 && field <= 4) ? field - 1 : (fl.have_data ? fl.sensor[zone] : -1);
+        ok = ok && sensor != 2 && sensor != 3;
       }
       if (!ok) {
         printf("FAIL invariant apply round %d byte %d: %d -> %d\n", round, i, before[i] - 128, cmd[i] - 128);
@@ -655,7 +677,7 @@ static void test_invariant() {
     for (int i = 4; i < N; i++) {
       if (cmd[i] == 0) continue;
       bool ok = d.b[i] != 0 && ((heatByte(i) && cmd[i] < d.b[i]) || (coolByte(i) && cmd[i] > d.b[i]));
-      if (i >= 38 && i <= 41) ok = ok && (fl.sensor[(i - 38) / 2] == 0 || fl.sensor[(i - 38) / 2] == 1);
+      if (i >= 38 && i <= 41) ok = ok && fl.sensor[(i - 38) / 2] != 2 && fl.sensor[(i - 38) / 2] != 3;
       if (!ok) {
         printf("FAIL invariant watchdog round %d byte %d: received %d, sent %d\n", round, i, d.b[i] - 128, cmd[i] - 128);
         failures++;
@@ -663,6 +685,61 @@ static void test_invariant() {
       }
     }
   }
+}
+
+// the zone sensor not reported for 5 minutes: logged once, shown in the state; a correction the queue does not
+// take is logged once per 10 minutes
+static void test_sensor_and_log() {
+  char log[256];
+  uint8_t cmd[N];
+  flowlimit_t fl = limit(FLOWLIMIT_FLOOR, 35, 16);
+  CHECK(flowlimit_state(&fl) == 1);
+  CHECK(flowlimit_sensor_check(&fl, 1000, log, sizeof(log)) == 0 && log[0] == 0);  // no data yet: nothing
+  block_t d = received(0, 0, 0);  // zone 1 only
+  d.b[22] = 0x40;  // zone 1 not reported, zone 2 (not in use) thermistor
+  flowlimit_update(&fl, d.b, sizeof(d.b));
+  uint32_t now = 2000;
+  for (; now < 2000 + FLOWLIMIT_SENSOR_MS; now += 5000) {
+    CHECK(flowlimit_sensor_check(&fl, now, log, sizeof(log)) == 0 && log[0] == 0);
+  }
+  CHECK(flowlimit_state(&fl) == 1);
+  CHECK(flowlimit_sensor_check(&fl, now, log, sizeof(log)) == 1 && strstr(log, "does not report the zone sensor"));
+  CHECK(flowlimit_state(&fl) == 3);
+  for (int i = 1; i < 50; i++) CHECK(flowlimit_sensor_check(&fl, now + i * 5000, log, sizeof(log)) == 0 && log[0] == 0);
+  fl.given_up = 1;
+  CHECK(flowlimit_state(&fl) == 4);
+  fl.given_up = 0;
+  // reported again: back to 1, and a later loss is reported again
+  d.b[22] = 0x41;
+  flowlimit_update(&fl, d.b, sizeof(d.b));
+  CHECK(flowlimit_sensor_check(&fl, now + 300000, log, sizeof(log)) == 0 && flowlimit_state(&fl) == 1);
+  d.b[22] = 0x00;
+  flowlimit_update(&fl, d.b, sizeof(d.b));
+  CHECK(flowlimit_sensor_check(&fl, now + 310000, log, sizeof(log)) == 0);
+  CHECK(flowlimit_sensor_check(&fl, now + 310000 + FLOWLIMIT_SENSOR_MS, log, sizeof(log)) == 1);
+  // a zone not in use does not count; the limit off: state 0
+  flowlimit_t z = limit(FLOWLIMIT_FLOOR, 35, 16);
+  block_t dz = received(0, 0, 0);
+  dz.b[22] = 0x01;  // zone 2 (not in use) not reported
+  flowlimit_update(&z, dz.b, sizeof(dz.b));
+  CHECK(flowlimit_sensor_check(&z, 10, log, sizeof(log)) == 0 && flowlimit_sensor_check(&z, 10 + 2 * FLOWLIMIT_SENSOR_MS, log, sizeof(log)) == 0);
+  flowlimit_configure(&fl, FLOWLIMIT_OFF, 35, 16);
+  CHECK(flowlimit_state(&fl) == 0);
+
+  // a correction the queue does not take: tried with every data block, logged once per 10 minutes
+  flowlimit_t busy = limit(FLOWLIMIT_FLOOR, 35, 16);
+  block_t db = received(0, 0, 0);
+  db.b[75] = t(45);
+  flowlimit_update(&busy, db.b, sizeof(db.b));
+  int logged = 0;
+  for (uint32_t at = 0; at < FLOWLIMIT_RETRY_MS; at += 5000) {
+    CHECK(flowlimit_watchdog(&busy, at, cmd, log, sizeof(log)) == N && cmd[75] == t(35));
+    if (log[0]) logged++;
+  }
+  CHECK(logged == 1);
+  CHECK(flowlimit_watchdog(&busy, FLOWLIMIT_RETRY_MS, cmd, log, sizeof(log)) == N && strstr(log, "sending a correction [limit: Z1 heat curve high 45>35]"));
+  flowlimit_sent(&busy, FLOWLIMIT_RETRY_MS);
+  CHECK(flowlimit_watchdog(&busy, 2 * FLOWLIMIT_RETRY_MS, cmd, log, sizeof(log)) == N && log[0] != 0);  // the next one: logged
 }
 
 int main() {
@@ -675,6 +752,7 @@ int main() {
   test_settings();
   test_review_probes();
   test_invariant();
+  test_sensor_and_log();
   if (failures) {
     printf("%d checks failed\n", failures);
     return 1;
