@@ -28,7 +28,7 @@
  * Watchdog: when the received data shows a value outside the limit (set at the remote controller, by the
  * CZ-TAW1 or before the limit was switched on), one correcting datagram with only the clamped bytes, at most
  * once per FLOWLIMIT_RETRY_MS, for the zones in use (cooling only while the operating mode can cool, so a heat
- * only unit is not bothered with its unused cooling values). Counted per zone and heating / cooling: after FLOWLIMIT_MAX_TRIES corrections
+ * only unit is not bothered with its unused cooling values). Counted per zone, heating / cooling and curve / request: after FLOWLIMIT_MAX_TRIES corrections
  * without effect that part is given up (warning in the log) until the settings change or a reboot; the other
  * parts keep being watched. A received value inside the limit resets the count of its part.
  */
@@ -56,8 +56,9 @@
 #define FLOWLIMIT_MAX_TRIES 3                      // corrections without effect before a part is given up
 #define FLOWLIMIT_DATAGRAM_SIZE 110                // a main command without checksum
 
-// the parts the watchdog counts separately: bit (zone * 2 + cooling)
-#define FLOWLIMIT_PARTS 4
+// the parts the watchdog counts separately: bit (zone * 4 + cooling * 2 + request), curve targets and
+// request apart, so a curve the heat pump does not take does not stop the watch of the request
+#define FLOWLIMIT_PARTS 8
 
 struct flowlimit_t {
   // settings

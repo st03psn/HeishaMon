@@ -39,7 +39,7 @@ Ruleset validation does not publish execution events. A returned error is report
 
 Topic | Response/Description
 --- | ---
-flowlimit/state | Read-only, retained: `0` = off (no limit), `1` = on, `2` = on, but the watchdog stopped correcting a zone (heating or cooling) because the heat pump did not take 3 corrections; see the log. Commands are still clamped.
+flowlimit/state | Read-only, retained: `0` = off (no limit), `1` = on, `2` = on, but the watchdog stopped correcting a value (curve or request of a zone) because the heat pump did not take 3 corrections; see the log. Commands are still clamped.
 flowlimit/surface | Read-only, retained: the chosen heating surface, `0` = off, `1` = underfloor heating, `2` = radiators, `3` = custom
 flowlimit/heat_max | Read-only, retained: the maximum heating flow temperature in °C (only applied while `state` is not `0`)
 flowlimit/cool_min | Read-only, retained: the minimum cooling flow temperature in °C (only applied while `state` is not `0`)
@@ -52,7 +52,7 @@ While a heating surface is chosen, HeishaMon clamps every main command before it
 - `SetZ1/Z2HeatRequestTemperature` in direct mode (`Heating_Mode` 1) at most `heat_max`; in compensation curve mode (`Heating_Mode` 0) the shift is lowered until the highest heat curve target of the zone plus the shift is at most `heat_max` (within -5..5). Cooling the same way with `cool_min` and the lowest cool curve target;
 - before the first data from the heat pump (mode or curve unknown), a request outside -5..5 counts as a direct target and is clamped, a shift passes.
 
-The log line of the command says what was clamped, for example `SetZ1HeatRequestTemperature set to 40 [limit: Z1 heat request 40>35]`. When the data of the heat pump shows a value outside the limit (set at the remote controller, or before the limit was switched on), HeishaMon sends one correction, at most every 10 minutes, for the zones in use (`Zones_State`). After 3 corrections without effect it stops correcting that zone (heating or cooling), logs a warning and `flowlimit/state` becomes `2`, until the settings change or a reboot. In listen only mode nothing is corrected.
+The log line of the command says what was clamped, for example `SetZ1HeatRequestTemperature set to 40 [limit: Z1 heat request 40>35]`. When the data of the heat pump shows a value outside the limit (set at the remote controller, or before the limit was switched on), HeishaMon sends one correction, at most every 10 minutes, for the zones in use (`Zones_State`). After 3 corrections without effect it stops correcting that value (curve or request, per zone and heating or cooling), logs a warning and `flowlimit/state` becomes `2`, until the settings change or a reboot. In listen only mode nothing is corrected.
 
 ## Log Topic:
 

@@ -253,7 +253,7 @@ static void test_watchdog() {
   // still not taken after three corrections: given up, with a warning, once
   now += FLOWLIMIT_RETRY_MS;
   CHECK(flowlimit_watchdog(&fl, now, cmd, log, sizeof(log)) == 0);
-  CHECK(strstr(log, "zone 1 heating is still outside the limit after 3 corrections") != NULL);
+  CHECK(strstr(log, "zone 1 heating curve is still outside the limit after 3 corrections") != NULL);
   CHECK(fl.given_up == 1);
   for (int i = 1; i <= 20; i++) {
     CHECK(flowlimit_watchdog(&fl, now + i * FLOWLIMIT_RETRY_MS, cmd, log, sizeof(log)) == 0 && log[0] == 0);
@@ -268,7 +268,17 @@ static void test_watchdog() {
   d.b[91] = t(16);
   flowlimit_update(&fl, d.b, sizeof(d.b));
   CHECK(flowlimit_watchdog(&fl, now + 1000, cmd, log, sizeof(log)) == 0);
-  CHECK(fl.tries[3] == 0 && fl.given_up == 1);
+  CHECK(fl.tries[6] == 0 && fl.given_up == 1);
+  // the curve is given up, its request is still watched: a direct target of 50 set at the remote is corrected
+  d.b[28] = (uint8_t)(2 | (1 << 2) | 0x50);  // heating direct
+  d.b[38] = t(50);
+  flowlimit_update(&fl, d.b, sizeof(d.b));
+  CHECK(flowlimit_watchdog(&fl, now + FLOWLIMIT_RETRY_MS, cmd, log, sizeof(log)) == N);
+  for (int i = 4; i < N; i++) CHECK(cmd[i] == (i == 38 ? t(35) : 0));
+  d.b[38] = t(0);  // back to curve mode, shift 0
+  d.b[28] = (uint8_t)(1 | (1 << 2) | 0x50);
+  flowlimit_update(&fl, d.b, sizeof(d.b));
+  now += FLOWLIMIT_RETRY_MS;
   // saving the same settings again does not reset, changed settings do
   flowlimit_configure(&fl, FLOWLIMIT_FLOOR, 35, 16);
   CHECK(fl.given_up == 1);

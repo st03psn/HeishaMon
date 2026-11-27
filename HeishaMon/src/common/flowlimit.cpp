@@ -185,13 +185,18 @@ static void header(uint8_t *cmd) {
   cmd[3] = 0x10;
 }
 
-// the bytes of a part (zone, heating / cooling): two curve targets and the request
-static void partBytes(int part, uint8_t *bytes) {
-  const int zone = part >> 1;
-  const bool cooling = part & 1;
+// the bytes of a part: part = zone * 4 + cooling * 2 + request; the two curve targets, or the request.
+// Returns the number of bytes.
+static int partBytes(int part, uint8_t *bytes) {
+  const int zone = part >> 2;
+  const bool cooling = (part >> 1) & 1;
+  if (part & 1) {
+    bytes[0] = pgm_read_byte(cooling ? &coolRequestByte[zone] : &heatRequestByte[zone]);
+    return 1;
+  }
   bytes[0] = pgm_read_byte(cooling ? &coolCurveByte[zone][0] : &heatCurveByte[zone][0]);
   bytes[1] = pgm_read_byte(cooling ? &coolCurveByte[zone][1] : &heatCurveByte[zone][1]);
-  bytes[2] = pgm_read_byte(cooling ? &coolRequestByte[zone] : &heatRequestByte[zone]);
+  return 2;
 }
 
 int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, char *log, size_t logsize) {
@@ -216,22 +221,22 @@ int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, ch
   const bool due = !fl->corrected || (uint32_t)(now_ms - fl->last_ms) >= FLOWLIMIT_RETRY_MS;
   uint8_t send = 0;
   for (int part = 0; part < FLOWLIMIT_PARTS; part++) {
-    uint8_t bytes[3];
-    partBytes(part, bytes);
+    uint8_t bytes[2];
+    const int count = partBytes(part, bytes);
     bool outside = false;
-    for (int i = 0; i < 3; i++) outside = outside || cmd[bytes[i]] != received[bytes[i]];
+    for (int i = 0; i < count; i++) outside = outside || cmd[bytes[i]] != received[bytes[i]];
     if (!outside) {
       fl->tries[part] = 0;
       continue;
     }
-    const bool watched = ((fl->zones >> (part >> 1)) & 1) && (!(part & 1) || fl->cooling) && !((fl->given_up >> part) & 1);
+    const bool watched = ((fl->zones >> (part >> 2)) & 1) && (!((part >> 1) & 1) || fl->cooling) && !((fl->given_up >> part) & 1);
     if (!watched || !due) continue;
     if (fl->tries[part] >= FLOWLIMIT_MAX_TRIES) {
       // one warning per call; the other parts follow with the next data block
       fl->given_up |= (uint8_t)(1 << part);
       if (log != NULL && logsize > 0) {
-        snprintf_P(log, logsize, PSTR("Flow limit: zone %d %s is still outside the limit after %d corrections, the heat pump does not take them. Not corrected again until the settings change or a reboot."),
-                   (part >> 1) + 1, (part & 1) ? "cooling" : "heating", FLOWLIMIT_MAX_TRIES);
+        snprintf_P(log, logsize, PSTR("Flow limit: zone %d %s %s is still outside the limit after %d corrections, the heat pump does not take them. Not corrected again until the settings change or a reboot."),
+                   (part >> 2) + 1, ((part >> 1) & 1) ? "cooling" : "heating", (part & 1) ? "request" : "curve", FLOWLIMIT_MAX_TRIES);
       }
       return 0;
     }
@@ -243,9 +248,9 @@ int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, ch
   header(cmd);
   for (int part = 0; part < FLOWLIMIT_PARTS; part++) {
     if (!((send >> part) & 1)) continue;
-    uint8_t bytes[3];
-    partBytes(part, bytes);
-    for (int i = 0; i < 3; i++) cmd[bytes[i]] = received[bytes[i]];
+    uint8_t bytes[2];
+    const int count = partBytes(part, bytes);
+    for (int i = 0; i < count; i++) cmd[bytes[i]] = received[bytes[i]];
     fl->tries[part]++;
   }
   if (log != NULL && logsize > 0) {
