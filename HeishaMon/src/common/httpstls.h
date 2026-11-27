@@ -39,6 +39,9 @@
 #define HTTPSTLS_HANDSHAKE_TIMEOUT_MS 10000UL  // a handshake that is not done by then is closed
 #define HTTPSTLS_CACHE_ENTRIES 6               // sessions kept for resumption
 #define HTTPSTLS_CACHE_TIMEOUT_S 3600          // and for how long
+#define HTTPSTLS_FULL_MAX 6                    // full handshakes (ECC work) per window; resumed sessions do not count
+#define HTTPSTLS_FULL_WINDOW_MS 10000UL
+#define HTTPSTLS_RELOAD_FORCE_MS 12000UL       // a new certificate waits at most this long for open connections, then closes them
 /*
  * Memory a connection needs (mbedtls 3.6 of the ESP32 core, fixed
  * MBEDTLS_SSL_MAX_CONTENT_LEN 16384): two record buffers of about 16.7 kB,
@@ -59,6 +62,8 @@ typedef struct httpstls_stats_t {
   uint32_t failed;            // failed or timed out handshakes
   uint32_t refused_cap;       // connections closed at accept: HTTPSTLS_MAX_CONN reached
   uint32_t refused_memory;    // connections closed at accept: not enough memory
+  uint32_t refused_rate;      // full handshakes refused after the ClientHello: HTTPSTLS_FULL_MAX per window reached
+  uint32_t resumed;           // handshakes that resumed a session (no ECC work)
   uint32_t last_ms;           // duration of the last handshake (first byte to finished, with the network)
   uint32_t max_ms;
   uint32_t last_step_ms;      // longest single step of the last handshake (time loop() was blocked)
@@ -113,6 +118,22 @@ int httpstls_read(struct httpstls_conn_t *conn, unsigned char *buf, size_t len);
  * may have grown at the end in between), HTTPSTLS_FAIL: an error.
  */
 int httpstls_write(struct httpstls_conn_t *conn, const unsigned char *buf, size_t len);
+
+/*
+ * Rate of full handshakes: may one more start at `now`? Counts it when yes.
+ * Called after the ServerHello of a connection that did not resume a session,
+ * before the expensive step; a refused one is closed without the ECC work.
+ */
+bool httpstls_full_allowed(unsigned long now);
+void httpstls_full_reset(void);  // tests
+
+/* Loading a new certificate: what to do now, `waited` ms after it was asked for */
+enum {
+  HTTPSTLS_RELOAD_WAIT = 0,   // close idle TLS connections, wait for the others
+  HTTPSTLS_RELOAD_FORCE,      // waited long enough: close every TLS connection
+  HTTPSTLS_RELOAD_NOW,        // no TLS connection open: load
+};
+uint8_t httpstls_reload_step(unsigned long waited, uint8_t active);
 
 /* Implemented by the firmware (and the tests) */
 unsigned long httpstls_platform_millis(void);

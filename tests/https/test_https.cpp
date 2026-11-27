@@ -117,7 +117,7 @@ static void test_params(void) {
   uint32_t ips[] = { ip4(192, 168, 1, 20), 0, ip4(192, 168, 1, 20), ip4(10, 0, 0, 2), ip4(1, 2, 3, 4), ip4(5, 6, 7, 8), ip4(9, 9, 9, 9) };
   httpscert_params(&p, "HeishaMon-Kitchen", ips, 7, 1780000000L);  // 2026-05-28
   CHECK(strcmp(p.host, "heishamon-kitchen") == 0);
-  CHECK(strcmp(p.subject, "CN=heishamon-kitchen,O=HeishaMon") == 0);
+  CHECK(strcmp(p.subject, "CN=heishamon-kitchen.local,O=HeishaMon") == 0);  // the name to type, lower case
   CHECK(strcmp(p.dns_local, "heishamon-kitchen.local") == 0);
   CHECK(p.nips == 4);  // 0 and the duplicate skipped, at most four
   CHECK(memcmp(p.ip[0], "\xc0\xa8\x01\x14", 4) == 0);
@@ -168,7 +168,7 @@ static void test_generate_and_parse(void) {
   CHECK(httpscert_parse(store.data(), store.size(), httpstls_random, rng(), &crt, &key, &info) == HTTPSCERT_OK);
   CHECK(info.generated == 1);
   CHECK(strcmp(info.host, "heishamon") == 0);
-  CHECK(strcmp(info.subject, "CN=heishamon, O=HeishaMon") == 0);
+  CHECK(strcmp(info.subject, "CN=heishamon.local, O=HeishaMon") == 0);
   CHECK(strcmp(info.key_type, "EC P-256") == 0);
   CHECK(strncmp(info.not_before, "2026-05-27", 10) == 0);
   CHECK(strncmp(info.not_after, "2036-05-27", 10) == 0);
@@ -299,6 +299,32 @@ static void test_upload(void) {
     mbedtls_pk_free(&key);
   }
   CHECK(strlen(httpscert_error_text(HTTPSCERT_ERR_MISMATCH)) > 0);
+}
+
+static void test_policies(void) {
+  // which load errors replace the stored file: only a file that is wrong, never a passing trouble
+  int damaged[] = { HTTPSCERT_ERR_FORMAT, HTTPSCERT_ERR_CERT, HTTPSCERT_ERR_KEY, HTTPSCERT_ERR_MISMATCH, HTTPSCERT_ERR_KEYTYPE, HTTPSCERT_ERR_SIZE };
+  for(int e : damaged) CHECK(httpscert_damaged(e));
+  int passing[] = { HTTPSCERT_OK, HTTPSCERT_ERR_MEMORY, HTTPSCERT_ERR_IO, HTTPSCERT_ERR_GENERATE };
+  for(int e : passing) CHECK(!httpscert_damaged(e));
+  CHECK(strcmp(httpscert_error_text(HTTPSCERT_ERR_IO), "unknown error") != 0);
+  // a new certificate: waits for open connections, then forces them closed
+  CHECK(httpstls_reload_step(0, 0) == HTTPSTLS_RELOAD_NOW);
+  CHECK(httpstls_reload_step(HTTPSTLS_RELOAD_FORCE_MS * 10, 0) == HTTPSTLS_RELOAD_NOW);
+  CHECK(httpstls_reload_step(0, 1) == HTTPSTLS_RELOAD_WAIT);
+  CHECK(httpstls_reload_step(HTTPSTLS_RELOAD_FORCE_MS - 1, 3) == HTTPSTLS_RELOAD_WAIT);
+  CHECK(httpstls_reload_step(HTTPSTLS_RELOAD_FORCE_MS, 1) == HTTPSTLS_RELOAD_FORCE);
+  CHECK(HTTPSTLS_RELOAD_FORCE_MS >= 10000 && HTTPSTLS_RELOAD_FORCE_MS <= 15000);
+  // full handshakes: HTTPSTLS_FULL_MAX per window, sliding, also across the millis() wrap
+  httpstls_full_reset();
+  unsigned long t = 0xFFFFF000UL;
+  for(int i = 0; i < HTTPSTLS_FULL_MAX; i++) CHECK(httpstls_full_allowed(t + i * 100));
+  CHECK(!httpstls_full_allowed(t + 1000));
+  CHECK(!httpstls_full_allowed(t + HTTPSTLS_FULL_WINDOW_MS - 1));
+  CHECK(httpstls_full_allowed(t + HTTPSTLS_FULL_WINDOW_MS));        // the first one left the window
+  CHECK(!httpstls_full_allowed(t + HTTPSTLS_FULL_WINDOW_MS + 50));   // the second one is still in it
+  CHECK(httpstls_full_allowed(t + HTTPSTLS_FULL_WINDOW_MS + 100));
+  httpstls_full_reset();
 }
 
 static void test_admit(void) {
@@ -497,6 +523,53 @@ static void test_connection(void) {
   CHECK(httpstls_stats.active == 0);
 }
 
+/* one connection over a socket pair, both ends stepped; returns the server result, keeps the client session */
+static int pair_handshake(const std::string &cert, mbedtls_ssl_session *resume, mbedtls_ssl_session *save) {
+  int sv[2];
+  socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+  struct httpstls_conn_t *s = httpstls_conn_new(sv[0]);
+  CHECK(s != NULL);
+  client_t c;
+  client_init(&c, sv[1], cert, "heishamon.local");
+  if(resume) CHECK(mbedtls_ssl_set_session(&c.ssl, resume) == 0);
+  int sr = HTTPSTLS_AGAIN, cret = 1;
+  for(int i = 0; i < 400 && sr == HTTPSTLS_AGAIN; i++) {
+    sr = httpstls_handshake(s);
+    if(cret != 0 && (cret == 1 || cret == MBEDTLS_ERR_SSL_WANT_READ || cret == MBEDTLS_ERR_SSL_WANT_WRITE)) {
+      cret = mbedtls_ssl_handshake(&c.ssl);
+    }
+  }
+  for(int i = 0; i < 50 && sr == HTTPSTLS_DONE && cret != 0; i++) cret = mbedtls_ssl_handshake(&c.ssl);
+  if(sr == HTTPSTLS_DONE && save) CHECK(mbedtls_ssl_get_session(&c.ssl, save) == 0);
+  httpstls_conn_free(s);
+  client_free(&c);
+  close(sv[0]);
+  close(sv[1]);
+  return sr;
+}
+
+static void test_rate(void) {
+  std::string store = make_store("heishamon", ip4(127, 0, 0, 1), 1780000000L);
+  CHECK(httpstls_server_init(store.data(), store.size(), NULL) == HTTPSCERT_OK);
+  std::string cert = block(store, "-----BEGIN CERTIFICATE");
+  httpstls_full_reset();
+  memset(&httpstls_stats, 0, sizeof(httpstls_stats));
+  mbedtls_ssl_session session;
+  mbedtls_ssl_session_init(&session);
+  for(int i = 0; i < HTTPSTLS_FULL_MAX; i++) {
+    CHECK(pair_handshake(cert, NULL, i == 0 ? &session : NULL) == HTTPSTLS_DONE);
+  }
+  CHECK(httpstls_stats.handshakes == HTTPSTLS_FULL_MAX && httpstls_stats.resumed == 0);
+  // one more new one within the window: refused before the expensive step
+  CHECK(pair_handshake(cert, NULL, NULL) == HTTPSTLS_FAIL);
+  CHECK(httpstls_stats.refused_rate == 1);
+  // a resumption is no ECC work: allowed over the limit, and counted as resumed
+  CHECK(pair_handshake(cert, &session, NULL) == HTTPSTLS_DONE);
+  CHECK(httpstls_stats.resumed == 1 && httpstls_stats.refused_rate == 1);
+  mbedtls_ssl_session_free(&session);
+  httpstls_full_reset();
+}
+
 /* ---- server for the Python client ---- */
 
 static int serve(const char *file, int connections) {
@@ -583,7 +656,9 @@ int main(int argc, char **argv) {
   test_generate_and_parse();
   test_upload();
   test_admit();
+  test_policies();
   test_connection();
+  test_rate();
   if(failures) {
     printf("%d failures\n", failures);
     return 1;

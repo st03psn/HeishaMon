@@ -1989,10 +1989,15 @@ static void test_https() {
   r = run(get("/", "Authorization: Bearer 0123\r\n"));  // a script that reads the page with a key
   CHECK(contains(r.events, "ACCEPT r=1;"), "%s", r.events.c_str());
   // the forms of the browser and the live log only over HTTPS (password, session cookie, log in clear)
-  for(const char *path : { "/login", "/security", "/https" }) {
+  for(const char *path : { "/login", "/security", "/https", "/savesettings", "/cacert" }) {
     r = run(post(path, "password=x", origin()));
     CHECK(r.status == 403 && contains(r.events, "REJECT r=226;"), "%s: %s", path, r.events.c_str());
   }
+  // settings and the CA certificate stay possible over HTTP with the API key (scripts)
+  r = run(post("/savesettings", "a=1", bearer("0123")));
+  CHECK(contains(r.events, "ACCEPT r=110;"), "%s", r.events.c_str());
+  r = run(post("/login", "password=x", bearer("0123") + origin()));
+  CHECK(contains(r.events, "r=226"), "the login form never over HTTP: %s", r.events.c_str());
   r = run(get("/ws", WS + origin()));
   CHECK(r.status == 403 && !r.websocket && contains(r.events, "r=226"), "%s", r.events.c_str());
   // the captive portal checks and the setup hotspot stay on HTTP
@@ -2059,6 +2064,26 @@ static void test_https() {
   std::string tok = r.cookie();
   r = run(get("/settings", cookie_hdr(tok)));
   CHECK(contains(r.events, "ACCEPT r=120;"), "%s", r.events.c_str());
+  // the same cookie over plain HTTP (sniffed, or made before HTTPS was on): ignored in Redirect and Off
+  for(uint8_t mode : { WEBAUTH_HTTP_REDIRECT, WEBAUTH_HTTP_OFF }) {
+    https_env(1, mode, 0, 0);
+    for(const std::string &req : { get("/json", cookie_hdr(tok)), post("/command", "SetHeatpump=1", cookie_hdr(tok) + origin()),
+                                   multipart_fw(100, cookie_hdr(tok) + origin()), get("/reboot", cookie_hdr(tok)) }) {
+      r = run(req);
+      CHECK(!contains(r.events, "ACCEPT") && (r.status == 401 || r.status == 403), "mode %d, cookie over HTTP: %s", mode, r.events.c_str());
+    }
+  }
+  // Mode On, the hotspot, and HTTPS not running: the cookie works over HTTP as before
+  https_env(1, WEBAUTH_HTTP_ON, 0, 0);
+  r = run(get("/json", cookie_hdr(tok)));
+  CHECK(contains(r.events, "ACCEPT r=20;"), "%s", r.events.c_str());
+  https_env(1, WEBAUTH_HTTP_OFF, 1, 0);
+  r = run(get("/json", cookie_hdr(tok), "192.168.4.1"));
+  CHECK(contains(r.events, "ACCEPT r=20;"), "hotspot: %s", r.events.c_str());
+  https_env(0, WEBAUTH_HTTP_OFF, 0, 0);
+  r = run(get("/json", cookie_hdr(tok)));
+  CHECK(contains(r.events, "ACCEPT r=20;"), "not running: %s", r.events.c_str());
+  https_env(1, WEBAUTH_HTTP_REDIRECT, 0, 1);
   r = run(get("/logout", cookie_hdr(tok) + origin("https://192.168.1.5")));
   CHECK(contains(r.header("Set-Cookie"), "; Secure") && contains(r.header("Set-Cookie"), "Max-Age=0"), "%s", r.output.c_str());
   https_env(1, WEBAUTH_HTTP_ON, 0, 0);

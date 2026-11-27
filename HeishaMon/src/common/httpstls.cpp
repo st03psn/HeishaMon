@@ -44,6 +44,8 @@ httpstls_stats_t httpstls_stats;
 struct httpstls_conn_t {
   int fd;
   uint8_t done;            // handshake finished
+  uint8_t hello_seen;      // the ServerHello was written (resumed, or counted as a full handshake)
+  uint8_t resumed;         // the session came from the cache
   unsigned long start;
   uint32_t step_max;       // longest step of this handshake
   size_t pending;          // a record of this many plaintext bytes is partly sent: mbedtls wants the same length again
@@ -115,6 +117,48 @@ void *httpstls_random_ctx(void) {
   return rng_init() ? &drbg : NULL;
 }
 
+/* the last full handshakes, for the rate limit */
+static unsigned long full_times[HTTPSTLS_FULL_MAX];
+static uint8_t full_count = 0, full_next = 0;
+
+bool httpstls_full_allowed(unsigned long now) {
+  if(full_count >= HTTPSTLS_FULL_MAX) {
+    // the oldest of the last HTTPSTLS_FULL_MAX: still inside the window?
+    if((unsigned long)(now - full_times[full_next]) < HTTPSTLS_FULL_WINDOW_MS) {
+      return false;
+    }
+  } else {
+    full_count++;
+  }
+  full_times[full_next] = now;
+  full_next = (uint8_t)((full_next + 1) % HTTPSTLS_FULL_MAX);
+  return true;
+}
+
+void httpstls_full_reset(void) {
+  full_count = 0;
+  full_next = 0;
+}
+
+uint8_t httpstls_reload_step(unsigned long waited, uint8_t active) {
+  if(active == 0) {
+    return HTTPSTLS_RELOAD_NOW;
+  }
+  return waited >= HTTPSTLS_RELOAD_FORCE_MS ? HTTPSTLS_RELOAD_FORCE : HTTPSTLS_RELOAD_WAIT;
+}
+
+/* session cache lookups: a hit during a step of `stepping` is a resumption */
+static struct httpstls_conn_t *stepping = NULL;
+#if defined(MBEDTLS_SSL_CACHE_C)
+static int cache_get(void *data, unsigned char const *id, size_t id_len, mbedtls_ssl_session *session) {
+  int r = mbedtls_ssl_cache_get(data, id, id_len, session);
+  if(r == 0 && stepping != NULL) {
+    stepping->resumed = 1;
+  }
+  return r;
+}
+#endif
+
 bool httpstls_admit(uint8_t active, size_t internal_largest, size_t psram_largest, bool psram_buffers) {
   if(active >= HTTPSTLS_MAX_CONN) {
     return false;
@@ -173,7 +217,7 @@ int httpstls_server_init(const char *store, size_t len, struct httpscert_info_t 
 #if defined(MBEDTLS_HAVE_TIME)
     mbedtls_ssl_cache_set_timeout(&cache, HTTPSTLS_CACHE_TIMEOUT_S);
 #endif
-    mbedtls_ssl_conf_session_cache(&conf, &cache, mbedtls_ssl_cache_get, mbedtls_ssl_cache_set);
+    mbedtls_ssl_conf_session_cache(&conf, &cache, cache_get, mbedtls_ssl_cache_set);
 #endif
     // the chain of an uploaded certificate is sent with it (server_crt.next)
     if(mbedtls_ssl_conf_own_cert(&conf, &server_crt, &server_key) != 0) {
@@ -271,10 +315,23 @@ int httpstls_handshake(struct httpstls_conn_t *c) {
     return HTTPSTLS_DONE;
   }
   unsigned long t = httpstls_platform_millis();
+  stepping = c;
   int ret = mbedtls_ssl_handshake_step(&c->ssl);
+  stepping = NULL;
   uint32_t used = (uint32_t)(httpstls_platform_millis() - t);
   if(used > c->step_max) {
     c->step_max = used;
+  }
+  // after the ServerHello and before the expensive step (ServerKeyExchange): resumed, or one more full handshake
+  if(!c->hello_seen && ret == 0 && c->ssl.MBEDTLS_PRIVATE(state) > MBEDTLS_SSL_SERVER_HELLO) {  // the cache is asked while writing the ServerHello
+    c->hello_seen = 1;
+    if(c->resumed) {
+      httpstls_stats.resumed++;
+    } else if(!httpstls_full_allowed(httpstls_platform_millis())) {
+      httpstls_stats.refused_rate++;
+      httpstls_stats.last_error = MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
+      return HTTPSTLS_FAIL;  // closed without the ECC work
+    }
   }
   if(ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
     return HTTPSTLS_AGAIN;

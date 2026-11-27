@@ -154,6 +154,7 @@ static void saveHttpsSettings(void) {
 static https_status_t state;          // what the page and /getsettings show (never the key)
 static bool callocInstalled = false;
 static bool reloadPending = false;    // a new store file waits for the open TLS connections to end
+static unsigned long reloadSince = 0;
 static unsigned long lastTry = 0;
 static bool triedOnce = false;
 #define HTTPS_RETRY_MS 60000UL
@@ -183,29 +184,42 @@ static uint8_t deviceIps(uint32_t *ips) {
   return n;
 }
 
-/* The whole store file into a buffer (PSRAM when there is one); NULL when there is none */
-static char *readStore(size_t *len) {
+/*
+ * The whole store file into a buffer (PSRAM when there is one). Returns
+ * HTTPSCERT_OK, HTTPSCERT_ERR_FORMAT (no file, empty, too large: a new one is
+ * made), HTTPSCERT_ERR_IO or HTTPSCERT_ERR_MEMORY (passing: the file is kept).
+ */
+static int readStore(char **out, size_t *len) {
+  *out = NULL;
   *len = 0;
   if (!LittleFS.exists(HTTPS_FILE)) {
-    return NULL;
+    return HTTPSCERT_ERR_FORMAT;
   }
   File f = LittleFS.open(HTTPS_FILE, "r");
   if (!f) {
-    return NULL;
+    return HTTPSCERT_ERR_IO;
   }
   size_t size = f.size();
-  char *buf = (size > 0 && size <= HTTPSCERT_FILE_MAX) ? (char *)malloc(size + 1) : NULL;
-  if (buf != NULL) {
-    if (f.read((uint8_t *)buf, size) != size) {
-      free(buf);
-      buf = NULL;
-    } else {
-      buf[size] = 0;
-      *len = size;
-    }
+  if (size == 0 || size > HTTPSCERT_FILE_MAX) {
+    f.close();
+    return HTTPSCERT_ERR_FORMAT;
   }
+  char *buf = (char *)malloc(size + 1);
+  if (buf == NULL) {
+    f.close();
+    return HTTPSCERT_ERR_MEMORY;
+  }
+  size_t got = f.read((uint8_t *)buf, size);
   f.close();
-  return buf;
+  if (got != size) {
+    memset(buf, 0, size);
+    free(buf);
+    return HTTPSCERT_ERR_IO;
+  }
+  buf[size] = 0;
+  *out = buf;
+  *len = size;
+  return HTTPSCERT_OK;
 }
 
 /* Temporary file, then rename: a power cut leaves the old or the new file, never half of one */
@@ -248,7 +262,7 @@ static int generateStore(void) {
   log_message(msg);
   int r = n;
   if (n > 0) {
-    r = writeStore(out, (size_t)n) ? HTTPSCERT_OK : HTTPSCERT_ERR_MEMORY;
+    r = writeStore(out, (size_t)n) ? HTTPSCERT_OK : HTTPSCERT_ERR_IO;
   }
   memset(out, 0, HTTPSCERT_FILE_MAX);  // the private key
   free(out);
@@ -263,16 +277,18 @@ static int generateStore(void) {
  */
 static void requestReload(void) {
   reloadPending = true;
+  reloadSince = millis();
   state.pending = true;
   webserver_tls_pause(true);
 }
 
-/* Load the store file into the TLS server (only while no TLS connection is open) */
-static bool loadServer(void) {
+/* Load the store file into the TLS server (only while no TLS connection is open); logs its time */
+static int loadServer(void) {
+  unsigned long t = millis();
+  char *store = NULL;
   size_t len = 0;
-  char *store = readStore(&len);
-  int r = HTTPSCERT_ERR_FORMAT;
-  if (store != NULL) {
+  int r = readStore(&store, &len);
+  if (r == HTTPSCERT_OK) {
     r = httpstls_server_init(store, len, &state.info);  // one parse: the checks, the server and what the page shows
     memset(store, 0, len);
     free(store);
@@ -280,39 +296,55 @@ static bool loadServer(void) {
   state.cert = (r == HTTPSCERT_OK);
   if (!state.cert) {
     memset(&state.info, 0, sizeof(state.info));
-    char msg[96];
-    snprintf_P(msg, sizeof(msg), PSTR("HTTPS: certificate not usable: %s"), httpscert_error_text(r));
-    log_message(msg);
   }
-  return state.cert;
+  char msg[112];
+  snprintf_P(msg, sizeof(msg), PSTR("HTTPS: certificate %s, %lu ms"), state.cert ? "loaded" : httpscert_error_text(r), millis() - t);
+  log_message(msg);
+  return r;
 }
 
-/* Start: certificate (made when there is none, or for an old hostname), server, port */
-static void startHttps(void) {
-  if (!LittleFS.begin()) {
+/*
+ * The start in steps, one per loop() pass, so making a certificate (key,
+ * signature, flash write) and loading it (parse, key check) never block the
+ * same pass: START_MAKE makes and stores one, START_LOAD loads it and opens
+ * the port. A damaged store file is replaced once per start; a passing
+ * trouble (memory, flash) keeps the file and the start is tried again after
+ * HTTPS_RETRY_MS.
+ */
+enum { START_IDLE = 0, START_MAKE, START_LOAD };
+static uint8_t startStep = START_IDLE;
+static bool madeThisStart = false;
+
+static void startStepRun(void) {
+  if (startStep == START_MAKE) {
+    madeThisStart = true;
+    startStep = (generateStore() == HTTPSCERT_OK) ? START_LOAD : START_IDLE;
     return;
   }
-  if (!LittleFS.exists(HTTPS_FILE) && LittleFS.exists(HTTPS_FILE_TMP)) {
-    LittleFS.rename(HTTPS_FILE_TMP, HTTPS_FILE);  // power lost between remove and rename
-  }
   uint32_t heapBefore = ESP.getFreeHeap();
-  if (!LittleFS.exists(HTTPS_FILE)) {
-    generateStore();
-  }
-  if (loadServer() && httpscert_needs_new(&state.info, heishamonSettings.wifi_hostname)) {
+  int r = loadServer();
+  if (r == HTTPSCERT_OK && !madeThisStart && httpscert_needs_new(&state.info, heishamonSettings.wifi_hostname)) {
     log_message(_F("HTTPS: the hostname changed, making a new certificate"));
     httpstls_server_free();
-    generateStore();
-    loadServer();
+    state.cert = false;
+    startStep = START_MAKE;
+    return;
   }
-  if (!state.cert) {
-    // a damaged or foreign file: make a new one (an uploaded one that broke is replaced, the log says so)
-    log_message(_F("HTTPS: making a new certificate instead of the stored one"));
-    generateStore();
-    loadServer();
+  if (r != HTTPSCERT_OK) {
+    if (httpscert_damaged(r) && !madeThisStart) {
+      // missing or wrong (an uploaded one that broke is replaced, the log says so)
+      log_message(_F("HTTPS: making a new certificate instead of the stored one"));
+      startStep = START_MAKE;
+    } else {
+      startStep = START_IDLE;  // the stored file stays; tried again later
+    }
+    return;
   }
-  if (state.cert && webserver_tls_start(HTTPSTLS_PORT) == 0) {
+  startStep = START_IDLE;
+  if (webserver_tls_start(HTTPSTLS_PORT) == 0) {
     state.running = true;
+    // sessions made over plain HTTP were seen in clear (and have no Secure flag): log in again over HTTPS
+    webauth_sessions_clear();
   }
   char msg[128];
   snprintf_P(msg, sizeof(msg), PSTR("HTTPS: %s, heap %u -> %u (internal), PSRAM for TLS buffers: %s"),
@@ -336,23 +368,29 @@ void httpsLoop(void) {
   state.enabled = heishamonSettings.https;
   state.http_mode = webauth_http_mode(heishamonSettings.http_mode);
   if (reloadPending) {
-    webserver_tls_close_idle();
-    if (httpstls_stats.active > 0) {
+    uint8_t step = httpstls_reload_step((unsigned long)(millis() - reloadSince), httpstls_stats.active);
+    if (step == HTTPSTLS_RELOAD_WAIT) {
+      webserver_tls_close_idle();
+      return;
+    }
+    if (step == HTTPSTLS_RELOAD_FORCE) {
+      webserver_tls_close_all();  // a connection that never finishes must not keep the old certificate
       return;
     }
     reloadPending = false;
     state.pending = false;
     httpstls_server_free();
-    unsigned long t = millis();
-    bool ok = loadServer();
+    int r = loadServer();
     webserver_tls_pause(false);
-    if (!ok) {
-      webserver_tls_stop();  // nothing usable: HTTPS off until the next start, HTTP works as without it
+    if (r != HTTPSCERT_OK) {
+      webserver_tls_stop();  // nothing usable now: the normal start tries again (HTTP works as without HTTPS meanwhile)
       state.running = false;
+      triedOnce = false;
     }
-    char msg[64];
-    snprintf_P(msg, sizeof(msg), PSTR("HTTPS: certificate loaded (%lu ms)"), millis() - t);
-    log_message(msg);
+    return;
+  }
+  if (startStep != START_IDLE) {
+    startStepRun();
     return;
   }
   if (!heishamonSettings.https) {
@@ -381,8 +419,12 @@ void httpsLoop(void) {
       httpstls_use_calloc();  // switched on at runtime
       callocInstalled = true;
     }
-    if (httpstls_stats.active == 0) {
-      startHttps();
+    if (httpstls_stats.active == 0 && LittleFS.begin()) {
+      if (!LittleFS.exists(HTTPS_FILE) && LittleFS.exists(HTTPS_FILE_TMP)) {
+        LittleFS.rename(HTTPS_FILE_TMP, HTTPS_FILE);  // power lost between remove and rename
+      }
+      madeThisStart = false;
+      startStep = LittleFS.exists(HTTPS_FILE) ? START_LOAD : START_MAKE;  // runs from the next pass on
     }
   }
 }
@@ -425,11 +467,12 @@ void httpsSettingsJson(JsonDocument &doc) {
 
 void httpsStatsText(char *out, size_t size) {
   snprintf_P(out, size,
-             PSTR("TLS connections now %u (most %u, at most %u at a time); handshakes %lu, failed %lu, refused (limit) %lu, refused (memory) %lu; "
+             PSTR("TLS connections now %u (most %u, at most %u at a time); handshakes %lu (resumed %lu), failed %lu, refused (limit) %lu, refused (memory) %lu, refused (more than %u new ones in 10 s) %lu; "
                   "last handshake %lu ms, longest %lu ms; longest single step (loop() blocked) last %lu ms, ever %lu ms; "
                   "free internal RAM %u (largest block %u), free PSRAM %u"),
              httpstls_stats.active, httpstls_stats.peak, HTTPSTLS_MAX_CONN, (unsigned long)httpstls_stats.handshakes,
-             (unsigned long)httpstls_stats.failed, (unsigned long)httpstls_stats.refused_cap, (unsigned long)httpstls_stats.refused_memory,
+             (unsigned long)httpstls_stats.resumed, (unsigned long)httpstls_stats.failed, (unsigned long)httpstls_stats.refused_cap,
+             (unsigned long)httpstls_stats.refused_memory, HTTPSTLS_FULL_MAX, (unsigned long)httpstls_stats.refused_rate,
              (unsigned long)httpstls_stats.last_ms, (unsigned long)httpstls_stats.max_ms, (unsigned long)httpstls_stats.last_step_ms,
              (unsigned long)httpstls_stats.max_step_ms, (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT), (unsigned int)ESP.getFreePsram());

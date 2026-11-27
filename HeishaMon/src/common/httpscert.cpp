@@ -62,8 +62,8 @@ void httpscert_time_string(time_t t, char out[15]) {
 void httpscert_params(httpscert_params_t *p, const char *hostname, const uint32_t *ips, uint8_t nips, time_t now) {
   memset(p, 0, sizeof(*p));
   lower_copy(p->host, sizeof(p->host), host_valid(hostname) ? hostname : "heishamon");
-  snprintf(p->subject, sizeof(p->subject), "CN=%s,O=HeishaMon", p->host);
   snprintf(p->dns_local, sizeof(p->dns_local), "%s.local", p->host);
+  snprintf(p->subject, sizeof(p->subject), "CN=%s,O=HeishaMon", p->dns_local);  // the name the owner types: heishamon.local
   for(uint8_t i = 0; ips != NULL && i < nips && p->nips < HTTPSCERT_IPS_MAX; i++) {
     uint32_t a = ips[i];
     if(a == 0) {
@@ -104,6 +104,7 @@ const char *httpscert_error_text(int err) {
     case HTTPSCERT_ERR_SIZE: return "certificate or key too large";
     case HTTPSCERT_ERR_FORMAT: return "the stored file is not valid";
     case HTTPSCERT_ERR_GENERATE: return "the certificate could not be made";
+    case HTTPSCERT_ERR_IO: return "the stored file could not be read";
   }
   return "unknown error";
 }
@@ -494,6 +495,13 @@ int httpscert_parse(const char *data, size_t len, httpscert_rng_t f_rng, void *p
     return HTTPSCERT_ERR_KEY;
   }
   return check_pair(cert, clen, k, klen, f_rng, p_rng, crt, key, info);
+}
+
+bool httpscert_damaged(int err) {
+  // only a file that was read completely and is wrong; out of memory, a read error or a missing
+  // random generator are passing troubles, and an uploaded certificate must survive them
+  return err == HTTPSCERT_ERR_FORMAT || err == HTTPSCERT_ERR_CERT || err == HTTPSCERT_ERR_KEY ||
+         err == HTTPSCERT_ERR_MISMATCH || err == HTTPSCERT_ERR_KEYTYPE || err == HTTPSCERT_ERR_SIZE;
 }
 
 bool httpscert_needs_new(const httpscert_info_t *info, const char *hostname) {

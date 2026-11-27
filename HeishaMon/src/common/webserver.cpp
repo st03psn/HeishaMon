@@ -3098,6 +3098,16 @@ void webserver_tls_pause(bool pause) {
   tls_paused = pause ? 1 : 0;
 }
 
+void webserver_tls_close_all(void) {
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    struct webserver_t *c = &clients[i].data;
+    if(c->tlsconn != NULL && c->step != 0) {
+      c->step = WEBSERVER_CLIENT_CLOSE;
+      c->tx_used = 0;  // nothing more is sent
+    }
+  }
+}
+
 void webserver_tls_close_idle(void) {
   for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
     struct webserver_t *c = &clients[i].data;

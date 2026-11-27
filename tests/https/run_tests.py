@@ -105,17 +105,20 @@ try:
                     if not chunk:
                         break
                     data += chunk
-                return data, s.session, s.session_reused, s.version(), s.cipher()
+                cn = dict(x[0] for x in s.getpeercert()["subject"]).get("commonName")
+                return data, s.session, s.session_reused, s.version(), s.cipher(), cn
 
     first = None
     for name in names:
-        data, session, reused, version, cipher = fetch(name)
+        data, session, reused, version, cipher, cn = fetch(name)
+        if cn != "heishamon.local":
+            sys.exit(f"FAIL: subject CN {cn}, expected heishamon.local")
         if not data.startswith(b"HTTP/1.1 200 OK") or not data.endswith(b"x" * 1000) or len(data.split(b"\r\n\r\n", 1)[1]) != 50000:
             sys.exit(f"FAIL: answer over TLS for {name}")
         if version != "TLSv1.2" or "ECDHE-ECDSA" not in cipher[0]:
             sys.exit(f"FAIL: protocol {version} {cipher}")
         first = first or session
-    data, session, reused, version, cipher = fetch("heishamon.local", session=first)
+    data, session, reused, version, cipher, cn = fetch("heishamon.local", session=first)
     if not reused:
         sys.exit("FAIL: the second connection did not resume the session (every request would need a full handshake)")
     # a name that is not in the certificate is refused, like a browser does
@@ -185,6 +188,23 @@ need(ino, r"#else\s*\n\s*webauth_env_t env = \{ \(uint32_t\)client->client->remo
 need(hw, r"bool httpsClientOnHotspot\(struct webserver_t \*client\) \{.*?IPAddress ap = WiFi\.softAPIP\(\);.*?client->client->localIP\(\) == ap && remote\[0\] == ap\[0\]",
      "hotspot from the local address of the socket and a client in the hotspot subnet")
 need(hw, r"static void requestReload\(void\) \{.*?webserver_tls_pause\(true\);", "a new certificate keeps the port open (HTTP mode stays in force)")
+# a reload waits at most HTTPSTLS_RELOAD_FORCE_MS, then closes every TLS connection
+need(hw, r"httpstls_reload_step\(.*?HTTPSTLS_RELOAD_WAIT\) \{\s*webserver_tls_close_idle\(\);\s*return;.*?HTTPSTLS_RELOAD_FORCE\) \{\s*webserver_tls_close_all\(\);",
+     "the reload of a certificate must force the TLS connections closed after the wait")
+# a load error replaces the stored file only when it is damaged (an uploaded one survives a passing trouble)
+start = hw.index("static void startStepRun(void) {")
+body = hw[start:hw.index("\n}\n", start)]
+need(body, r"if \(httpscert_damaged\(r\) && !madeThisStart\) \{.*?startStep = START_MAKE;.*?\} else \{\s*startStep = START_IDLE;", "only a damaged store file is replaced")
+# making and loading a certificate never in the same loop() pass
+if re.search(r"generateStore\(\)[^;]*;[^}]*loadServer\(\)", body) or body.count("generateStore(") != 1:
+    sys.exit("FAIL: startStepRun() makes and loads a certificate in the same pass")
+need(body, r"if \(startStep == START_MAKE\) \{.*?generateStore\(\).*?return;", "the make step returns before the load")
+need(body, r"webserver_tls_start\(HTTPSTLS_PORT\) == 0\) \{\s*state\.running = true;.*?webauth_sessions_clear\(\);", "sessions made over HTTP end when HTTPS starts")
+for fn in ("static int readStore(",):
+    rs = hw[hw.index(fn):hw.index("\n}\n", hw.index(fn))]
+    for code in ("HTTPSCERT_ERR_IO", "HTTPSCERT_ERR_MEMORY", "HTTPSCERT_ERR_FORMAT"):
+        if code not in rs:
+            sys.exit(f"FAIL: readStore() does not report {code}")
 if re.search(r"requestReload\(void\) \{[^}]*state\.running = false", hw):
     sys.exit("FAIL: a reload must not switch the HTTP policy off")
 js = (SKETCH / "htmlcode.h").read_text()

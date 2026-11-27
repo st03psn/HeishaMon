@@ -889,12 +889,22 @@ uint8_t webauth_transport(const struct webserver_request_t *req, const webauth_e
     if(route == WEBAUTH_ROUTE_LOGIN_POST || route == WEBAUTH_ROUTE_SECURITY_POST || route == WEBAUTH_ROUTE_HTTPS_POST) {
       return WEBAUTH_TRANSPORT_REFUSE;
     }
+    // settings (WiFi and MQTT passwords) and the CA certificate: only with the API key over HTTP
+    if((route == WEBAUTH_ROUTE_SAVESETTINGS || route == WEBAUTH_ROUTE_CACERT_POST) && !bearer) {
+      return WEBAUTH_TRANSPORT_REFUSE;
+    }
     if((flags & WEBAUTH_WS) && !bearer) {
       return WEBAUTH_TRANSPORT_REFUSE;
     }
     return WEBAUTH_TRANSPORT_OK;
   }
   return WEBAUTH_TRANSPORT_REFUSE;
+}
+
+bool webauth_cookie_allowed(const struct webserver_request_t *req, const webauth_env_t *env) {
+  // with Redirect or Off, a browser session belongs to HTTPS: a cookie seen in clear (for example
+  // one made before HTTPS was switched on, without Secure) must not work over plain HTTP
+  return req->tls || !env->https_on || env->hotspot || webauth_http_mode(env->http_mode) == WEBAUTH_HTTP_ON;
 }
 
 static bool url_chars(const char *s) {
@@ -1418,7 +1428,7 @@ int8_t webauth_request(struct webserver_t *client, const struct webserver_reques
         }
       } else {
         const char *cookie = req->header[WEBSERVER_HEADER_COOKIE];
-        if(cookie != NULL && !(req->truncated & (1 << WEBSERVER_HEADER_COOKIE))) {
+        if(cookie != NULL && !(req->truncated & (1 << WEBSERVER_HEADER_COOKIE)) && webauth_cookie_allowed(req, env)) {
           session = webauth_cookie_session(cookie);
         }
         if(session < 0) {

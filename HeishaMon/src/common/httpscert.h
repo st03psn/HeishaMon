@@ -44,7 +44,7 @@
 
 typedef struct httpscert_params_t {
   char host[HTTPSCERT_HOST_MAX + 1];    // lower case
-  char subject[64];                     // "CN=<host>,O=HeishaMon"
+  char subject[64];                     // "CN=<host>.local,O=HeishaMon"
   char dns_local[HTTPSCERT_HOST_MAX + 7]; // "<host>.local"
   uint8_t ip[HTTPSCERT_IPS_MAX][4];
   uint8_t nips;
@@ -77,7 +77,10 @@ enum {
   HTTPSCERT_ERR_SIZE = -6,       // certificate or key larger than the limits above
   HTTPSCERT_ERR_FORMAT = -7,     // store file without the header line
   HTTPSCERT_ERR_GENERATE = -8,   // mbedtls could not make the key or the certificate
+  HTTPSCERT_ERR_IO = -9,         // the store file could not be opened or read (flash)
 };
+/* A stored file with this result is wrong and is replaced by a new self-signed one; any other error is kept and retried */
+bool httpscert_damaged(int err);
 const char *httpscert_error_text(int err);
 
 /*

@@ -362,7 +362,7 @@ int handleHttps(struct webserver_t *client, uint8_t message) {
           sendTextP(client, PSTR("<div class='setting-row'><span class='setting-hint' style='margin-left:0'>No certificate yet: it is made when HTTPS starts.</span></div>"));
         }
         webserver_send_content_P(client, webBodyHttpsCert, strlen_P(webBodyHttpsCert));
-        char stats[512];
+        char stats[640];
         httpsStatsText(stats, sizeof(stats));
         webserver_send_content(client, stats, strlen(stats));
         webserver_send_content_P(client, webBodyHttpsEnd, strlen_P(webBodyHttpsEnd));

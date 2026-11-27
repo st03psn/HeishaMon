@@ -84,6 +84,8 @@
 #define WEBAUTH_ROUTE_HTTP_OFF 226     // 403: HTTP is switched off, use HTTPS
 #define WEBAUTH_ROUTE_HTTPS_PAGE 175   // the HTTPS tab of the settings (ESP32)
 #define WEBAUTH_ROUTE_HTTPS_POST 176   // its forms: on/off, HTTP mode, new certificate, upload
+#define WEBAUTH_ROUTE_SAVESETTINGS 110  // POST /savesettings (carries the WiFi and MQTT passwords)
+#define WEBAUTH_ROUTE_CACERT_POST 165   // POST /cacert (MQTT CA certificate)
 
 /* What plain HTTP may do while HTTPS is running (setting "HTTP") */
 #define WEBAUTH_HTTP_ON 0        // everything, as without HTTPS
@@ -179,6 +181,8 @@ enum {
   WEBAUTH_TRANSPORT_REFUSE,     // answer with 403 (HTTP off)
 };
 uint8_t webauth_transport(const struct webserver_request_t *req, const webauth_env_t *env, uint8_t route, uint8_t flags);
+/* May the session cookie count? Not over plain HTTP while HTTPS runs in Redirect or Off (hotspot excepted) */
+bool webauth_cookie_allowed(const struct webserver_request_t *req, const webauth_env_t *env);
 /* Location of the redirect: https://<Host of the request when it is one of this device, else the first device address><path>[?query] */
 bool webauth_https_location(const struct webserver_request_t *req, const char *device_hosts, char *out, size_t size);
 
