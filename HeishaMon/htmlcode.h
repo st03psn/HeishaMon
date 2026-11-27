@@ -2187,7 +2187,8 @@ R"====(
 #ifdef ESP32
 R"====(
         st+=' \u00b7 HTTPS: '+(j.https==='enabled'?(j.https_running?'on (running)':'on (not running yet)'):'off');
-        st+=' \u00b7 plain HTTP: '+(['on','redirect pages to HTTPS','off'][j.http_mode]||'on');
+        var hm=['on','redirect pages to HTTPS','off'][j.http_mode]||'on';
+        st+=' \u00b7 plain HTTP: '+(j.https_running?hm:'on (setting: '+hm+', applies while HTTPS runs)');
 )===="
 #else
 R"====(

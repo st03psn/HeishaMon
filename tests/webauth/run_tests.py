@@ -172,7 +172,7 @@ panel = form1_all.split("<form", 1)[1]
 need(panel, r"^[^>]*action='/savesettings'[^>]*>\s*<div class='panel' data-tab='system' id='access_panel'[^>]*>\s*<div class='panel-header'><h3>Access &amp; security</h3>.*?id='access_status'.*?<a href='/security' class='btn btn-primary'>",
      "the System tab must start with the section Access & security, a status line and a link to /security")
 js = html.split("static const char populategetsettingsJS[]", 1)[1].split("static const char ", 1)[0]
-need(js, r"getElementById\('access_status'\).*?j\.web_password_set.*?j\.web_apikey_set.*?#ifdef ESP32.*?j\.https===.*?j\.https_running.*?j\.http_mode.*?#else.*?HTTPS: not available on this board.*?#endif.*?as\.textContent=st;",
+need(js, r"getElementById\('access_status'\).*?j\.web_password_set.*?j\.web_apikey_set.*?#ifdef ESP32.*?j\.https===.*?j\.https_running.*?j\.http_mode.*?j\.https_running\?hm:'on \(setting: '\+hm.*?#else.*?HTTPS: not available on this board.*?#endif.*?as\.textContent=st;",
      "the status line must show password, API key and (ESP32) HTTPS and the HTTP mode, as text")
 def piece(name):
     return html.split(f"static const char {name}[]", 1)[1].split(')====";', 1)[0]
