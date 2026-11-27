@@ -39,6 +39,7 @@
 #include "src/common/log.h"
 #include "src/common/progmem.h"
 #include "src/common/setupap.h"
+#include "src/common/flowlimit.h"
 #include "src/rules/rules.h"
 
 #include "webfunctions.h"
@@ -595,6 +596,59 @@ void publishRulesState(bool force) {
   }
 }
 
+bool send_command(byte* command, int length);
+
+// The flow temperature limit (src/common/flowlimit.h), retained: <base>/flowlimit/state (0 = off, 1 = on,
+// 2 = a part is no longer corrected, 3 = the zone sensor is not reported, 4 = both), surface,
+// heat_max and cool_min. Published on connect, on a change and every updateAllTime seconds.
+void publishFlowLimit(bool force) {
+  static long reported = -1;
+  static unsigned long lastPublish = 0;
+  const unsigned long now = millis();
+  if (!mqtt_client.connected()) return;
+  const int state = flowlimit_state(&flowlimit);
+  const long signature = ((long)state << 24) | ((long)flowlimit.surface << 16) | ((long)(uint8_t)flowlimit.heat_max << 8) | (uint8_t)flowlimit.cool_min;
+  if (!force && reported == signature && (unsigned long)(now - lastPublish) < heishamonSettings.updateAllTime * 1000UL) return;
+  const int values[] = { state, flowlimit.surface, flowlimit.heat_max, flowlimit.cool_min };
+  static const char names[][9] PROGMEM = { "state", "surface", "heat_max", "cool_min" };
+  bool ok = true;
+  for (int i = 0; i < 4; i++) {
+    char topic[256];
+    char name[9];
+    char value[8];
+    strcpy_P(name, names[i]);
+    snprintf_P(topic, sizeof(topic), PSTR("%s/flowlimit/%s"), heishamonSettings.mqtt_topic_base, name);
+    snprintf_P(value, sizeof(value), PSTR("%d"), values[i]);
+    ok = mqtt_client.publish(topic, value, true) && ok;
+  }
+  reported = ok ? signature : -1; // retry on the next loop
+  lastPublish = now;
+}
+
+// A received data block: remember its values for the flow limit and correct a value outside the limit.
+// ESP32: the flow limit state is only written here and read by heatpump_command() / send_command(), all on
+// the loop() task (readSerial, MQTT callback, web server, rules, Modbus executeWrite). The serial TX task only
+// sends queued frames. The one reader on another task is the Modbus dry run (mainCommandAccepts, AsyncTCP),
+// whose result (the length) does not depend on the limit.
+void flowlimitReceived(const char *block) {
+  flowlimit_update(&flowlimit, (const uint8_t *)block, DATASIZE);
+  char msg[256];
+  if (flowlimit_sensor_check(&flowlimit, millis(), msg, sizeof(msg))) log_message(msg);
+  if (heishamonSettings.listenonly) return;
+  uint8_t cmd[FLOWLIMIT_DATAGRAM_SIZE];
+  int len = flowlimit_watchdog(&flowlimit, millis(), cmd, msg, sizeof(msg));
+  if (msg[0] != '\0') log_message(msg);
+  // counted as a try only when the command was accepted (sent, buffered or queued), else again next time
+  if (len > 0 && send_command(cmd, len)) flowlimit_sent(&flowlimit, millis());
+}
+
+// Commands that are not built by heatpump_command() (SendRawValue, the CZ-TAW1 proxy) get the flow limit
+// here. A command from heatpump_command() is already inside the limit, nothing changes then.
+void flowlimitGuard(byte *command, int length) {
+  char msg[256] = "Flow limit: command clamped";
+  if (flowlimit_apply(&flowlimit, command, length, msg, sizeof(msg)) > 0) log_message(msg);
+}
+
 void mqtt_reconnect()
 {
   unsigned long now = millis();
@@ -641,6 +695,7 @@ void mqtt_reconnect()
     {
       mqttReconnects++;
       publishRulesState(true);
+      publishFlowLimit(true);
       if (heishamonSettings.opentherm) {
         sprintf(topic, "%s/%s/#", heishamonSettings.mqtt_topic_base, mqtt_topic_opentherm_read);
         mqtt_client.subscribe(topic);
@@ -937,6 +992,7 @@ bool readSerial()
       if (data_length == DATASIZE)  {  //receive a full data block
         if  (data[3] == 0x10) { //decode the normal data block
           decode_heatpump_data(data, actData, mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
+          flowlimitReceived(data);
           if ( (!extraDataBlockAvailable) && ((actData[0] == 0x71) && (actData[0xc7] >= 3)) ) { //do we have valid header and byte 0xc7 is more or equal 3 then assume K&L and more series
             log_message(_F("Extra data available on this heatpump"));
             extraDataBlockAvailable = true; //request for extra data next run
@@ -1003,15 +1059,16 @@ void popCommandBuffer() {
   }
 }
 
-void pushCommandBuffer(byte* command, int length) {
+bool pushCommandBuffer(byte* command, int length) {
   if (cmdnrel + 1 > MAXCOMMANDSINBUFFER) {
     log_message(_F("Too much commands already in buffer. Ignoring this commands.\n"));
-    return;
+    return false;
   }
   cmdbuffer[cmdend].length = length;
   memcpy(&cmdbuffer[cmdend].data, command, length);
   cmdend = (cmdend + 1) % (MAXCOMMANDSINBUFFER);
   cmdnrel++;
+  return true;
 }
 
 #ifdef ESP32
@@ -1109,11 +1166,11 @@ bool send_command(byte* command, int length) {
     log_message(_F("Not sending this command. Heishamon in listen only mode!"));
     return false;
   }
+  flowlimitGuard(command, length); // only for a command that really goes out, so the log never claims more
   struct cmdbuffer_t cmd;
   cmd.length = length;
   memcpy(&cmd.data, command, length);
-  xQueueSend(cmdQueue, &cmd, 0);
-  return true;
+  return xQueueSend(cmdQueue, &cmd, 0) == pdTRUE; // false: queue full, the command is dropped
 }
 
 #else
@@ -1128,10 +1185,10 @@ bool send_command(byte* command, int length) {
     log_message(_F("Not sending this command. Heishamon in listen only mode!"));
     return false;
   }
+  flowlimitGuard(command, length); // only for a command that really goes out, so the log never claims more
   if ( sending ) {
     log_message(_F("Already sending data. Buffering this send request"));
-    pushCommandBuffer(command, length);
-    return false;
+    return pushCommandBuffer(command, length); // true: buffered, it is sent after the current answer
   }
   sending = true; //simple semaphore to only allow one send command at a time, semaphore ends when answered data is received
 
@@ -2541,6 +2598,7 @@ void loop() {
 
   timerqueue_update();
   publishRulesState(false);
+  publishFlowLimit(false);
   publishGPIOStates(mqtt_client, heishamonSettings.gpioSettings, heishamonSettings.mqtt_topic_base, heishamonSettings.opentherm, heishamonSettings.listenonly, heishamonSettings.updateAllTime); // after the rules timers, so rule changes are published in the same loop
   #ifdef ESP32
   delay(1); // to keep watchdog happy

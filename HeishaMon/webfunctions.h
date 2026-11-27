@@ -19,6 +19,7 @@
 #include "HeishaOT.h"
 #include "gpio.h"
 #include "decode.h"
+#include "src/common/flowlimit.h"
 
 #define HEATPUMP_VALUE_LEN    16
 
@@ -71,6 +72,10 @@ struct settingsStruct {
   bool opentherm = false; //opentherm enable flag
   bool hotspot = true; //open the setup hotspot while no wifi is configured (factory state)
   bool hotspot_auto = false; //also open the setup hotspot whenever the wifi is lost (less secure; default: only with the boot button)
+  // flow temperature limit (src/common/flowlimit.h): 0 = off (no limit), 1 = underfloor heating, 2 = radiators, 3 = custom
+  uint8_t flowlimitSurface = FLOWLIMIT_OFF;
+  uint8_t flowlimitHeatMax = FLOWLIMIT_FLOOR_MAX; //maximum heating flow temperature in degrees C
+  uint8_t flowlimitCoolMin = FLOWLIMIT_COOL_MIN; //minimum cooling flow temperature in degrees C
   uint16_t topicGroups = TOPIC_GROUPS_DEFAULT; //bit per topic group (decode.h), a cleared bit stops publishing those topics
 #ifdef ESP32
   bool proxy = true; //cztaw proxy port enable flag

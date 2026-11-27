@@ -569,6 +569,22 @@ void loadSettings(settingsStruct *heishamonSettings) {
           }
           setTopicGroups(heishamonSettings->topicGroups);
           setInstallerCommandsAllowed((heishamonSettings->topicGroups >> TG_INSTALLER) & 1); //installer menu commands follow the "Installer settings" topic group
+          {
+            // flow temperature limit: a missing key is the default (off for an existing install), out of range is
+            // the default of the surface (isNull, not "if (value)": 0 = off must be read too)
+            JsonVariant surfaceValue = jsonDoc[F("flowlimit_surface")];
+            JsonVariant maxValue = jsonDoc[F("flowlimit_heat_max")];
+            JsonVariant minValue = jsonDoc[F("flowlimit_cool_min")];
+            int surface = surfaceValue.isNull() ? FLOWLIMIT_OFF : surfaceValue.as<int>();
+            uint8_t flowSurface = (surface < 0 || surface > 255) ? 255 : (uint8_t)surface;
+            int heatMax = maxValue.isNull() ? 0 : maxValue.as<int>();
+            int coolMin = minValue.isNull() ? 0 : minValue.as<int>();
+            flowlimit_normalize(&flowSurface, &heatMax, &coolMin);
+            heishamonSettings->flowlimitSurface = flowSurface;
+            heishamonSettings->flowlimitHeatMax = (uint8_t)heatMax;
+            heishamonSettings->flowlimitCoolMin = (uint8_t)coolMin;
+            flowlimit_configure(&flowlimit, flowSurface, heatMax, coolMin);
+          }
 #ifdef ESP32          
           heishamonSettings->proxy = ( jsonDoc[F("proxy")] == "enabled" ) ? true : false;
           heishamonSettings->proxyBlockWrites = ( jsonDoc[F("proxyBlockWrites")] == "enabled" ) ? true : false;
@@ -873,6 +889,9 @@ void settingsToJson(JsonDocument &jsonDoc, settingsStruct *heishamonSettings) {
     jsonDoc[F("modbusWrites")] = "disabled";
   }
 #endif 
+  jsonDoc[F("flowlimit_surface")] = heishamonSettings->flowlimitSurface;
+  jsonDoc[F("flowlimit_heat_max")] = heishamonSettings->flowlimitHeatMax;
+  jsonDoc[F("flowlimit_cool_min")] = heishamonSettings->flowlimitCoolMin;
   jsonDoc[F("waitTime")] = heishamonSettings->waitTime;
   jsonDoc[F("waitDallasTime")] = heishamonSettings->waitDallasTime;
   jsonDoc[F("dallasResolution")] = heishamonSettings->dallasResolution;
@@ -1101,6 +1120,12 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
       jsonDoc[F("ntp_servers")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "timezone") == 0) {
       jsonDoc[F("timezone")] = tmp->value;
+    } else if (strcmp(tmp->name.c_str(), "flowlimit_surface") == 0) {
+      jsonDoc[F("flowlimit_surface")] = atoi(tmp->value.c_str());
+    } else if (strcmp(tmp->name.c_str(), "flowlimit_heat_max") == 0) {
+      jsonDoc[F("flowlimit_heat_max")] = atoi(tmp->value.c_str());
+    } else if (strcmp(tmp->name.c_str(), "flowlimit_cool_min") == 0) {
+      jsonDoc[F("flowlimit_cool_min")] = atoi(tmp->value.c_str());
     } else if (strcmp(tmp->name.c_str(), "waitTime") == 0) {
       jsonDoc[F("waitTime")] = tmp->value;
     } else if (strcmp(tmp->name.c_str(), "waitDallasTime") == 0) {
