@@ -119,4 +119,14 @@ int httpscert_parse(const char *data, size_t len, httpscert_rng_t f_rng, void *p
 /* A generated certificate is made again when the hostname changed */
 bool httpscert_needs_new(const httpscert_info_t *info, const char *hostname);
 
+/*
+ * The certificate block of the access page (/security, section HTTPS): one
+ * label/value row each for made by, subject, valid from/until, key type and
+ * the SHA-256 fingerprint (read-only field with a copy button). The values
+ * are HTML-escaped (an uploaded certificate can say anything). The HTML goes
+ * out in pieces through emit (no fixed buffer, nothing is cut).
+ */
+typedef void (*httpscert_emit_t)(void *ctx, const char *text, size_t len);
+void httpscert_info_html(const httpscert_info_t *info, httpscert_emit_t emit, void *ctx);
+
 #endif

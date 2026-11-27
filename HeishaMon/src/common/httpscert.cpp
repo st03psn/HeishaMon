@@ -523,6 +523,72 @@ bool httpscert_damaged(int err) {
          err == HTTPSCERT_ERR_MISMATCH || err == HTTPSCERT_ERR_KEYTYPE || err == HTTPSCERT_ERR_SIZE;
 }
 
+static void emit_str(httpscert_emit_t emit, void *ctx, const char *s) {
+  emit(ctx, s, strlen(s));
+}
+
+// emits text HTML-escaped: the plain runs as they are, each special character as its entity
+static void emit_escaped(httpscert_emit_t emit, void *ctx, const char *text, size_t max) {
+  size_t len = strnlen(text, max);
+  size_t start = 0;
+  for(size_t i = 0; i < len; i++) {
+    const char *rep = NULL;
+    switch(text[i]) {
+      case '&': rep = "&amp;"; break;
+      case '<': rep = "&lt;"; break;
+      case '>': rep = "&gt;"; break;
+      case '"': rep = "&quot;"; break;
+      case '\'': rep = "&#39;"; break;
+    }
+    if(rep != NULL) {
+      if(i > start) {
+        emit(ctx, text + start, i - start);
+      }
+      emit_str(emit, ctx, rep);
+      start = i + 1;
+    }
+  }
+  if(len > start) {
+    emit(ctx, text + start, len - start);
+  }
+}
+
+void httpscert_info_html(const httpscert_info_t *info, httpscert_emit_t emit, void *ctx) {
+  const struct {
+    const char *label;
+    const char *id;
+    const char *value;
+    size_t max;
+  } rows[] = {
+    { "Made by", "https_cert_source", info->generated ? "this device (self-signed)" : "you (uploaded)", 32 },
+    { "Subject", "https_cert_subject", info->subject, sizeof(info->subject) },
+    { "Valid from", "https_cert_valid_from", info->not_before, sizeof(info->not_before) },
+    { "Valid until", "https_cert_valid_to", info->not_after, sizeof(info->not_after) },
+    { "Key", "https_cert_key", info->key_type, sizeof(info->key_type) },
+  };
+  for(const auto &r : rows) {
+    emit_str(emit, ctx, "<div class='setting-row'><label class='setting-label'>");
+    emit_str(emit, ctx, r.label);
+    emit_str(emit, ctx, "</label><span id='");
+    emit_str(emit, ctx, r.id);
+    emit_str(emit, ctx, "' style='overflow-wrap:anywhere'>");
+    emit_escaped(emit, ctx, r.value, r.max);
+    emit_str(emit, ctx, "</span></div>\n");
+  }
+  // the fingerprint: monospace, read-only, selected on focus, with a copy button
+  // (navigator.clipboard only in a secure context: over plain HTTP the selection is copied)
+  emit_str(emit, ctx,
+           "<div class='setting-row'><label class='setting-label' for='https_cert_fingerprint'>SHA-256 fingerprint</label>"
+           "<div style='display:flex;gap:8px;align-items:center;min-width:0'>"
+           "<textarea id='https_cert_fingerprint' class='setting-input' readonly rows='2' spellcheck='false' onfocus='this.select()' "
+           "style='font-family:monospace;font-size:12px;max-width:none;flex:1;min-width:0;resize:none;word-break:break-all'>");
+  emit_escaped(emit, ctx, info->fingerprint, sizeof(info->fingerprint));
+  emit_str(emit, ctx,
+           "</textarea><button type='button' class='btn btn-ghost' onclick=\"var f=document.getElementById('https_cert_fingerprint'),b=this,"
+           "ok=function(){b.textContent='Copied'};f.select();if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(f.value).then(ok)}"
+           "else if(document.execCommand('copy')){ok()}\">Copy</button></div></div>\n");
+}
+
 bool httpscert_needs_new(const httpscert_info_t *info, const char *hostname) {
   if(!info->generated) {
     return false;  // an uploaded certificate is the owner's choice

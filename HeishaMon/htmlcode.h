@@ -1641,7 +1641,7 @@ static const char settingsForm1[] FLASHPROG = R"====(
   <div class='panel-header'><h3>Access &amp; security</h3></div>
   <div class='settings-grid'>
     <div class='setting-row'><label class='setting-label'>Status</label><span id='access_status'>&hellip;</span></div>
-    <div class='setting-row'><a href='/security' class='btn btn-primary'>Open Access &amp; security</a><span class='setting-hint'>Web login (web password, API key, host names) and HTTPS (certificate, plain HTTP), each form saves on its own.</span></div>
+    <div class='setting-row'><a href='/security' class='btn btn-primary'>Open Access &amp; security</a><span class='setting-hint'>Web password, API key, host names and HTTPS.</span></div>
   </div></div>
   <div class='panel' data-tab='basic' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Network</h3></div>
@@ -2187,8 +2187,8 @@ R"====(
 #ifdef ESP32
 R"====(
         st+=' \u00b7 HTTPS: '+(j.https==='enabled'?(j.https_running?'on (running)':'on (not running yet)'):'off');
-        var hm=['on','redirect pages to HTTPS','off'][j.http_mode]||'on';
-        st+=' \u00b7 plain HTTP: '+(j.https_running?hm:'on (setting: '+hm+', applies while HTTPS runs)');
+        var hm=['on','redirect to HTTPS','off'][j.http_mode]||'on';
+        st+=' \u00b7 plain HTTP: '+(j.https_running?hm:'on (setting: '+hm+', once HTTPS runs)');
 )===="
 #else
 R"====(
@@ -2931,13 +2931,12 @@ static const char webBodySecurityOpen[] FLASHPROG = R"====(
 
 static const char webBodySecurityBack[] FLASHPROG = R"====(
 <p style='margin:0 0 12px'><a href='/settings#system'>&larr; Back to System</a></p>
-<h2 id='weblogin' style='font-size:18px;font-weight:500;margin:0 0 12px'>Access &amp; security: Web login</h2>
+<h2 id='weblogin' style='font-size:18px;font-weight:500;margin:0 0 12px'>Access &amp; security: Web login <a href='https://github.com/st03psn/HeishaMon#web-login-optional' target='_blank' rel='noopener' style='font-size:12px;font-weight:400'>Details</a></h2>
 )====";
 
 static const char webBodySecurityFirst[] FLASHPROG = R"====(
 <div class='firmware-warning' style='margin-bottom:16px'>
-  <strong>No web password is set.</strong> Every device in your network can use this HeishaMon, and the <strong>first</strong> one to set a web password owns the login.
-  Set it now, from a device you trust. If somebody else set it before you, a factory reset (hold the boot button for more than 10 seconds) is the only way back.
+  <strong>No web password is set:</strong> anyone in your network can use this HeishaMon, and whoever sets the first password owns the login.
 </div>
 <div class='panel' style='margin-bottom:16px'>
 <div class='panel-header'><h3>Set the web password (switches the login on)</h3></div>
@@ -2957,7 +2956,7 @@ static const char webBodySecurityChange[] FLASHPROG = R"====(
   <div class='setting-row'><label class='setting-label'>Current web password</label><input type='password' name='current' maxlength='64' class='setting-input' autocomplete='current-password' required></div>
   <div class='setting-row'><label class='setting-label'>New web password</label><input type='password' name='password' minlength='8' maxlength='64' class='setting-input' autocomplete='new-password' required></div>
   <div class='setting-row'><label class='setting-label'>Repeat</label><input type='password' name='repeat' minlength='8' maxlength='64' class='setting-input' autocomplete='new-password' required></div>
-  <div class='setting-row'><label class='setting-label'>Keep the API key</label><div class='checkbox-wrap'><input type='checkbox' name='keep_apikey' value='1'></div><div class='setting-desc'>Without the tick the API key is deleted with the change: make a new one and update Home Assistant.</div></div>
+  <div class='setting-row'><label class='setting-label'>Keep the API key</label><div class='checkbox-wrap'><input type='checkbox' name='keep_apikey' value='1'></div><div class='setting-desc'>Otherwise the API key is deleted and Home Assistant needs a new one.</div></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Change password</button><span class='setting-hint'>All browsers are logged out.</span></div>
 </form></div>
 <div class='panel' style='margin-bottom:16px'>
@@ -2973,7 +2972,7 @@ static const char webBodySecurityApiKey1[] FLASHPROG = R"====(
 <div class='panel' style='margin-bottom:16px'>
 <div class='panel-header'><h3>API key</h3></div>
 <div class='settings-grid'>
-  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>For Home Assistant, scripts and other programs. With the login on, every request of the HTTP API (/json, /command, /reboot, firmware upload, /ws, ...) needs the login or this key, sent as the header <code>Authorization: Bearer &lt;key&gt;</code>. The key is shown only once, when it is made.</span></div>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>For Home Assistant and scripts while the login is on; it is shown only once.</span></div>
   <div class='setting-row'><label class='setting-label'>API key</label><span>)====";
 
 static const char webBodySecurityApiKey2[] FLASHPROG = R"====(</span></div>
@@ -2988,21 +2987,21 @@ static const char webBodySecurityApiKey2[] FLASHPROG = R"====(</span></div>
 <div class='panel-header'><h3>Host names</h3></div>
 <form method='POST' action='/security' class='settings-grid'>
   <input type='hidden' name='action' value='hosts'>
-  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>Requests must name this device in their Host header (stops DNS rebinding). Allowed now: )====";
+  <div class='setting-row'><label class='setting-label'>Allowed now</label><span style='overflow-wrap:anywhere'>)====";
 
-static const char webBodySecurityApiKey3[] FLASHPROG = R"====(. Add other names here, for example the name of a reverse proxy (it must pass the Host header on unchanged) or of a DNS entry in your router.</span></div>
+static const char webBodySecurityApiKey3[] FLASHPROG = R"====(</span></div>
   <div class='setting-row'><label class='setting-label'>Extra host names</label><input type='text' name='hosts' maxlength='95' class='setting-input' placeholder='heishamon.fritz.box, heatpump.example.com' value=')====";
 
-static const char webBodySecurityEnd[] FLASHPROG = R"====('></div>
+static const char webBodySecurityEnd[] FLASHPROG = R"====('><div class='setting-desc'>Other names this device is reached by, for example a reverse proxy or a DNS name of your router.</div></div>
   <div class='setting-row'><label class='setting-label'>Current web password</label><input type='password' name='current' maxlength='64' class='setting-input' autocomplete='current-password' placeholder='(needed while the login is on)'></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Save host names</button></div>
 </form></div>
-<p style='font-size:12px;color:var(--text-muted)'>Forgot the web password? It can only be reset at the device: hold its boot button for more than 10 seconds (factory reset, all settings are lost). No network request can skip the login.</p>
+<p style='font-size:12px;color:var(--text-muted)'>Forgot the web password? Only a factory reset helps: hold the boot button for more than 10 seconds.</p>
 )====";
 
 // the HTTPS section of the access page (/https leads here, /security#https)
 static const char webBodyHttpsHead[] FLASHPROG = R"====(
-<h2 id='https' style='font-size:18px;font-weight:500;margin:24px 0 12px'>Access &amp; security: HTTPS</h2>
+<h2 id='https' style='font-size:18px;font-weight:500;margin:24px 0 12px'>Access &amp; security: HTTPS <a href='https://github.com/st03psn/HeishaMon#https-large-board-only' target='_blank' rel='noopener' style='font-size:12px;font-weight:400'>Details</a></h2>
 )====";
 
 static const char webBodySecurityClose[] FLASHPROG = R"====(
@@ -3012,9 +3011,7 @@ static const char webBodySecurityClose[] FLASHPROG = R"====(
 
 static const char webBodyHttpsNone[] FLASHPROG = R"====(
 <div class='panel' style='margin-bottom:16px'><div class='panel-header'><h3>HTTPS</h3></div>
-<div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>HTTPS is only available on the large board (ESP32-S3).
-The ESP8266 has too little RAM for a TLS server: one HTTPS connection needs about 40 kB, about all the RAM this board has free.
-Use the web login and keep the web interface in a network you trust, or put a reverse proxy with HTTPS in front of it.</span></div></div></div>
+<div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>Only on the large board (ESP32-S3): this board has too little RAM for HTTPS.</span></div></div></div>
 )====";
 
 static const char webBodyHttpsForm1[] FLASHPROG = R"====(
@@ -3027,10 +3024,10 @@ static const char webBodyHttpsForm1[] FLASHPROG = R"====(
 static const char webBodyHttpsForm2[] FLASHPROG = R"====(</span></div>
   <div class='setting-row'><label class='setting-label'>HTTPS</label><div class='checkbox-wrap'><input type='checkbox' name='https' value='enabled' )====";
 
-static const char webBodyHttpsForm3[] FLASHPROG = R"====(></div><div class='setting-desc'>The first start makes a key and a self-signed certificate for this hostname (a few seconds). Browsers warn about a self-signed certificate: compare the fingerprint below with the one the browser shows, then accept it once.</div></div>
+static const char webBodyHttpsForm3[] FLASHPROG = R"====(></div><div class='setting-desc'>Creates its own certificate on first start. Your browser warns once &mdash; compare the fingerprint below.</div></div>
   <div class='setting-row'><label class='setting-label'>Plain HTTP (port 80)</label><select name='http_mode' class='setting-input'>)====";
 
-static const char webBodyHttpsForm4[] FLASHPROG = R"====(</select><div class='setting-desc'><b>Redirect</b>: pages opened in a browser go to HTTPS. On HTTP stay /json, /command, /reboot, /gpio, POST /firmware, POST /saverules, /debug, /wifiscan, /getsettings, /dallasalias, /removedallas, /dallasoffset, /scandallas, and POST /savesettings and /cacert only with the API key, so Home Assistant keeps working. Never on HTTP: the login, the forms of this page (Web login and HTTPS) and the live log; a login cookie does not count on HTTP (with the login on, HTTP needs the API key). <b>Off</b>: only the redirect of pages is left; Home Assistant and scripts must use https:// (and accept this certificate). In both modes the setup hotspot (192.168.4.1) stays on HTTP, and HTTP works as before as long as HTTPS is not running.</div></div>
+static const char webBodyHttpsForm4[] FLASHPROG = R"====(</select><div class='setting-desc'>Redirect: browsers go to HTTPS, the API for Home Assistant stays on HTTP. Off: HTTPS only.</div></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Save</button></div>
 </form></div>
 <div class='panel' style='margin-bottom:16px'>
@@ -3040,15 +3037,15 @@ static const char webBodyHttpsForm4[] FLASHPROG = R"====(</select><div class='se
 
 static const char webBodyHttpsCert[] FLASHPROG = R"====(
   <div class='setting-row'>
-    <form method='POST' action='/https' style='display:inline' onsubmit="return confirm('Make a new key and certificate? Browsers warn again and must accept the new one.');"><input type='hidden' name='action' value='regenerate'><button type='submit' class='btn btn-ghost'>Make a new self-signed certificate</button></form>
-    <span class='setting-hint'>For example after the hostname or the IP address changed (a new hostname makes a new one by itself).</span>
+    <form method='POST' action='/https' style='display:inline' onsubmit="return confirm('Make a new certificate? Browsers warn once more.');"><input type='hidden' name='action' value='regenerate'><button type='submit' class='btn btn-ghost'>Make a new certificate</button></form>
+    <span class='setting-hint'>After the hostname or IP changed.</span>
   </div>
 </div></div>
 <div class='panel' style='margin-bottom:16px'>
 <div class='panel-header'><h3>Own certificate</h3></div>
 <form method='POST' action='/https' enctype='multipart/form-data' class='settings-grid'>
   <input type='hidden' name='action' value='upload'>
-  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>A certificate of your own CA or of a public one (PEM, the chain may follow the certificate) and its private key (PEM, without a password). Only EC P-256 and RSA 2048 keys: a larger key would block the heat pump communication too long during every handshake. Key and certificate are checked first; if they do not fit, the current certificate stays. The key is stored on the device and never shown again.</span></div>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>PEM files; only EC P-256 or RSA 2048 keys, without a password.</span></div>
   <div class='setting-row'><label class='setting-label'>Certificate (PEM)</label><input type='file' name='cert' accept='.pem,.crt,.cer' class='setting-input' required></div>
   <div class='setting-row'><label class='setting-label'>Private key (PEM)</label><input type='file' name='key' accept='.pem,.key' class='setting-input' required></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Upload and use</button></div>

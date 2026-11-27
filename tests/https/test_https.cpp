@@ -673,6 +673,130 @@ static int serve(const char *file, int connections) {
   return 0;
 }
 
+/* the certificate block of /security: every value in its own element, escaped, the markup intact */
+static void html_emit(void *ctx, const char *text, size_t len) {
+  ((std::string *)ctx)->append(text, len);
+}
+
+static std::string html_escape(const std::string &s) {
+  std::string o;
+  for(char c : s) {
+    switch(c) {
+      case '&': o += "&amp;"; break;
+      case '<': o += "&lt;"; break;
+      case '>': o += "&gt;"; break;
+      case '"': o += "&quot;"; break;
+      case '\'': o += "&#39;"; break;
+      default: o += c;
+    }
+  }
+  return o;
+}
+
+// the text between the opening tag with this id and the closing tag
+static std::string element_text(const std::string &html, const char *tag, const char *id) {
+  std::string open = std::string("<") + tag + " id='" + id + "'";
+  size_t a = html.find(open);
+  if(a == std::string::npos || html.find(open, a + 1) != std::string::npos) {
+    return "<missing or twice>";
+  }
+  size_t b = html.find('>', a);
+  size_t c = html.find(std::string("</") + tag + ">", b);
+  if(b == std::string::npos || c == std::string::npos) {
+    return "<not closed>";
+  }
+  return html.substr(b + 1, c - b - 1);
+}
+
+// every tag ends before the next one starts (no attribute value left open), divs/spans balanced
+static bool markup_ok(const std::string &html) {
+  int div = 0, span = 0;
+  for(size_t i = 0; i < html.size(); i++) {
+    if(html[i] != '<') {
+      continue;
+    }
+    char quote = 0;
+    size_t j = i + 1;
+    for(; j < html.size(); j++) {
+      char c = html[j];
+      if(quote) {
+        if(c == quote) quote = 0;
+      } else if(c == '\'' || c == '"') {
+        quote = c;
+      } else if(c == '<') {
+        return false;
+      } else if(c == '>') {
+        break;
+      }
+    }
+    if(j == html.size()) {
+      return false;
+    }
+    std::string tag = html.substr(i, j - i + 1);
+    if(tag.rfind("<div", 0) == 0) div++;
+    if(tag == "</div>") div--;
+    if(tag.rfind("<span", 0) == 0) span++;
+    if(tag == "</span>") span--;
+    if(div < 0 || span < 0) {
+      return false;
+    }
+    i = j;
+  }
+  return div == 0 && span == 0;
+}
+
+static void check_info_html(const httpscert_info_t &info, const char *made_by) {
+  std::string html;
+  httpscert_info_html(&info, html_emit, &html);
+  CHECK(markup_ok(html));
+  const char *ids[] = { "https_cert_source", "https_cert_subject", "https_cert_valid_from", "https_cert_valid_to", "https_cert_key" };
+  std::string values[] = { made_by, info.subject, info.not_before, info.not_after, info.key_type };
+  for(int i = 0; i < 5; i++) {
+    std::string got = element_text(html, "span", ids[i]);
+    if(values[i].empty() || got != html_escape(values[i])) {
+      printf("FAIL: %s shows \"%s\", want \"%s\"\n", ids[i], got.c_str(), html_escape(values[i]).c_str());
+      failures++;
+    }
+  }
+  CHECK(element_text(html, "textarea", "https_cert_fingerprint") == html_escape(info.fingerprint));
+  // a read-only monospace field with a copy button, one label/value row per value, labels in this order
+  size_t fp = html.find("<textarea id='https_cert_fingerprint'");
+  CHECK(fp != std::string::npos && html.find(" readonly", fp) < html.find('>', fp) && html.find("monospace", fp) < html.find('>', fp));
+  CHECK(html.find(">Copy</button>") != std::string::npos && html.find("navigator.clipboard") != std::string::npos && html.find("execCommand('copy')") != std::string::npos);
+  const char *labels[] = { ">Made by<", ">Subject<", ">Valid from<", ">Valid until<", ">Key<", ">SHA-256 fingerprint<" };
+  size_t at = 0;
+  for(const char *l : labels) {
+    size_t f = html.find(l, at);
+    CHECK(f != std::string::npos);
+    at = f == std::string::npos ? at : f;
+  }
+  size_t rows = 0;
+  for(size_t f = html.find("<div class='setting-row'>"); f != std::string::npos; f = html.find("<div class='setting-row'>", f + 1)) rows++;
+  CHECK(rows == 6);
+}
+
+static void test_info_html(void) {
+  // a certificate this device made, as the page shows it
+  std::string store = make_store("HeishaMon", ip4(192, 168, 1, 20), 1780000000L);
+  httpscert_info_t info;
+  CHECK(httpscert_parse(store.data(), store.size(), httpstls_random, rng(), NULL, NULL, &info) == HTTPSCERT_OK);
+  check_info_html(info, "this device (self-signed)");
+  // an uploaded one that says anything, every field full
+  httpscert_info_t up;
+  memset(&up, 0, sizeof(up));
+  std::string subject = "CN=<script>alert('x')</script>, O=\"A&B\" ";
+  while(subject.size() < sizeof(up.subject) - 1) subject += "x";
+  memcpy(up.subject, subject.data(), subject.size());
+  strcpy(up.not_before, "2026-01-01 00:00");
+  strcpy(up.not_after, "2036-01-01 00:00");
+  strcpy(up.key_type, "RSA 2048");
+  memset(up.fingerprint, 'A', sizeof(up.fingerprint) - 1);
+  check_info_html(up, "you (uploaded)");
+  std::string html;
+  httpscert_info_html(&up, html_emit, &html);
+  CHECK(html.find("<script>") == std::string::npos);
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
   if(argc == 5 && strcmp(argv[1], "--store") == 0) {
@@ -689,6 +813,7 @@ int main(int argc, char **argv) {
   }
   test_params();
   test_generate_and_parse();
+  test_info_html();
   test_upload();
   test_admit();
   test_policies();

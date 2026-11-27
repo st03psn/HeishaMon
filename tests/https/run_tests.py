@@ -180,6 +180,17 @@ for text, fn in ((wf, "static void sendHttpsSection("), (hw, "void httpsSettings
     if "PRIVATE" in body or "HTTPS_FILE" in body or "readStore" in body or "LittleFS" in body:
         sys.exit(f"FAIL: {fn} reads the store file (the private key)")
 need(wf, r"int getSettings\(.*?httpsSettingsJson\(jsonDoc\)", "/getsettings shows the certificate information")
+# the certificate block of /security comes from httpscert_info_html() (host tested above), each value
+# in its own element; nothing in the HTTPS section is formatted into a fixed buffer and sent with the
+# length snprintf returns (cut off at 96 bytes, an open attribute value hid all values of the block)
+hs = wf[wf.index("static void sendHttpsSection("):]
+hs = hs[:hs.index("\n}\n")]
+need(hs, r"if \(st\.cert\) \{\s*#ifdef ESP32\s*\n[^\n]*\n\s*httpscert_info_html\(&st\.info, sendHttpsPiece, client\);\s*#endif",
+     "/security must show the certificate through httpscert_info_html()")
+if re.search(r"snprintf", hs):
+    sys.exit("FAIL: sendHttpsSection() formats into a fixed buffer (snprintf)")
+need(wf, r"static void sendHttpsPiece\(void \*ctx, const char \*text, size_t len\) \{\s*webserver_send_content\(\(struct webserver_t \*\)ctx, \(char \*\)text, len\);",
+     "the certificate block goes to the page unchanged")
 need(ino, r"#ifdef ESP32\s*\n\s*httpsLoop\(\);", "loop() must run httpsLoop() on the ESP32")
 need(ino, r"webauth_env_t env = \{ \(uint32_t\)client->client->remoteIP\(\), hosts, httpsRunning\(\), heishamonSettings\.http_mode, httpsClientOnHotspot\(client\) \};",
      "webserver_cb() must give webauth_request() the HTTPS state, the HTTP mode and the hotspot")
