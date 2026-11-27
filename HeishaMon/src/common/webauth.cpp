@@ -1595,7 +1595,7 @@ int webauth_write_answer(struct webserver_t *client) {
                                        "<h2>Unknown host name</h2><p>This HeishaMon does not answer to the name <b>";
       static const char p2[] PROGMEM = "</b>. It only accepts its IP addresses, its hostname and hostname.local, to protect it from other web sites (DNS rebinding).</p>"
                                        "<p>If this is the name your router or reverse proxy gives it (for example <i>heishamon.fritz.box</i>), open ";
-      static const char p3[] PROGMEM = " and add the name under <i>Host names</i> on the Web login page (/security).</p></body></html>\n";
+      static const char p3[] PROGMEM = " and add the name under <i>Host names</i> in the settings, tab <i>Web login</i> (/security).</p></body></html>\n";
       webserver_send(client, 403, (char *)"text/html", 0);
       webserver_send_content_P(client, p1, strlen_P(p1));
       if(bh != NULL) {
