@@ -773,7 +773,6 @@ static const char webBodyStart[] FLASHPROG = R"====(
     <a href="/reboot" onclick="return confirm('Reboot the device?')"><span class="nav-icon" aria-hidden="true">&#8635;</span> Reboot</a>
     <a href="/rules"><span class="nav-icon" aria-hidden="true">&#8881;</span> Rules</a>
     <a href="/settings"><span class="nav-icon" aria-hidden="true">&#9881;</span> Settings</a>
-    <a href="/security"><span class="nav-icon" aria-hidden="true">&#128274;</span> Web login</a>
 )===="
 #ifdef ESP32
 R"====(    <a href="/modbus"><span class="nav-icon" aria-hidden="true">&#9432;</span> Modbus registers</a>
@@ -817,8 +816,10 @@ static const char webFooter[] FLASHPROG = "</body></html>";
 static const char menuJS[] FLASHPROG = R"====(
 <script>
 document.addEventListener('DOMContentLoaded', function(){
+  // /security is the Web login tab of the settings
+  var here = window.location.pathname === '/security' ? '/settings' : window.location.pathname;
   document.querySelectorAll('#sideNav a').forEach(function(link){
-    if (link.getAttribute('href') === window.location.pathname) {
+    if (link.getAttribute('href') === here) {
       link.setAttribute('aria-current', 'page');
     }
   });
@@ -1634,6 +1635,7 @@ static const char settingsForm1[] FLASHPROG = R"====(
     <button type='button' data-tab='io' onclick="openSettingsTab('io')">Sensors &amp; GPIO</button>
     <button type='button' data-tab='advanced' onclick="openSettingsTab('advanced')">Advanced</button>
     <button type='button' data-tab='system' onclick="openSettingsTab('system')">System</button>
+    <button type='button' onclick="location.href='/security'">Web login</button>
   </nav>
   <form accept-charset='UTF-8' action='/savesettings' method='POST'>
   <div class='panel' data-tab='basic' style='margin-bottom:16px'>
@@ -1663,11 +1665,6 @@ static const char settingsForm1[] FLASHPROG = R"====(
       <label class='setting-label'>WiFi Password</label>
       <input type='password' name='wifi_password' maxlength='64' class='setting-input' value=''>
     </div>
-  </div></div>
-  <div class='panel' data-tab='system' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Web login</h3></div>
-  <div class='settings-grid'>
-    <div class='setting-row'><span class='setting-hint'>Web password: <strong id='web_password_state'>?</strong>, API key: <strong id='web_apikey_state'>?</strong>. Set them on the <a href='/security'>web login page</a>.</span></div>
   </div></div>
   <div class='panel' data-tab='system' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Arduino OTA password</h3></div>
@@ -2086,8 +2083,6 @@ R"====(
       document.getElementById('loading_settings').style.display='none';
       document.getElementById('settings_form').style.display='block';
       changeMinWatt(1);changeMinWatt(2);
-      document.getElementById('web_password_state').innerText=j.web_password_set?'set (login on)':'not set (login off)';
-      document.getElementById('web_apikey_state').innerText=j.web_apikey_set?'set':'not set';
     }
   };
   req.open('GET','/getsettings',true);
@@ -2777,7 +2772,7 @@ static const char webBodySettingsSaveMessage[] FLASHPROG = R"====(
 )====";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WEB LOGIN (login page, /security page, new API key)
+// WEB LOGIN (login page, the Web login tab of the settings at /security, new API key)
 // ─────────────────────────────────────────────────────────────────────────────
 static const char webBodyLogin1[] FLASHPROG = R"====(
 </head>
@@ -2802,7 +2797,15 @@ static const char webBodyLoginForm[] FLASHPROG = R"====(
 )====";
 
 static const char webBodySecurityOpen[] FLASHPROG = R"====(
-<div class='main-content' style='max-width:760px'>
+<div class='main-content' style='max-width:780px;margin:0 auto'>
+  <nav class='tabnav' id='settings_tabs' style='padding:0 0 14px;background:none'>
+    <button type='button' onclick="location.href='/settings#basic'">Basic</button>
+    <button type='button' onclick="location.href='/settings#heatpump'">Heat pump</button>
+    <button type='button' onclick="location.href='/settings#io'">Sensors &amp; GPIO</button>
+    <button type='button' onclick="location.href='/settings#advanced'">Advanced</button>
+    <button type='button' onclick="location.href='/settings#system'">System</button>
+    <button type='button' class='active'>Web login</button>
+  </nav>
 )====";
 
 static const char webBodySecurityFirst[] FLASHPROG = R"====(

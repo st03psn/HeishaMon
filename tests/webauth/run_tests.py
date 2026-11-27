@@ -154,6 +154,22 @@ sec = wf.split("int handleSecurity(", 1)[1].split("\nint ", 1)[0]
 need(sec, r"sendEscaped\(client, hosts\);.*sendEscaped\(client, webauth_store\.hosts\);", "/security must escape the host names")
 if re.search(r"webserver_send_content\(client, (hosts|webauth_store\.hosts)", sec):
     sys.exit("FAIL: /security prints host names without escaping")
+# the web login is a tab of the settings (at /security), not a menu entry of its own
+html = (ROOT / "HeishaMon" / "htmlcode.h").read_text(encoding="utf-8")
+side = html.split("id='sideNav'", 1)[1].split("</nav>", 1)[0]
+if "/security" in side or 'href="/settings"' not in side:
+    sys.exit("FAIL: the menu must have Settings and no entry of its own for /security")
+form1 = html.split("static const char settingsForm1[]", 1)[1].split("<form", 1)[0]
+need(form1, r"id='settings_tabs'.*location\.href='/security'\">Web login</button>\s*</nav>", "the settings need a Web login tab that opens /security")
+sec_open = html.split("static const char webBodySecurityOpen[]", 1)[1].split(')===="', 1)[0]
+need(sec_open, r"id='settings_tabs'.*/settings#basic.*/settings#heatpump.*/settings#io.*/settings#advanced.*/settings#system.*class='active'>Web login</button>",
+     "/security must show the tabs of the settings with Web login active")
+for tab in re.findall(r"/settings#(\w+)", sec_open):
+    if f"data-tab='{tab}' onclick" not in form1:
+        sys.exit(f"FAIL: /security links to the settings tab '{tab}' that does not exist")
+if len(re.findall(r"data-tab='\w+' onclick", form1)) != len(re.findall(r"/settings#\w+", sec_open)):
+    sys.exit("FAIL: /security does not show every tab of the settings")
+need(sec, r"sendBodyStart\(client\);\s*webserver_send_content_P\(client, webBodySecurityOpen,", "/security must start with the menu and the tabs of the settings")
 need(wf, r"strcmp\(tmp->name\.c_str\(\), \"wifi_hostname\"\) == 0\) \{\s*if \(webauth_hostname_valid\(", "saveSettings() must validate the hostname")
 need(wf, r"strlcpy\(heishamonSettings->wifi_hostname, jsonDoc\[F\(\"wifi_hostname\"\)\].*?webauth_hostname_valid\(heishamonSettings->wifi_hostname\)",
      "loadSettings() must validate the stored hostname")
