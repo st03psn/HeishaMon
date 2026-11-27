@@ -34,6 +34,9 @@ jobs:
       - name: Test web login
         run: python3 tests/webauth/run_tests.py
 
+      - name: Test boot button and setup hotspot
+        run: python3 tests/setupap/run_tests.py
+
       - name: Test command encoding
         run: python3 Tools/test_commands.py
 
@@ -76,7 +79,7 @@ jobs:
       - name: Install platform
         run: |
           arduino-cli core update-index
-          arduino-cli core install esp8266:esp8266
+          arduino-cli core install esp8266:esp8266@3.1.2
           arduino-cli core install esp32:esp32@3.3.11
 
       - name: Install dependencies

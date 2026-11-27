@@ -43,13 +43,13 @@
 #define WEBAUTH_PASSWORD_MAX 64
 #define WEBAUTH_HOSTS_MAX 96                  // extra allowed host names (reverse proxy), comma separated
 #define WEBAUTH_LOCK_ENTRIES 16               // addresses with failed attempts that are remembered (12 bytes each)
-#define WEBAUTH_FAILED_BITS 2048              // Bloom filter of all addresses that failed lately (256 bytes)
+#define WEBAUTH_FAILED_BITS 2048              // Bloom filter of all addresses that failed lately (256 bytes, two generations: 512)
 #define WEBAUTH_LOCK_FREE 3                   // failed attempts of one address before the backoff starts
 #define WEBAUTH_LOCK_MAX_MS (5UL * 60UL * 1000UL)     // longest backoff of one address
 #define WEBAUTH_LOCK_FORGET_MS (15UL * 60UL * 1000UL) // failures of an address are forgotten after this
 #define WEBAUTH_BUCKET_SIZE 10                // password checks in a burst, all addresses together
 #define WEBAUTH_BUCKET_REFILL_MS 3000UL       // one more password check every 3 s
-#define WEBAUTH_KNOWN_ENTRIES 4               // addresses that logged in lately: never share the entry of new addresses
+#define WEBAUTH_KNOWN_ENTRIES 4               // addresses that logged in lately: only their own backoff, never the global budget
 #define WEBAUTH_KNOWN_MS (7UL * 24UL * 60UL * 60UL * 1000UL)
 #define WEBAUTH_BUCKET_RESERVE 4              // the last ones only for addresses without recent failures
 #define WEBAUTH_ITERATIONS_MIN 1000           // a stored hash outside these limits is not valid
@@ -187,6 +187,7 @@ uint8_t webauth_form_result(struct webserver_t *client);
 const char *webauth_form_apikey(struct webserver_t *client); // the new key after WEBAUTH_RESULT_APIKEY, else NULL
 uint8_t webauth_query_message(struct webserver_t *client);    // ?m=<n> of GET /login and GET /security
 unsigned long webauth_lock_wait_ms(uint32_t ip);               // remaining backoff of an address
+bool webauth_lock_clean(uint32_t ip);            // no failure of this address is remembered (it may use the reserve of the budget)
 
 /* ---- building blocks (used by the code above, public for the tests) ---- */
 void webauth_pbkdf2_sha256(const char *password, size_t plen, const uint8_t *salt, size_t slen, uint32_t iterations, uint8_t out[32]);

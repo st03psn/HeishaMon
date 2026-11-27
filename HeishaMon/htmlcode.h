@@ -1643,8 +1643,9 @@ static const char settingsForm1[] FLASHPROG = R"====(
   <div class='settings-grid'>
     <div class='setting-row'>
       <label class='setting-label'>Hostname</label>
-      <input type='text' name='wifi_hostname' maxlength='32' pattern='[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?' class='setting-input' value=''>
+      <input type='text' name='wifi_hostname' id='wifi_hostname_id' maxlength='32' pattern='[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?' class='setting-input' value=''>
       <div class='setting-desc'>Name of this HeishaMon on the network: letters, digits and '-' (up to 32).</div>
+      <div class='setting-desc' id='wifi_hostname_msg' style='display:none;color:var(--red)'></div>
     </div>
     <div class='setting-row'>
       <label class='setting-label'>Description</label>
@@ -1808,7 +1809,8 @@ static const char settingsForm2[] FLASHPROG = R"====(
   <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Network options</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>WiFi hotspot when disconnected</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>When the WiFi can't be reached HeishaMon opens the open hotspot HeishaMon-Setup. Disable to never open it.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Setup hotspot while no WiFi is configured</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Without a stored WiFi name HeishaMon opens the open hotspot HeishaMon-Setup. Once a WiFi is configured the hotspot only starts with a short press of the boot button (for 10 minutes), never by itself.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Setup hotspot automatically when WiFi is lost (less secure)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot_auto' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Opens the open hotspot HeishaMon-Setup whenever the network can't be reached, as older versions did. Anybody nearby can then reach the web interface. Only for devices whose boot button you cannot reach.</span></div></div>
   </div></div>
   <div class='panel' data-tab='system' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Debug</h3></div>
@@ -1948,7 +1950,8 @@ static const char settingsForm2[] FLASHPROG = R"====(
   <div class='panel' data-tab='advanced' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Network options</h3></div>
   <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>WiFi hotspot when disconnected</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>When the WiFi can't be reached HeishaMon opens the open hotspot HeishaMon-Setup. Disable to never open it.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Setup hotspot while no WiFi is configured</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Without a stored WiFi name HeishaMon opens the open hotspot HeishaMon-Setup. Once a WiFi is configured the hotspot only starts with a short press of the boot button (for 10 minutes), never by itself.</span></div></div>
+    <div class='setting-row'><label class='setting-label'>Setup hotspot automatically when WiFi is lost (less secure)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='hotspot_auto' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Opens the open hotspot HeishaMon-Setup whenever the network can't be reached, as older versions did. Anybody nearby can then reach the web interface. Only for devices whose boot button you cannot reach.</span></div></div>
     <div class='setting-row'><label class='setting-label'>Ethernet module (W5500)</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='ethernet' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Disable on boards without the ethernet module to skip the W5500 probe and leave GPIO10-15 untouched. Needs a reboot.</span></div></div>
   </div></div>
   <div class='panel' data-tab='system' style='margin-bottom:16px'>
@@ -2050,6 +2053,39 @@ static const char settingsForm2[] FLASHPROG = R"====(
 // Populate settings form via /getsettings (unchanged logic)
 static const char populategetsettingsJS[] FLASHPROG = R"====(
 <script>
+// A hostname stored by an older version may have characters that are not allowed any more. The
+// pattern of the field would then stop the browser from saving ANY setting, without a visible
+// reason when another tab is open. So while the field still holds that stored name it is not
+// checked (the device keeps the stored name, it never accepts an invalid one), and a message next
+// to the field says what to do. A changed name is checked as always.
+function checkStoredHostname(){
+  var el=document.getElementById('wifi_hostname_id'),msg=document.getElementById('wifi_hostname_msg');
+  if(!el||!msg)return;
+  var stored=el.value,rule=el.getAttribute('pattern'),re=new RegExp('^(?:'+rule+')$');
+  var show=function(text){msg.textContent=text;msg.style.display=text?'block':'none';};
+  if(stored!==''&&!re.test(stored)){
+    el.removeAttribute('pattern');
+    var check=function(){
+      if(el.value===stored){
+        el.setCustomValidity('');
+        show("The stored hostname has characters that are not allowed (only letters, digits and '-', not at the start or end). It is kept as it is until you change it here; other settings can be saved. The web interface does not accept it as a host name: use the IP address.");
+      }else if(re.test(el.value)){
+        el.setCustomValidity('');
+        show('');
+      }else{
+        el.setCustomValidity("Only letters, digits and '-' (not at the start or end)");
+        show("Hostname: only letters, digits and '-' (not at the start or end). Nothing is saved until this is corrected.");
+      }
+    };
+    el.addEventListener('input',check);
+    check();
+  }
+  // an invalid field on a tab that is not shown: say so instead of doing nothing
+  el.addEventListener('invalid',function(){
+    show("Hostname: only letters, digits and '-' (not at the start or end). Nothing is saved until this is corrected (tab Basic).");
+    if(el.offsetParent===null)alert("The hostname (tab Basic) is not valid: only letters, digits and '-'. Nothing was saved.");
+  });
+}
 var getSettings=function(){
   var req=new XMLHttpRequest();
   req.onreadystatechange=function(){
@@ -2079,6 +2115,7 @@ R"====(
           if(el[0].type.indexOf('select')>-1){var ch=el[0].childNodes;for(var x=0;x<ch.length;x++){if(ch[x].value==j[k])ch[x].selected=true;}}
         }
       }
+      checkStoredHostname();
       if(typeof updateGPIORowVisibility==='function')updateGPIORowVisibility();
       document.getElementById('loading_settings').style.display='none';
       document.getElementById('settings_form').style.display='block';
@@ -2751,7 +2788,7 @@ static const char webBodySettingsNewWifiWarning[] FLASHPROG = R"====(
 <div class='msg-box'>
   <h2>Reconfiguring WiFi</h2>
   <p>Attempting to connect to the new access point.<br><br>
-  The <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot will be brought down automatically on success.<br><br>
+  The <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot will be brought down automatically on success. If the new access point cannot be reached (wrong name or password), HeishaMon opens the open <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot after about 15 seconds, also when you made this change from your network: connect to it and open http://192.168.4.1 to correct the WiFi data. It closes when nobody was connected for 10 minutes (at the latest after 30 minutes); after that it only starts with a short press of the boot button.<br><br>
   This page will redirect to the device's new address shortly.</p>
 </div>
 )====";

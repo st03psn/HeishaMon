@@ -69,7 +69,8 @@ struct settingsStruct {
   bool logHexdump = false; //log hexdump from start
   bool logSerial1 = true; //log to serial1 (gpio2) from start
   bool opentherm = false; //opentherm enable flag
-  bool hotspot = true; //enable wifi hotspot when wifi is not connected
+  bool hotspot = true; //open the setup hotspot while no wifi is configured (factory state)
+  bool hotspot_auto = false; //also open the setup hotspot whenever the wifi is lost (less secure; default: only with the boot button)
   uint16_t topicGroups = TOPIC_GROUPS_DEFAULT; //bit per topic group (decode.h), a cleared bit stops publishing those topics
 #ifdef ESP32
   bool proxy = true; //cztaw proxy port enable flag
