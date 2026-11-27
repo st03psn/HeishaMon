@@ -274,6 +274,8 @@ int8_t webserver_start(int port, webserver_cb_t *callback, uint8_t async);
  */
 int8_t webserver_tls_start(int port);
 void webserver_tls_stop(void);
+void webserver_tls_pause(bool pause);   // keep the port open, but accept nothing (a new certificate is loaded)
+void webserver_tls_close_idle(void);    // close TLS connections that are not in the middle of a request (websocket, waiting)
 bool webserver_tls_running(void);
 bool webserver_tls_admit(void); // implemented by the firmware: enough memory for one more TLS connection
 #endif

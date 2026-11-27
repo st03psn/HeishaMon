@@ -182,7 +182,11 @@ need(ino, r"webauth_env_t env = \{ \(uint32_t\)client->client->remoteIP\(\), hos
      "webserver_cb() must give webauth_request() the HTTPS state, the HTTP mode and the hotspot")
 need(ino, r"#else\s*\n\s*webauth_env_t env = \{ \(uint32_t\)client->client->remoteIP\(\), hosts, 0, 0, 0 \};", "ESP8266: no HTTPS in the decision")
 # the hotspot is the local address of the socket, nothing the client sends
-need(hw, r"bool httpsClientOnHotspot\(struct webserver_t \*client\) \{.*?client->client->localIP\(\) == WiFi\.softAPIP\(\)", "hotspot from the local address")
+need(hw, r"bool httpsClientOnHotspot\(struct webserver_t \*client\) \{.*?IPAddress ap = WiFi\.softAPIP\(\);.*?client->client->localIP\(\) == ap && remote\[0\] == ap\[0\]",
+     "hotspot from the local address of the socket and a client in the hotspot subnet")
+need(hw, r"static void requestReload\(void\) \{.*?webserver_tls_pause\(true\);", "a new certificate keeps the port open (HTTP mode stays in force)")
+if re.search(r"requestReload\(void\) \{[^}]*state\.running = false", hw):
+    sys.exit("FAIL: a reload must not switch the HTTP policy off")
 js = (SKETCH / "htmlcode.h").read_text()
 if "'ws://'+location.host" in js:
     sys.exit("FAIL: the page opens ws:// also when it was loaded over HTTPS")

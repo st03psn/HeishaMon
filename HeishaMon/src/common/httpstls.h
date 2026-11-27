@@ -83,7 +83,8 @@ bool httpstls_admit(uint8_t active, size_t internal_largest, size_t psram_larges
  * Returns HTTPSCERT_OK or an HTTPSCERT_ERR_ value; on an error nothing is
  * active (httpstls_ready() false).
  */
-int httpstls_server_init(const char *store, size_t len);
+struct httpscert_info_t;
+int httpstls_server_init(const char *store, size_t len, struct httpscert_info_t *info); // info may be NULL
 void httpstls_server_free(void);   // only when no connection is open
 bool httpstls_ready(void);
 

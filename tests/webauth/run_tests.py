@@ -160,7 +160,8 @@ side = html.split("id='sideNav'", 1)[1].split("</nav>", 1)[0]
 if "/security" in side or 'href="/settings"' not in side:
     sys.exit("FAIL: the menu must have Settings and no entry of its own for /security")
 form1 = html.split("static const char settingsForm1[]", 1)[1].split("<form", 1)[0]
-need(form1, r"id='settings_tabs'.*location\.href='/security'\">Web login</button>\s*</nav>", "the settings need a Web login tab that opens /security")
+need(form1, r"id='settings_tabs'.*location\.href='/security'\">Web login</button>\s*(\)====\"\s*#ifdef ESP32\s*R\"====\(\s*<button type='button' onclick=\"location\.href='/https'\">HTTPS</button>\s*\)====\"\s*#endif\s*R\"====\(\s*)?</nav>",
+     "the settings need a Web login tab that opens /security (then, on the ESP32, the HTTPS tab)")
 sec_open = html.split("static const char webBodySecurityOpen[]", 1)[1].split(')===="', 1)[0]
 need(sec_open, r"id='settings_tabs'.*/settings#basic.*/settings#heatpump.*/settings#io.*/settings#advanced.*/settings#system.*class='active'>Web login</button>",
      "/security must show the tabs of the settings with Web login active")

@@ -142,7 +142,7 @@ void httpstls_server_free(void) {
   server_ready = 0;
 }
 
-int httpstls_server_init(const char *store, size_t len) {
+int httpstls_server_init(const char *store, size_t len, struct httpscert_info_t *info) {
   httpstls_server_free();
   if(!rng_init()) {
     return HTTPSCERT_ERR_GENERATE;
@@ -153,7 +153,7 @@ int httpstls_server_init(const char *store, size_t len) {
 #if defined(MBEDTLS_SSL_CACHE_C)
   mbedtls_ssl_cache_init(&cache);
 #endif
-  int r = httpscert_parse(store, len, httpstls_random, &drbg, &server_crt, &server_key, NULL);
+  int r = httpscert_parse(store, len, httpstls_random, &drbg, &server_crt, &server_key, info);
   if(r == HTTPSCERT_OK) {
     if(mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
       r = HTTPSCERT_ERR_MEMORY;

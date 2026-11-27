@@ -255,16 +255,25 @@ static int generateStore(void) {
   return r;
 }
 
+/*
+ * A new store file is used once no TLS connection is open (mbedtls keeps
+ * pointers to the configuration). Meanwhile the port stays open and HTTPS
+ * counts as running, so the HTTP mode stays in force; new connections wait in
+ * the backlog and idle ones (live log) are closed.
+ */
+static void requestReload(void) {
+  reloadPending = true;
+  state.pending = true;
+  webserver_tls_pause(true);
+}
+
 /* Load the store file into the TLS server (only while no TLS connection is open) */
 static bool loadServer(void) {
   size_t len = 0;
   char *store = readStore(&len);
   int r = HTTPSCERT_ERR_FORMAT;
   if (store != NULL) {
-    r = httpscert_parse(store, len, httpstls_random, httpstls_random_ctx(), NULL, NULL, &state.info);
-    if (r == HTTPSCERT_OK) {
-      r = httpstls_server_init(store, len);
-    }
+    r = httpstls_server_init(store, len, &state.info);  // one parse: the checks, the server and what the page shows
     memset(store, 0, len);
     free(store);
   }
@@ -326,13 +335,24 @@ void httpsSetup(void) {
 void httpsLoop(void) {
   state.enabled = heishamonSettings.https;
   state.http_mode = webauth_http_mode(heishamonSettings.http_mode);
-  if (reloadPending && httpstls_stats.active == 0) {
+  if (reloadPending) {
+    webserver_tls_close_idle();
+    if (httpstls_stats.active > 0) {
+      return;
+    }
     reloadPending = false;
     state.pending = false;
     httpstls_server_free();
-    if (loadServer() && heishamonSettings.https && webserver_tls_start(HTTPSTLS_PORT) == 0) {
-      state.running = true;
+    unsigned long t = millis();
+    bool ok = loadServer();
+    webserver_tls_pause(false);
+    if (!ok) {
+      webserver_tls_stop();  // nothing usable: HTTPS off until the next start, HTTP works as without it
+      state.running = false;
     }
+    char msg[64];
+    snprintf_P(msg, sizeof(msg), PSTR("HTTPS: certificate loaded (%lu ms)"), millis() - t);
+    log_message(msg);
     return;
   }
   if (!heishamonSettings.https) {
@@ -349,9 +369,7 @@ void httpsLoop(void) {
     if (httpscert_needs_new(&state.info, heishamonSettings.wifi_hostname)) {
       log_message(_F("HTTPS: the hostname changed, making a new certificate"));
       if (generateStore() == HTTPSCERT_OK) {
-        reloadPending = true;
-        webserver_tls_stop();
-        state.running = false;
+        requestReload();
       }
       return;
     }
@@ -377,8 +395,12 @@ bool httpsClientOnHotspot(struct webserver_t *client) {
   if (!(WiFi.getMode() & WIFI_AP) || client == NULL || client->client == NULL) {
     return false;
   }
-  // the local address of the socket: a LAN client cannot fake it (Host header or 192.168.4.x as source can be)
-  return client->client->localIP() == WiFi.softAPIP();
+  // the local address of the socket is the access point and the client is in its subnet (a LAN
+  // host could send to 192.168.4.1 through the station side, but not from a 192.168.4.x address
+  // that the access point answers on its own interface); the Host header proves nothing
+  IPAddress ap = WiFi.softAPIP();
+  IPAddress remote = client->client->remoteIP();
+  return client->client->localIP() == ap && remote[0] == ap[0] && remote[1] == ap[1] && remote[2] == ap[2];
 }
 
 void httpsStatus(https_status_t *out) {
@@ -445,9 +467,7 @@ uint8_t httpsFormProcess(struct webserver_t *client) {
     // made now (a few hundred ms); loaded when the TLS connections (this one, too) have ended
     int r = generateStore();
     if (r == HTTPSCERT_OK) {
-      reloadPending = true;
-      webserver_tls_stop();
-      state.running = false;
+      requestReload();
       f->result = HTTPS_MSG_NEW_CERT;
     } else {
       f->result = HTTPS_MSG_SAVE_FAILED;
@@ -463,9 +483,9 @@ uint8_t httpsFormProcess(struct webserver_t *client) {
     int n = httpscert_from_upload(f->cert, f->cert_len, f->key, f->key_len, httpstls_random, httpstls_random_ctx(), out, HTTPSCERT_FILE_MAX);
     if (n > 0) {
       if (writeStore(out, (size_t)n)) {
-        reloadPending = true;
-        webserver_tls_stop();
-        state.running = false;
+        if (state.running) {
+          requestReload();
+        }
         f->result = HTTPS_MSG_UPLOADED;
         log_message(_F("HTTPS: own certificate stored"));
       } else {

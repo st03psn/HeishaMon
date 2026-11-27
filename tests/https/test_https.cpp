@@ -361,9 +361,9 @@ static void test_connection(void) {
   std::string store = make_store("heishamon", ip4(127, 0, 0, 1), 1780000000L);
   CHECK(!httpstls_ready());
   CHECK(httpstls_conn_new(3) == NULL);  // no server yet
-  CHECK(httpstls_server_init("HMTLS1 broken\n", 14) != HTTPSCERT_OK);
+  CHECK(httpstls_server_init("HMTLS1 broken\n", 14, NULL) != HTTPSCERT_OK);
   CHECK(!httpstls_ready());
-  CHECK(httpstls_server_init(store.data(), store.size()) == HTTPSCERT_OK);
+  CHECK(httpstls_server_init(store.data(), store.size(), NULL) == HTTPSCERT_OK);
   CHECK(httpstls_ready());
   std::string cert = block(store, "-----BEGIN CERTIFICATE");
 
@@ -507,7 +507,8 @@ static int serve(const char *file, int connections) {
   size_t n;
   while((n = fread(buf, 1, sizeof(buf), f)) > 0) store.append(buf, n);
   fclose(f);
-  if(httpstls_server_init(store.data(), store.size()) != HTTPSCERT_OK) return 3;
+  httpscert_info_t info;
+  if(httpstls_server_init(store.data(), store.size(), &info) != HTTPSCERT_OK || info.fingerprint[0] == 0) return 3;
 
   int ls = socket(AF_INET, SOCK_STREAM, 0);
   int yes = 1;

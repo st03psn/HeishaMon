@@ -95,6 +95,7 @@ static uint8_t *rbuffer = NULL;
 #include <errno.h>
 static WiFiServer tls_server(0);  // HTTPS: same client slots, same request path
 static uint8_t tls_listening = 0;
+static uint8_t tls_paused = 0;   // connections wait in the backlog while a new certificate is loaded
 #define WEB_TLS_STEP_BUDGET_MS 20  // after a handshake step this long no other one in the same webserver_loop() pass
 static uint16_t webserver_tls_read(struct webserver_t *client, uint8_t *buf, uint16_t size);
 static void webserver_tls_accept(void);
@@ -3002,7 +3003,7 @@ void webserver_loop(void) {
   }
 #endif
 #if defined(ESP32)
-  if(tls_listening && tls_server.hasClient()) {
+  if(tls_listening && !tls_paused && tls_server.hasClient()) {
     webserver_tls_accept();
   }
 #endif
@@ -3091,6 +3092,22 @@ void webserver_tls_stop(void) {
 
 bool webserver_tls_running(void) {
   return tls_listening != 0;
+}
+
+void webserver_tls_pause(bool pause) {
+  tls_paused = pause ? 1 : 0;
+}
+
+void webserver_tls_close_idle(void) {
+  for(uint8_t i = 0; i < WEBSERVER_MAX_CLIENTS; i++) {
+    struct webserver_t *c = &clients[i].data;
+    if(c->tlsconn == NULL || c->step == 0 || c->step == WEBSERVER_CLIENT_CLOSE || c->tx_used > 0) {
+      continue;
+    }
+    if(c->is_websocket || c->step == WEBSERVER_CLIENT_CONNECTING || (c->step == WEBSERVER_CLIENT_READ_HEADER && c->req == NULL)) {
+      c->step = WEBSERVER_CLIENT_CLOSE;  // the page reconnects (websocket) or the browser retries
+    }
+  }
 }
 #endif
 
