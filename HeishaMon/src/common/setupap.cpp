@@ -45,6 +45,7 @@ uint8_t bootbutton_update(struct bootbutton_t *b, bool pressed, unsigned long no
 
 static void request_start(struct setupap_t *s, unsigned long now) {
   s->requested = 1;
+  s->settling = 0;
   s->request_time = now;
   s->seen_time = now;
 }
@@ -62,11 +63,20 @@ uint8_t setupap_button(struct setupap_t *s, const struct setupap_input_t *in, un
   return SETUPAP_EVENT_REQUESTED;
 }
 
+void setupap_wifi_saved(struct setupap_t *s, unsigned long now) {
+  request_start(s, now);
+  s->settling = 1;
+}
+
 uint8_t setupap_update(struct setupap_t *s, const struct setupap_input_t *in, unsigned long now) {
   uint8_t before = s->reason;
   s->event = SETUPAP_EVENT_NONE;
+  if(s->settling && (unsigned long)(now - s->request_time) >= SETUPAP_SETTLE_MS) {
+    s->settling = 0;
+  }
   if(in->net_up) {
-    if(s->requested) {
+    // right after new WiFi data was saved the old connection can still look up: that does not end the request
+    if(s->requested && !s->settling) {
       s->requested = 0;
       s->event = SETUPAP_EVENT_NETWORK;
     }
@@ -96,4 +106,72 @@ uint8_t setupap_update(struct setupap_t *s, const struct setupap_input_t *in, un
     s->reason = s->requested ? SETUPAP_BUTTON : SETUPAP_OFF;
   }
   return s->reason;
+}
+
+void wifiretry_started(struct wifiretry_t *r, unsigned long now) {
+  r->last = now;
+  r->sta_off = 0;
+}
+
+uint8_t wifiretry_net_up(struct wifiretry_t *r, const struct wifiretry_input_t *in, unsigned long now) {
+  r->last = now;
+  if(r->sta_off) {
+    r->sta_off = 0;
+    if(in->wifi_configured) {
+      return WIFIRETRY_BEGIN;  // or the WiFi would stay off for as long as the ethernet is up
+    }
+  }
+  return WIFIRETRY_NONE;
+}
+
+uint8_t wifiretry_update(struct wifiretry_t *r, const struct wifiretry_input_t *in, unsigned long now) {
+  unsigned long since = (unsigned long)(now - r->last);
+  if(in->scanning) {
+    return WIFIRETRY_NONE;  // a step now would end the scan without a result
+  }
+  if(in->ap_up) {
+    if(in->clients > 0) {
+      // somebody uses the hotspot: the station must not hop through the channels
+      if(!r->sta_off) {
+        r->sta_off = 1;
+        return WIFIRETRY_STA_OFF;
+      }
+      return WIFIRETRY_NONE;
+    }
+    if(since < WIFIRETRY_AP_MS) {
+      return WIFIRETRY_NONE;
+    }
+    r->last = now;
+    if(!r->sta_off) {
+      r->sta_off = 1;
+      return WIFIRETRY_STA_OFF;
+    }
+    if(!in->wifi_configured) {
+      return WIFIRETRY_NONE;  // nothing to connect to: the station stays off
+    }
+    r->sta_off = 0;
+    return WIFIRETRY_BEGIN;
+  }
+  // no hotspot: the station is never switched off
+  if(!in->wifi_configured) {
+    return WIFIRETRY_NONE;
+  }
+  if(r->sta_off) {
+    // the hotspot went away during a "station off" step: begin again now
+    r->sta_off = 0;
+    r->last = now;
+    return WIFIRETRY_BEGIN;
+  }
+  if(since < WIFIRETRY_MS) {
+    return WIFIRETRY_NONE;
+  }
+  if(in->busy && since < WIFIRETRY_MS + WIFIRETRY_BUSY_MAX_MS) {
+    return WIFIRETRY_NONE;
+  }
+  r->last = now;
+  return WIFIRETRY_BEGIN;
+}
+
+bool wifiretry_ap_may_start(const struct wifiretry_t *r, unsigned long now) {
+  return (unsigned long)(now - r->last) >= WIFIRETRY_AP_MS;
 }

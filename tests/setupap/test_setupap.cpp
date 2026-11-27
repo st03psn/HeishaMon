@@ -362,9 +362,232 @@ static void test_hotspot() {
   }
 }
 
+/* ---- new WiFi data saved: counts as a request ---- */
+
+static void test_wifi_saved() {
+  setupap_t s;
+  setupap_input_t in;
+  unsigned long now = 700000;
+
+  // configured device, WiFi changed from the network (previous reason: off), wrong password
+  memset(&s, 0, sizeof(s));
+  in = input(true, true);
+  CHECK(setupap_update(&s, &in, now) == SETUPAP_OFF, "on the network");
+  setupap_wifi_saved(&s, now);
+  // the old connection still looks up for a moment: that must not end the request
+  CHECK(setupap_update(&s, &in, now + 50) == SETUPAP_OFF && s.requested && s.event == SETUPAP_EVENT_NONE, "request survives the old connection");
+  in.net_up = 0;
+  CHECK(setupap_update(&s, &in, now + 500) == SETUPAP_BUTTON, "wanted while the new WiFi is not reached");
+  CHECK(setupap_update(&s, &in, now + 60000) == SETUPAP_BUTTON, "still wanted a minute later");
+  // then the normal stop rules
+  CHECK(setupap_update(&s, &in, now + SETUPAP_IDLE_MS) == SETUPAP_OFF && s.event == SETUPAP_EVENT_TIMEOUT, "timeout without a client");
+  CHECK(setupap_update(&s, &in, now + SETUPAP_IDLE_MS + 60000) == SETUPAP_OFF, "and not again");
+  // a client keeps it, at most 30 minutes
+  memset(&s, 0, sizeof(s));
+  setupap_wifi_saved(&s, now);
+  in = input(true, false, true, false, 1);
+  CHECK(setupap_update(&s, &in, now + SETUPAP_MAX_MS - 1) == SETUPAP_BUTTON, "in use");
+  CHECK(setupap_update(&s, &in, now + SETUPAP_MAX_MS) == SETUPAP_OFF, "30 minutes at the latest");
+  // right password: over once the new WiFi is connected (after the settle time)
+  memset(&s, 0, sizeof(s));
+  setupap_wifi_saved(&s, now);
+  in = input(true, false);
+  CHECK(setupap_update(&s, &in, now + 1000) == SETUPAP_BUTTON, "connecting");
+  in.net_up = 1;
+  CHECK(setupap_update(&s, &in, now + 3000) == SETUPAP_OFF && s.requested, "connected within the settle time: off, request not yet ended");
+  CHECK(setupap_update(&s, &in, now + SETUPAP_SETTLE_MS) == SETUPAP_OFF && !s.requested && s.event == SETUPAP_EVENT_NETWORK, "ended by the network");
+  in.net_up = 0;
+  CHECK(setupap_update(&s, &in, now + 600000) == SETUPAP_OFF, "WiFi lost later: no hotspot");
+  // the network stays up all the time (ethernet): ended after the settle time, never a hotspot
+  memset(&s, 0, sizeof(s));
+  setupap_wifi_saved(&s, now);
+  in = input(true, true);
+  for(unsigned long t = 0; t < 20000; t += 100) {
+    CHECK(setupap_update(&s, &in, now + t) == SETUPAP_OFF, "ethernet up");
+  }
+  CHECK(!s.requested, "request ended with the network up");
+  // a short press during such a request stops it like any request; a press does not get the settle time
+  memset(&s, 0, sizeof(s));
+  setupap_wifi_saved(&s, now);
+  in = input(true, false);
+  CHECK(setupap_button(&s, &in, now + 20000) == SETUPAP_EVENT_CANCELLED && setupap_update(&s, &in, now + 20000) == SETUPAP_OFF, "cancelled by a press");
+  setupap_button(&s, &in, now + 30000);
+  in.net_up = 1;
+  CHECK(setupap_update(&s, &in, now + 30100) == SETUPAP_OFF && !s.requested, "a button request ends at once when the network is up");
+  // saved on the factory hotspot (previous reason: factory)
+  memset(&s, 0, sizeof(s));
+  in = input(false, false);
+  setupap_update(&s, &in, now);
+  setupap_wifi_saved(&s, now + 10);
+  in = input(true, false);
+  CHECK(setupap_update(&s, &in, now + 20) == SETUPAP_BUTTON, "saved on the factory hotspot");
+  // saved while the automatic setting is on: automatic anyway
+  memset(&s, 0, sizeof(s));
+  setupap_wifi_saved(&s, now);
+  in = input(true, false, true, true);
+  CHECK(setupap_update(&s, &in, now + 20) == SETUPAP_AUTO, "automatic setting");
+}
+
+/* ---- WiFi retry ---- */
+
+static wifiretry_input_t rinput(bool configured, bool ap_up, uint8_t clients = 0, bool busy = false, bool scanning = false) {
+  wifiretry_input_t in;
+  in.wifi_configured = configured;
+  in.ap_up = ap_up;
+  in.clients = clients;
+  in.busy = busy;
+  in.scanning = scanning;
+  return in;
+}
+
+static void test_retry() {
+  wifiretry_t r;
+  wifiretry_input_t in;
+  unsigned long now = 50000;
+
+  // 1. no hotspot: a try every 30 s, for as long as it takes, and never "station off"
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in = rinput(true, false);
+  int begins = 0, offs = 0;
+  unsigned long last_begin = now, max_gap = 0, min_gap = ULONG_MAX;
+  for(unsigned long t = 10; t <= 48UL * 3600 * 1000; t += 10) {  // two days
+    uint8_t a = wifiretry_update(&r, &in, now + t);
+    if(a == WIFIRETRY_BEGIN) {
+      unsigned long gap = now + t - last_begin;
+      max_gap = gap > max_gap ? gap : max_gap;
+      min_gap = gap < min_gap ? gap : min_gap;
+      last_begin = now + t;
+      begins++;
+    } else if(a == WIFIRETRY_STA_OFF) {
+      offs++;
+    }
+  }
+  CHECK(begins == 48 * 120 && offs == 0, "two days without WiFi: %d tries, %d times station off", begins, offs);
+  CHECK(min_gap == WIFIRETRY_MS && max_gap == WIFIRETRY_MS, "gap between tries %lu to %lu ms", min_gap, max_gap);
+
+  // 2. the heat pump line is busy: put off, but never for more than 5 s
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in = rinput(true, false, 0, true);
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS) == WIFIRETRY_NONE, "busy: put off");
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS + WIFIRETRY_BUSY_MAX_MS - 1) == WIFIRETRY_NONE, "busy: still put off");
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS + WIFIRETRY_BUSY_MAX_MS) == WIFIRETRY_BEGIN, "busy for 5 s: tried anyway");
+  // busy all the time (optional PCB on, heat pump not answering): still a try every 35 s
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  begins = 0;
+  for(unsigned long t = 10; t <= 3600UL * 1000; t += 10) {
+    begins += wifiretry_update(&r, &in, now + t) == WIFIRETRY_BEGIN;
+  }
+  CHECK(begins == 3600 / 35, "always busy for an hour: %d tries", begins);
+  // busy only now and then: the try happens in the first free moment
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in.busy = 1;
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS + 100) == WIFIRETRY_NONE, "busy");
+  in.busy = 0;
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS + 300) == WIFIRETRY_BEGIN, "free again");
+  // busy does not matter before the time is up
+  in.busy = 1;
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS + 400) == WIFIRETRY_NONE, "not due");
+
+  // 3. nothing configured, no hotspot: nothing to do
+  memset(&r, 0, sizeof(r));
+  in = rinput(false, false);
+  for(unsigned long t = 0; t < 600000; t += 1000) {
+    CHECK(wifiretry_update(&r, &in, now + t) == WIFIRETRY_NONE, "not configured");
+  }
+
+  // 4. hotspot up, nobody connected: station off and begin again in turn, every 15 s
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in = rinput(true, true);
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS - 1) == WIFIRETRY_NONE, "not yet");
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS) == WIFIRETRY_STA_OFF, "first step: station off");
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS + 5) == WIFIRETRY_NONE, "once");
+  CHECK(wifiretry_update(&r, &in, now + 2 * WIFIRETRY_AP_MS) == WIFIRETRY_BEGIN, "second step: begin again");
+  CHECK(wifiretry_update(&r, &in, now + 3 * WIFIRETRY_AP_MS) == WIFIRETRY_STA_OFF, "third step");
+  CHECK(wifiretry_update(&r, &in, now + 4 * WIFIRETRY_AP_MS) == WIFIRETRY_BEGIN, "fourth step");
+
+  // 5. hotspot in use: station off once, no retry while somebody is connected, a try soon after
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in = rinput(true, true, 1);
+  CHECK(wifiretry_update(&r, &in, now + 100) == WIFIRETRY_STA_OFF, "client connected: station off right away");
+  for(unsigned long t = 200; t < 20UL * 60 * 1000; t += 1000) {
+    CHECK(wifiretry_update(&r, &in, now + t) == WIFIRETRY_NONE, "in use");
+  }
+  in.clients = 0;
+  CHECK(wifiretry_update(&r, &in, now + 20UL * 60 * 1000) == WIFIRETRY_BEGIN, "client gone: begin again");
+
+  // 6. a scan is running: no step (it would end the scan), and the step is not lost
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in = rinput(true, true, 1, false, true);
+  CHECK(wifiretry_update(&r, &in, now + 100) == WIFIRETRY_NONE, "scan running");
+  in.scanning = 0;
+  CHECK(wifiretry_update(&r, &in, now + 3000) == WIFIRETRY_STA_OFF, "scan done");
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in = rinput(true, false, 0, false, true);
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS + 10) == WIFIRETRY_NONE, "scan running, no hotspot");
+  in.scanning = 0;
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS + 2500) == WIFIRETRY_BEGIN, "scan done, no hotspot");
+
+  // 7. the hotspot goes away while the station is off (request timed out): begin again at once, never stay off
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in = rinput(true, true);
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS) == WIFIRETRY_STA_OFF, "station off");
+  in.ap_up = 0;
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS + 10) == WIFIRETRY_BEGIN, "hotspot gone: begin");
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS + 20) == WIFIRETRY_NONE, "once");
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS + 10 + WIFIRETRY_MS) == WIFIRETRY_BEGIN, "then every 30 s");
+
+  // 8. ethernet comes back while the station is off: the WiFi is switched on again (once)
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  in = rinput(true, true);
+  wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS);
+  CHECK(wifiretry_net_up(&r, &in, now + 20000) == WIFIRETRY_BEGIN, "network up with the station off");
+  CHECK(wifiretry_net_up(&r, &in, now + 20010) == WIFIRETRY_NONE, "once");
+  // not without a configured WiFi, and not when the station was on
+  memset(&r, 0, sizeof(r));
+  in = rinput(false, true);
+  wifiretry_started(&r, now);
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_AP_MS) == WIFIRETRY_STA_OFF, "factory hotspot: station off");
+  CHECK(wifiretry_update(&r, &in, now + 2 * WIFIRETRY_AP_MS) == WIFIRETRY_NONE && wifiretry_update(&r, &in, now + 10 * WIFIRETRY_AP_MS) == WIFIRETRY_NONE, "nothing to begin");
+  CHECK(wifiretry_net_up(&r, &in, now + 200000) == WIFIRETRY_NONE, "no WiFi configured");
+  memset(&r, 0, sizeof(r));
+  in = rinput(true, false);
+  wifiretry_started(&r, now);
+  CHECK(wifiretry_net_up(&r, &in, now + 100) == WIFIRETRY_NONE, "station was on");
+  // after the network was up, the first try comes 30 s after it was lost
+  CHECK(wifiretry_net_up(&r, &in, now + 500000) == WIFIRETRY_NONE, "up");
+  CHECK(wifiretry_update(&r, &in, now + 500000 + WIFIRETRY_MS - 1) == WIFIRETRY_NONE, "lost: not yet");
+  CHECK(wifiretry_update(&r, &in, now + 500000 + WIFIRETRY_MS) == WIFIRETRY_BEGIN, "lost for 30 s");
+
+  // 9. a wanted hotspot (automatic, or after a WiFi change) starts only after the WiFi had 15 s
+  memset(&r, 0, sizeof(r));
+  wifiretry_started(&r, now);
+  CHECK(!wifiretry_ap_may_start(&r, now) && !wifiretry_ap_may_start(&r, now + WIFIRETRY_AP_MS - 1), "the new WiFi gets its time");
+  CHECK(wifiretry_ap_may_start(&r, now + WIFIRETRY_AP_MS), "then the hotspot may start");
+
+  // 10. across the wrap of millis()
+  memset(&r, 0, sizeof(r));
+  now = ULONG_MAX - 10000;
+  wifiretry_started(&r, now);
+  in = rinput(true, false);
+  CHECK(wifiretry_update(&r, &in, now + 20000) == WIFIRETRY_NONE, "wrapped, not due");
+  CHECK(wifiretry_update(&r, &in, now + WIFIRETRY_MS) == WIFIRETRY_BEGIN, "due across the wrap");
+}
+
 int main() {
   test_button();
   test_hotspot();
+  test_wifi_saved();
+  test_retry();
   printf("%s: %d checks, %d failed\n", failed ? "FAIL" : "PASS", checks, failed);
   return failed ? 1 : 0;
 }

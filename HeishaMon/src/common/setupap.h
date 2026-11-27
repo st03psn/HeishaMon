@@ -24,8 +24,18 @@
  *     after the press at the latest;
  *   - setting "hotspot_auto" (off by default, less secure): also whenever
  *     the network is lost, as older versions did;
- *   - WiFi name saved from the factory hotspot: the hotspot comes back like
- *     after a button press when that WiFi cannot be reached (wrong password).
+ *   - new WiFi data saved (on the hotspot or from the network): counts as a
+ *     request, so the hotspot comes back when that WiFi cannot be reached
+ *     (wrong password) and then follows the rules of a request.
+ *
+ * WiFi retry while the configured WiFi is lost (wifiretry_*): when to try
+ * again and how, so that it goes on for as long as it takes:
+ *   - no hotspot: every 30 s "disconnect and begin again"; the station is
+ *     never switched off (on the ESP32 that would stop the whole WiFi driver);
+ *   - hotspot up, nobody connected: every 15 s in turn "station off" (the
+ *     hotspot works undisturbed) and "begin again";
+ *   - hotspot up and in use: station off, no retry (it would disturb the
+ *     user on the hotspot).
  */
 
 #ifndef _SETUPAP_H_
@@ -41,6 +51,11 @@
 
 #define SETUPAP_IDLE_MS (10UL * 60UL * 1000UL)  // a requested hotspot stops when nobody was connected for this long
 #define SETUPAP_MAX_MS (30UL * 60UL * 1000UL)   // and at the latest this long after the request
+#define SETUPAP_SETTLE_MS 5000UL                // a request made by saving WiFi data is not ended by "network up" this early (the old connection may still look up)
+
+#define WIFIRETRY_AP_MS 15000UL                 // hotspot up: time between two steps; also the time a new WiFi gets before a wanted hotspot starts
+#define WIFIRETRY_MS 30000UL                    // no hotspot: time between two tries
+#define WIFIRETRY_BUSY_MAX_MS 5000UL            // a try is put off for at most this long while the heat pump serial line is busy
 
 enum {
   BOOTBUTTON_NONE = 0,
@@ -72,7 +87,7 @@ enum {
   SETUPAP_EVENT_REQUESTED,   // short press: hotspot asked for
   SETUPAP_EVENT_CANCELLED,   // short press: the requested hotspot is stopped
   SETUPAP_EVENT_IGNORED,     // short press while the network is up: nothing to do
-  SETUPAP_EVENT_KEPT,        // WiFi saved on the factory hotspot: kept like a request
+  SETUPAP_EVENT_KEPT,        // WiFi saved: kept like a request
   SETUPAP_EVENT_NETWORK,     // request over: the network is up
   SETUPAP_EVENT_TIMEOUT      // request over: nobody connected for SETUPAP_IDLE_MS, or SETUPAP_MAX_MS
 };
@@ -88,6 +103,7 @@ struct setupap_input_t {
 
 struct setupap_t {
   uint8_t requested;         // a request is running
+  uint8_t settling;          // the request came from saved WiFi data: "network up" does not end it during SETUPAP_SETTLE_MS
   uint8_t reason;            // SETUPAP_* of the last update
   uint8_t event;             // SETUPAP_EVENT_* of the last update (one update long)
   unsigned long request_time;
@@ -97,7 +113,43 @@ struct setupap_t {
 /* a short press of the boot button; returns SETUPAP_EVENT_REQUESTED, _CANCELLED or _IGNORED */
 uint8_t setupap_button(struct setupap_t *s, const struct setupap_input_t *in, unsigned long now);
 
+/* new WiFi data was saved and is tried now: the hotspot is wanted like after a short press (if that WiFi cannot be reached) */
+void setupap_wifi_saved(struct setupap_t *s, unsigned long now);
+
 /* should the hotspot be up now? returns SETUPAP_*, s->event says what changed */
 uint8_t setupap_update(struct setupap_t *s, const struct setupap_input_t *in, unsigned long now);
+
+
+enum {
+  WIFIRETRY_NONE = 0,
+  WIFIRETRY_BEGIN,     // disconnect (station stays on) and begin again with the configured WiFi
+  WIFIRETRY_STA_OFF    // switch the station off; only ever asked for while the hotspot is up
+};
+
+struct wifiretry_input_t {
+  uint8_t wifi_configured;   // a WiFi name is stored
+  uint8_t ap_up;             // the hotspot is up
+  uint8_t clients;           // stations connected to the hotspot
+  uint8_t busy;              // an answer of the heat pump is awaited (a try can block for seconds): put off, but only WIFIRETRY_BUSY_MAX_MS
+  uint8_t scanning;          // a WiFi scan is running: no step until it is done
+};
+
+struct wifiretry_t {
+  unsigned long last;        // time of the last step (or of the last time the network was up)
+  uint8_t sta_off;           // the last step switched the station off
+};
+
+/* a connection attempt was started elsewhere (boot, new settings): the timing starts again */
+void wifiretry_started(struct wifiretry_t *r, unsigned long now);
+
+/* the network is up (call on every loop while it is). Returns WIFIRETRY_BEGIN once when the station was left off
+   and a WiFi is configured (ethernet came back during a "station off" step), else WIFIRETRY_NONE */
+uint8_t wifiretry_net_up(struct wifiretry_t *r, const struct wifiretry_input_t *in, unsigned long now);
+
+/* the network is down: what to do now, WIFIRETRY_* */
+uint8_t wifiretry_update(struct wifiretry_t *r, const struct wifiretry_input_t *in, unsigned long now);
+
+/* may a wanted hotspot (automatic, or kept after a WiFi change) start now? Not before the WiFi had WIFIRETRY_AP_MS to connect */
+bool wifiretry_ap_may_start(const struct wifiretry_t *r, unsigned long now);
 
 #endif

@@ -4,7 +4,8 @@
    (g++, no Arduino toolchain) and runs it: short press / factory reset /
    bounce / gaps in the polling, and "should the hotspot be up now?" for
    the factory state, a configured device, the automatic setting, the
-   button request with its timeouts, and a WiFi change made on the hotspot.
+   button request with its timeouts, new WiFi data as a request, and the
+   WiFi retry (when, which step, how long it waits for the heat pump line).
 2. Static checks of the glue that cannot run on the host (HeishaMon.ino,
    webfunctions.cpp, htmlcode.h): the access point is only started where
    setupap_update() was asked, the settings default to "not by itself",
@@ -78,13 +79,15 @@ def glue_errors(ino: str, wf: str, wfh: str, html: str) -> list:
             arg = m.group(1)
             if re.search(r"\bWIFI_AP\b|\bWIFI_MODE_AP\b", arg):
                 errors.append(f"{name}: WiFi.mode({arg}) sets a bare access point mode")
-            if "WIFI_AP_STA" in arg and arg.strip() not in ("WIFI_AP_STA", "apUp ? WIFI_AP_STA : WIFI_STA"):
+            if "WIFI_AP_STA" in arg and arg.strip() != "WIFI_AP_STA":
                 errors.append(f"{name}: unexpected WiFi.mode({arg})")
     # every start is behind the decision of setupap_update()
     calls = len(re.findall(r"^\s+setupApStart\(\);", ino, re.M))
-    guarded = len(re.findall(r"if \(!apUp && [^\n]*apReason [!=]= SETUPAP_[^\n]*\) \{\n\s+setupApStart\(\);", ino))
-    if calls < 4 or calls != guarded:
-        errors.append(f"setupApStart() is called {calls} times, {guarded} of them behind 'if (!apUp && ... apReason ...)'")
+    guard = (r"if \(!apUp && \(\(apReason == SETUPAP_FACTORY\) \|\| \(\(apReason != SETUPAP_OFF\) && "
+             r"\(setupApStartNow \|\| wifiretry_ap_may_start\(&wifiRetry, millis\(\)\)\)\)\)\) \{\n\s+setupApStart\(\);")
+    guarded = len(re.findall(guard, ino))
+    if calls != 2 or guarded != 2:
+        errors.append(f"setupApStart() is called {calls} times, {guarded} of them behind the decision of setupap_update() (expected: once per board)")
     # setupWifi() (boot, settings change) never starts it
     try:
         if re.search(r"softAP\s*\(|softAPConfig", function(wf, "void setupWifi(settingsStruct *heishamonSettings) {")):
@@ -94,12 +97,13 @@ def glue_errors(ino: str, wf: str, wfh: str, html: str) -> list:
 
     # --- the decision comes from setupap.cpp, with the settings as they are stored ---
     try:
-        wanted = function(ino, "uint8_t setupApWanted(bool netUp, bool ethLinked) {")
+        wanted = function(ino, "uint8_t setupApWanted(bool netUp) {")
     except ValueError:
         wanted = ""
         errors.append("setupApWanted() is missing")
     need(wanted, r"in\.wifi_configured = \(heishamonSettings\.wifi_ssid\[0\] != '\\0'\);", "setupApWanted(): wifi_configured must be 'a WiFi name is stored'")
     need(wanted, r"in\.net_up = netUp;", "setupApWanted(): net_up")
+    need(wanted, r"in\.eth_seen = ethSeen;", "setupApWanted(): eth_seen must be 'ethernet had an address' (a linked cable without an address is not enough)")
     need(wanted, r"in\.allow_factory = heishamonSettings\.hotspot;", "setupApWanted(): allow_factory must be the setting hotspot")
     need(wanted, r"in\.auto_on_loss = heishamonSettings\.hotspot_auto;", "setupApWanted(): auto_on_loss must be the setting hotspot_auto")
     need(wanted, r"bootbutton_update\(&bootButton, digitalRead\(BOOTPIN\) == LOW, now\)", "setupApWanted() must poll the boot button")
@@ -108,7 +112,7 @@ def glue_errors(ino: str, wf: str, wfh: str, html: str) -> list:
     need(wanted, r"uint8_t reason = setupap_update\(&setupAp, &in, now\);.*return reason;", "setupApWanted() must return what setupap_update() says")
     if len(re.findall(r"\bfactoryReset\(\);", ino)) != 2 or "checkBootButton" in ino or "bootButtonNotPressed" in ino:
         errors.append("factoryReset() must only be called by setupApWanted() (and the unused doubleResetDetect())")
-    for board, call in (("ESP8266", r"setupApWanted\(WiFi\.localIP\(\) \? true : false, false\)"), ("ESP32", r"setupApWanted\(wifiUp \|\| ethUp, ETH\.linkUp\(\)\)")):
+    for board, call in (("ESP8266", r"setupApWanted\(WiFi\.localIP\(\) \? true : false\)"), ("ESP32", r"setupApWanted\(wifiUp \|\| ethUp\)")):
         need(ino, r"void check_wifi\(\) \{.{0,700}?uint8_t apReason = " + call + r";\s*bool apUp = setupApIsUp\(\);", f"check_wifi() ({board}) must ask setupApWanted()")
     need(ino, r"void loop\(\) \{\s*//[^\n]*\n\s*webserver_loop\(\);\s*//[^\n]*\n\s*check_wifi\(\);", "loop() must call check_wifi() (boot button, hotspot) every time")
     # a hotspot that is not wanted any more is stopped, on both boards, and always when the network is up
@@ -120,13 +124,33 @@ def glue_errors(ino: str, wf: str, wfh: str, html: str) -> list:
     if len(re.findall(r"dnsServer\.processNextRequest\(\)", ino)) != len(re.findall(r"if \(apUp\) \{\s*dnsServer\.processNextRequest\(\);", ino)):
         errors.append("dnsServer.processNextRequest() must only run while the hotspot is up")
 
-    # --- the WiFi retry goes on without the hotspot ---
-    need(ino, r"\} else if \(\(\(unsigned long\)\(millis\(\) - lastWifiRetryTimer\) > \(2 \* WIFIRETRYTIMER\)\) && !sending\) \{[^}]*lastWifiRetryTimer = millis\(\);[^}]*"
-              r"wifiBeginStrongest\(heishamonSettings\.wifi_ssid, heishamonSettings\.wifi_password\);",
-         "ESP8266: without the hotspot the configured WiFi must be retried by the timer alone (and not while an answer of the heat pump is awaited)")
-    need(ino, r"if \(WiFi\.getMode\(\) & WIFI_MODE_STA\) \{\s*if \(WiFi\.scanComplete\(\) == WIFI_SCAN_RUNNING\) \{\s*return;[^}]*\}\s*log_message\([^\n]*\n\s*WiFi\.disconnect\(true\);\s*return;\s*\}"
-              r".*?if \(heishamonSettings\.wifi_ssid\[0\] != '\\0'\) \{\s*log_message\([^\n]*\n\s*WiFi\.mode\(apUp \? WIFI_AP_STA : WIFI_STA\);\s*delay\(50\);\s*wifiBeginConfigured\(\);",
-         "ESP32: the retry must alternate 'STA off' and 'begin again' by the STA mode bit, with or without the hotspot")
+    # --- the WiFi retry: when and how is decided by wifiretry_update(), on both boards ---
+    if "lastWifiRetryTimer" in ino or "WIFIRETRYTIMER" in ino:
+        errors.append("the WiFi retry timing must come from wifiretry_*() (setupap.cpp), not from a timer in HeishaMon.ino")
+    if len(re.findall(r"switch \(wifiretry_update\(&wifiRetry, &retryIn, millis\(\)\)\) \{", ino)) != 2:
+        errors.append("check_wifi() must ask wifiretry_update() on both boards")
+    need(ino, r"retryIn\.busy = sending;", "ESP8266: the retry must know when an answer of the heat pump is awaited")
+    need(ino, r"case WIFIRETRY_BEGIN:\s*log_message\([^\n]*\n\s*wifiBeginStrongest\(heishamonSettings\.wifi_ssid, heishamonSettings\.wifi_password\);",
+         "ESP8266: WIFIRETRY_BEGIN must scan and begin again")
+    need(ino, r"case WIFIRETRY_BEGIN:\s*log_message\([^\n]*\n\s*WiFi\.disconnect\(false\);[^\n]*\n\s*wifiBeginConfigured\(\);",
+         "ESP32: WIFIRETRY_BEGIN must be disconnect(false) and begin again (the station stays on)")
+    # the station is only ever switched off where wifiretry_update() asked for it (it only does while the hotspot is up):
+    # on the ESP32 "no interface left" stops and deinits the whole WiFi driver
+    offs = len(re.findall(r"WiFi\.disconnect\(true\)", ino)) - len(re.findall(r"startupFile\.close\(\);\s*WiFi\.disconnect\(true\);\s*timerqueue_insert\(1, 0, -2\);", ino))  # not the factory reset (restart follows)
+    asked = len(re.findall(r"case WIFIRETRY_STA_OFF:\s*log_message\([^\n]*\n\s*WiFi\.disconnect\(true\);", ino))
+    if offs != 2 or asked != 2:
+        errors.append(f"WiFi.disconnect(true) appears {offs} times in HeishaMon.ino, {asked} of them for WIFIRETRY_STA_OFF (expected: once per board, nowhere else)")
+    need(ino, r"void setupApStop\(\) \{[^}]*#if defined\(ESP32\)\s*WiFi\.enableSTA\(true\);[^\n]*\n#endif\s*WiFi\.softAPdisconnect\(true\);",
+         "ESP32: setupApStop() must keep the station interface, or stopping the hotspot stops the WiFi driver")
+    need(ino, r"bool beginWifi = \(wifiretry_net_up\(&wifiRetry, &retryIn, millis\(\)\) == WIFIRETRY_BEGIN\);.*?"
+              r"if \(beginWifi && !wifiUp && \(heishamonSettings\.wifi_ssid\[0\] != '\\0'\)\) \{\s*wifiBeginConfigured\(\);",
+         "ESP32: when ethernet comes back while the station is off, the WiFi must be started again")
+    need(ino, r"wifiretry_net_up\(&wifiRetry, &retryIn, millis\(\)\);\s*\n\s*// Allow MDNS processing", "ESP8266: wifiretry_net_up() while the WiFi is connected")
+    # new WiFi data counts as a hotspot request (a typo must not leave the device unreachable)
+    need(ino, r"case -3: \{\s*setupWifi\(&heishamonSettings\);\s*wifiretry_started\(&wifiRetry, millis\(\)\);.*?setupap_wifi_saved\(&setupAp, millis\(\)\);",
+         "the WiFi reconnect after new settings (timer -3) must call wifiretry_started() and setupap_wifi_saved()")
+    need(html, r"webBodySettingsNewWifiWarning\[\].*?cannot be reached[^<]*, HeishaMon opens the open <strong[^>]*>Heishamon-Setup</strong> hotspot after about 15 seconds, also when you made this change from your network",
+         "the page shown after a WiFi change must say that the hotspot comes back when the new WiFi cannot be reached")
 
     # --- settings: not by itself unless switched on ---
     need(wfh, r"bool hotspot_auto = false;", "settingsStruct: hotspot_auto must default to false")
@@ -166,9 +190,10 @@ mutations = [
     ("setupWifi() starts the access point",
      lambda i, w, h, t: (i, w.replace("  // the setup hotspot is not started here", '  WiFi.softAP("HeishaMon-Setup");\n  // the setup hotspot is not started here', 1), h, t)),
     ("a bare access point mode",
-     lambda i, w, h, t: (i.replace("    WiFi.disconnect(true);\n    return;\n  }\n\n  // Step 2", "    WiFi.disconnect(true);\n    WiFi.mode(WIFI_AP);\n    return;\n  }\n\n  // Step 2", 1), w, h, t)),
+     lambda i, w, h, t: (i.replace("      WiFi.disconnect(true); // STA off, the hotspot stays", "      WiFi.disconnect(true); // STA off, the hotspot stays\n      WiFi.mode(WIFI_AP);", 1), w, h, t)),
     ("a start that does not ask the decision",
-     lambda i, w, h, t: (i.replace("  if (!apUp && (apReason != SETUPAP_OFF)) {\n    setupApStart();", "  if (!apUp) {\n    setupApStart();", 1), w, h, t)),
+     lambda i, w, h, t: (i.replace("if (!apUp && ((apReason == SETUPAP_FACTORY) || ((apReason != SETUPAP_OFF) && (setupApStartNow || wifiretry_ap_may_start(&wifiRetry, millis()))))) {",
+                                   "if (!apUp && (heishamonSettings.wifi_ssid[0] == '\\0')) {", 1), w, h, t)),
     ("the automatic hotspot follows the old setting",
      lambda i, w, h, t: (i.replace("in.auto_on_loss = heishamonSettings.hotspot_auto;", "in.auto_on_loss = heishamonSettings.hotspot;", 1), w, h, t)),
     ("hotspot_auto on by default",
@@ -177,8 +202,22 @@ mutations = [
      lambda i, w, h, t: (i, w.replace('jsonDoc[F("hotspot_auto")] == "enabled" ) ? true : false', 'jsonDoc[F("hotspot_auto")] == "disabled" ) ? false : true', 1), h, t)),
     ("the old boot button code",
      lambda i, w, h, t: (i.replace("void loop() {", "void checkBootButton() {\n  factoryReset();\n}\n\nvoid loop() {", 1), w, h, t)),
-    ("the ESP8266 retry needs the hotspot again",
-     lambda i, w, h, t: (i.replace("> (2 * WIFIRETRYTIMER)) && !sending) {", "> (2 * WIFIRETRYTIMER)) && !sending && (wifistatus == WL_DISCONNECTED)) {", 1), w, h, t)),
+    ("the station switched off without the hotspot (ESP32: WiFi driver deinit)",
+     lambda i, w, h, t: (i.replace("      WiFi.disconnect(false); // ends a connection attempt", "      WiFi.disconnect(true); // ends a connection attempt", 1), w, h, t)),
+    ("a second place that switches the station off",
+     lambda i, w, h, t: (i.replace("  setupApLed(apUp); // purple", "  if (!apUp) WiFi.disconnect(true);\n  setupApLed(apUp); // purple", 1), w, h, t)),
+    ("stopping the hotspot leaves the ESP32 without an interface",
+     lambda i, w, h, t: (i.replace("  WiFi.enableSTA(true); //", "  //", 1), w, h, t)),
+    ("the ESP8266 retry does not know about the heat pump line",
+     lambda i, w, h, t: (i.replace("retryIn.busy = sending;", "retryIn.busy = false;", 1), w, h, t)),
+    ("a retry timer of its own in check_wifi()",
+     lambda i, w, h, t: (i.replace("void loop() {", "unsigned long lastWifiRetryTimer = 0;\n\nvoid loop() {", 1), w, h, t)),
+    ("new WiFi data is not a hotspot request",
+     lambda i, w, h, t: (i.replace("          setupap_wifi_saved(&setupAp, millis());\n", "", 1), w, h, t)),
+    ("ethernet back with the station off: WiFi not started again",
+     lambda i, w, h, t: (i.replace("bool beginWifi = (wifiretry_net_up(&wifiRetry, &retryIn, millis()) == WIFIRETRY_BEGIN);", "bool beginWifi = false;\n    wifiretry_net_up(&wifiRetry, &retryIn, millis());", 1), w, h, t)),
+    ("a linked ethernet cable counts as configured",
+     lambda i, w, h, t: (i.replace("in.eth_seen = ethSeen;", "in.eth_seen = ethSeen || ETH.linkUp();", 1), w, h, t)),
     ("the hotspot is not stopped when it is not wanted any more",
      lambda i, w, h, t: (i.replace("if (apUp && (apReason == SETUPAP_OFF)) {\n    setupApStop();", "if (false) {\n    setupApStop();", 1), w, h, t)),
     ("the hostname pattern is dropped for every name",

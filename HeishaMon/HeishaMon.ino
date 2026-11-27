@@ -79,8 +79,7 @@ struct setupap_t setupAp = {};
 bool setupApStartNow = false; // a short press asked for the hotspot: start it right away, not at the next WiFi retry
 bool ethSeen = false;         // ESP32: ethernet had an address since the start
 
-#define WIFIRETRYTIMER 15000 // time between two steps of the WiFi retry while the configured SSID is lost
-unsigned long lastWifiRetryTimer = 0;
+struct wifiretry_t wifiRetry = {}; // when and how the configured WiFi is tried again while it is lost (src/common/setupap.cpp)
 bool doInitialWifiScan = true; //we want an initial wifi scan to fill in the dropbox on the wifi settings page
 
 unsigned long lastRunTime = 0;
@@ -255,15 +254,18 @@ void setupApStart() {
 
 void setupApStop() {
   log_message(_F("Shutting down the setup hotspot"));
+#if defined(ESP32)
+  WiFi.enableSTA(true); // with no interface left the core would stop and deinit the whole WiFi driver
+#endif
   WiFi.softAPdisconnect(true);
 }
 
 /* asks setupap_update() whether the hotspot should be up now (SETUPAP_*, 0: no) and logs what changed */
-uint8_t setupApWanted(bool netUp, bool ethLinked) {
+uint8_t setupApWanted(bool netUp) {
   struct setupap_input_t in;
   in.wifi_configured = (heishamonSettings.wifi_ssid[0] != '\0');
   in.net_up = netUp;
-  in.eth_seen = (ethSeen || ethLinked);
+  in.eth_seen = ethSeen;
   in.allow_factory = heishamonSettings.hotspot;
   in.auto_on_loss = heishamonSettings.hotspot_auto;
   in.clients = setupApIsUp() ? WiFi.softAPgetStationNum() : 0;
@@ -290,7 +292,7 @@ uint8_t setupApWanted(bool netUp, bool ethLinked) {
   uint8_t reason = setupap_update(&setupAp, &in, now);
   switch (setupAp.event) {
     case SETUPAP_EVENT_KEPT:
-      log_message(_F("WiFi was configured on the setup hotspot: the hotspot comes back for 10 minutes if that WiFi cannot be reached"));
+      log_message(_F("WiFi was configured on the setup hotspot: the hotspot comes back if that WiFi cannot be reached"));
       break;
     case SETUPAP_EVENT_NETWORK:
       log_message(_F("Network is up: setup hotspot request ended"));
@@ -313,20 +315,26 @@ uint8_t setupApWanted(bool netUp, bool ethLinked) {
 #if defined(ESP8266)
 void check_wifi() {
   int wifistatus = WiFi.status();
-  uint8_t apReason = setupApWanted(WiFi.localIP() ? true : false, false);
+  uint8_t apReason = setupApWanted(WiFi.localIP() ? true : false);
   bool apUp = setupApIsUp();
+  struct wifiretry_input_t retryIn;
+  retryIn.wifi_configured = (heishamonSettings.wifi_ssid[0] != '\0');
+  retryIn.busy = sending; // the scan of a retry blocks for about 2 seconds: not while an answer of the heat pump is awaited
+  retryIn.scanning = (WiFi.scanComplete() == -1);
   if ((wifistatus != WL_CONNECTED) && (WiFi.localIP())) {
     // special case where it seems that we are not connect but we do have working IP (causing the -1% wifi signal), do a reset.
     log_message(_F("Weird case, WiFi seems disconnected but is not. Resetting WiFi!"));
     setupWifi(&heishamonSettings);
-    lastWifiRetryTimer = millis();
+    wifiretry_started(&wifiRetry, millis());
   } else if ((wifistatus != WL_CONNECTED) || (!WiFi.localIP())) {
     if (apUp && (apReason == SETUPAP_OFF)) {
       setupApStop(); // the request timed out or was cancelled
       apUp = false;
     }
-    if (!apUp && ((apReason == SETUPAP_FACTORY) || ((apReason != SETUPAP_OFF) && setupApStartNow))) {
-      setupApStart(); // nothing configured yet, or asked for with the boot button: right away
+    // nothing configured yet, or asked for with the boot button: right away. Automatic (setting) or wanted
+    // again after a WiFi change: once the WiFi had its time to connect.
+    if (!apUp && ((apReason == SETUPAP_FACTORY) || ((apReason != SETUPAP_OFF) && (setupApStartNow || wifiretry_ap_may_start(&wifiRetry, millis()))))) {
+      setupApStart();
       setupApStartNow = false;
       apUp = true;
     }
@@ -334,39 +342,21 @@ void check_wifi() {
       dnsServer.processNextRequest(); // captive portal
     }
 
-    /* we need to stop reconnecting to a configured wifi network if there is a hotspot user connected
-        also, do not disconnect if wifi network scan is active
-    */
-    if (apUp && (heishamonSettings.wifi_ssid[0] != '\0') && (wifistatus != WL_DISCONNECTED) && (WiFi.scanComplete() != -1) && (WiFi.softAPgetStationNum() > 0)) {
-      log_message(_F("WiFi lost, but softAP station connecting, so stop trying to connect to configured ssid..."));
-      WiFi.disconnect(true);
-    }
-
-    /*  only start this routine if timeout on
-        reconnecting to AP and SSID is set
-    */
-    if ((heishamonSettings.wifi_ssid[0] != '\0') && ((unsigned long)(millis() - lastWifiRetryTimer) > WIFIRETRYTIMER)) {
-      if (!apUp && (apReason != SETUPAP_OFF)) {
-        setupApStart(); // automatic hotspot (setting), or the one that has to come back after a WiFi change
-        apUp = true;
-      }
-      if (apUp) {
-        // with the hotspot open: retry only while nobody uses it, and leave it alone in between
-        lastWifiRetryTimer = millis();
-        if ((wifistatus == WL_DISCONNECTED) && (WiFi.softAPgetStationNum() == 0)) {
-          log_message(_F("Retrying configured WiFi, ..."));
-          wifiBeginStrongest(heishamonSettings.wifi_ssid, heishamonSettings.wifi_password);  // scan again, the old node may be gone
-        } else {
-          log_message(_F("Reconnecting to WiFi failed. Waiting a few seconds before trying again."));
-          WiFi.disconnect(true);
-        }
-      } else if (((unsigned long)(millis() - lastWifiRetryTimer) > (2 * WIFIRETRYTIMER)) && !sending) {
-        // no hotspot: keep trying the configured WiFi for as long as it takes, every 30 seconds.
-        // The scan blocks for about 2 seconds, so not while an answer of the heat pump is awaited.
-        lastWifiRetryTimer = millis();
-        log_message(_F("WiFi lost, retrying configured WiFi (the setup hotspot only starts with a short press of the boot button)"));
+    // when and how to try the configured WiFi again is decided by wifiretry_update(): without the hotspot
+    // every 30 seconds for as long as it takes; with the hotspot only while nobody uses it
+    retryIn.ap_up = apUp;
+    retryIn.clients = apUp ? WiFi.softAPgetStationNum() : 0;
+    switch (wifiretry_update(&wifiRetry, &retryIn, millis())) {
+      case WIFIRETRY_STA_OFF:
+        log_message(_F("Setup hotspot is open: not trying the configured WiFi for a while"));
+        WiFi.disconnect(true);
+        break;
+      case WIFIRETRY_BEGIN:
+        log_message(apUp ? _F("Retrying configured WiFi, ...") : _F("WiFi lost, retrying configured WiFi (the setup hotspot only starts with a short press of the boot button)"));
         wifiBeginStrongest(heishamonSettings.wifi_ssid, heishamonSettings.wifi_password);  // scan again, the old node may be gone
-      }
+        break;
+      default:
+        break;
     }
   }
   if (WiFi.localIP()) {  //WiFi connected
@@ -402,7 +392,9 @@ void check_wifi() {
        always update if wifi is working so next time on ssid failure
        it only starts the routine above after this timeout
     */
-    lastWifiRetryTimer = millis();
+    retryIn.ap_up = false;
+    retryIn.clients = 0;
+    wifiretry_net_up(&wifiRetry, &retryIn, millis());
 
     // Allow MDNS processing
     MDNS.update();
@@ -437,23 +429,31 @@ void check_wifi() {
   if (ethUp) {
     ethSeen = true; // an ethernet install: from now on the hotspot does not open by itself when the cable is pulled
   }
-  uint8_t apReason = setupApWanted(wifiUp || ethUp, ETH.linkUp());
+  uint8_t apReason = setupApWanted(wifiUp || ethUp);
   bool apUp = setupApIsUp();
+  struct wifiretry_input_t retryIn;
+  retryIn.wifi_configured = (heishamonSettings.wifi_ssid[0] != '\0');
+  retryIn.ap_up = apUp;
+  retryIn.clients = 0;
+  retryIn.busy = false; // the heat pump serial line has its own task, and WiFi.begin() does not block
+  retryIn.scanning = (WiFi.scanComplete() == WIFI_SCAN_RUNNING);
 
   /* ---------- Fast path: network is up ---------- */
   if (wifiUp || ethUp) {
 
     neoPixelState = pixels.Color(0, 0, 0); // normal operation
-    lastWifiRetryTimer = millis();
+    // ETH came back while the WiFi station was switched off for the hotspot: switch it on again
+    bool beginWifi = (wifiretry_net_up(&wifiRetry, &retryIn, millis()) == WIFIRETRY_BEGIN);
 
     // The device can be reached through its network: the hotspot is never needed
     if (apUp) {
       log_message(_F("WiFi or ETH connected"));
       setupApStop();
       WiFi.mode(WIFI_STA);
-      if ((wifistatus != WL_CONNECTED) && (heishamonSettings.wifi_ssid[0] != '\0')) { //it must be that ETH reconnected, so keep trying WiFi in the background
-        wifiBeginConfigured();
-      }
+      beginWifi = true; //it must be that ETH reconnected, so keep trying WiFi in the background
+    }
+    if (beginWifi && !wifiUp && (heishamonSettings.wifi_ssid[0] != '\0')) {
+      wifiBeginConfigured();
     }
 
     if (firstConnectSinceBoot) {
@@ -488,8 +488,10 @@ void check_wifi() {
     setupApStop(); // the request timed out or was cancelled
     apUp = false;
   }
-  if (!apUp && ((apReason == SETUPAP_FACTORY) || ((apReason != SETUPAP_OFF) && setupApStartNow))) {
-    setupApStart(); // nothing configured yet, or asked for with the boot button: right away
+  // nothing configured yet, or asked for with the boot button: right away. Automatic (setting) or wanted
+  // again after a WiFi change: once the WiFi had its time to connect.
+  if (!apUp && ((apReason == SETUPAP_FACTORY) || ((apReason != SETUPAP_OFF) && (setupApStartNow || wifiretry_ap_may_start(&wifiRetry, millis()))))) {
+    setupApStart();
     setupApStartNow = false;
     apUp = true;
   }
@@ -498,46 +500,23 @@ void check_wifi() {
   }
   setupApLed(apUp); // purple: setup hotspot open, yellow: degraded
 
-  // If AP client is connected, STA must back off
-  if (apUp && (WiFi.softAPgetStationNum() > 0)) {
-    if (WiFi.getMode() & WIFI_MODE_STA) {
-      if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
-        return; // let a pending wifi scan finish before dropping STA, otherwise it never gets a result
-      }
-      log_message(_F("SoftAP client active, suspending STA reconnect"));
+  // When and how to try the configured WiFi again is decided by wifiretry_update(). Without the hotspot the
+  // station is never switched off: with no interface left the core stops and deinits the whole WiFi driver,
+  // and that every 30 seconds of an outage. Only while the hotspot is up the station is off in between.
+  retryIn.ap_up = apUp;
+  retryIn.clients = apUp ? WiFi.softAPgetStationNum() : 0;
+  switch (wifiretry_update(&wifiRetry, &retryIn, millis())) {
+    case WIFIRETRY_STA_OFF:
+      log_message(_F("Setup hotspot is open: not trying the configured WiFi for a while"));
       WiFi.disconnect(true); // STA off, the hotspot stays
-    }
-    return; //always return if hotspot is used
-  }
-
-  // Periodic retry gate
-  if ((unsigned long)(millis() - lastWifiRetryTimer) < WIFIRETRYTIMER) {
-    return;
-  }
-  lastWifiRetryTimer = millis();
-
-  if (!apUp && (apReason != SETUPAP_OFF)) {
-    setupApStart(); // automatic hotspot (setting), or the one that has to come back after a WiFi change
-    apUp = true;
-  }
-
-  // Step 1: switch STA off, so the next retry is clean (and, with the hotspot open, it can do its thing for WIFIRETRYTIMER).
-  // Without the hotspot the WiFi is off until step 2; it is never put into a bare access point mode.
-  if (WiFi.getMode() & WIFI_MODE_STA) {
-    if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
-      return; // let a pending wifi scan finish before dropping STA, otherwise it never gets a result
-    }
-    log_message(_F("Disabling WiFi STA for a while..."));
-    WiFi.disconnect(true);
-    return;
-  }
-
-  // Step 2: retry the configured WiFi, for as long as it takes
-  if (heishamonSettings.wifi_ssid[0] != '\0') {
-    log_message(apUp ? _F("Retrying configured WiFi") : _F("WiFi lost, retrying configured WiFi (the setup hotspot only starts with a short press of the boot button)"));
-    WiFi.mode(apUp ? WIFI_AP_STA : WIFI_STA);
-    delay(50);
-    wifiBeginConfigured();
+      break;
+    case WIFIRETRY_BEGIN:
+      log_message(apUp ? _F("Retrying configured WiFi") : _F("WiFi lost, retrying configured WiFi (the setup hotspot only starts with a short press of the boot button)"));
+      WiFi.disconnect(false); // ends a connection attempt that is still running; the station stays on
+      wifiBeginConfigured();
+      break;
+    default:
+      break;
   }
 }
 #endif
@@ -2062,7 +2041,11 @@ void timer_cb(int nr) {
         } break;
       case -3: {
           setupWifi(&heishamonSettings);
-          lastWifiRetryTimer = millis(); // give the new STA connection attempt a full WIFIRETRYTIMER window before check_wifi() can re-enable the hotspot
+          wifiretry_started(&wifiRetry, millis()); // the new WiFi gets its time to connect
+          // new WiFi data: if it cannot be reached (wrong password) the setup hotspot has to come back, or the
+          // device is unreachable until somebody presses the boot button
+          setupap_wifi_saved(&setupAp, millis());
+          log_message(_F("New WiFi settings: the setup hotspot starts in about 15 seconds if that WiFi cannot be reached"));
         } break;
       case -4: {
           int ret = rules_parse((char*)"/rules.new");
@@ -2185,7 +2168,7 @@ void setup() {
 
   loggingSerial.println(F("Setup wifi..."));
   setupWifi(&heishamonSettings);
-  lastWifiRetryTimer = millis();
+  wifiretry_started(&wifiRetry, millis());
 
 #if defined(ESP32)
   loggingSerial.println(F("Setup ethernet module..."));

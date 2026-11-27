@@ -2788,7 +2788,7 @@ static const char webBodySettingsNewWifiWarning[] FLASHPROG = R"====(
 <div class='msg-box'>
   <h2>Reconfiguring WiFi</h2>
   <p>Attempting to connect to the new access point.<br><br>
-  The <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot will be brought down automatically on success. If the new access point cannot be reached, the hotspot you are using now comes back after about 15 seconds (for 10 minutes); later it only starts with a short press of the boot button.<br><br>
+  The <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot will be brought down automatically on success. If the new access point cannot be reached (wrong name or password), HeishaMon opens the open <strong style='color:var(--text-primary)'>Heishamon-Setup</strong> hotspot after about 15 seconds, also when you made this change from your network: connect to it and open http://192.168.4.1 to correct the WiFi data. It closes when nobody was connected for 10 minutes (at the latest after 30 minutes); after that it only starts with a short press of the boot button.<br><br>
   This page will redirect to the device's new address shortly.</p>
 </div>
 )====";

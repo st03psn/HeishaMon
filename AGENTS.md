@@ -17,7 +17,7 @@ scripts/build_esp8266.sh   # builds HeishaMon/HeishaMon.ino for the small (Wemos
 scripts/build_esp32s3.sh   # builds HeishaMon/HeishaMon.ino for the large (ESP32-S3) PCB
 ```
 
-Both scripts `cd HeishaMon` first and output the compiled binary/map alongside the sketch. Required libraries (installed via `arduino-cli lib install`, see `LIBSUSED.md` and `.github/workflows/main.yml`): `ringbuffer`, `pubsubclient`, `arduinojson`, `dallastemperature`, `onewire`, `Adafruit NeoPixel`, `Async TCP` (the ESP32Async one; not `AsyncTCP`, which resolves to an outdated fork). Install eModbus separately with `ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/eModbus/eModbus.git#v1.7.5stable`; it is not in the Arduino registry. Board cores needed: `esp8266:esp8266` and `esp32:esp32@3.3.11`.
+Both scripts `cd HeishaMon` first and output the compiled binary/map alongside the sketch. Required libraries (installed via `arduino-cli lib install`, see `LIBSUSED.md` and `.github/workflows/main.yml`): `ringbuffer`, `pubsubclient`, `arduinojson`, `dallastemperature`, `onewire`, `Adafruit NeoPixel`, `Async TCP` (the ESP32Async one; not `AsyncTCP`, which resolves to an outdated fork). Install eModbus separately with `ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/eModbus/eModbus.git#v1.7.5stable`; it is not in the Arduino registry. Board cores needed: `esp8266:esp8266@3.1.2` and `esp32:esp32@3.3.11` (both pinned in CI).
 
 There is a devcontainer (`.devcontainer/`) preconfigured with `arduino-cli` and these dependencies (image `ghcr.io/the78mole/heishamon-dev`) — prefer developing/building inside it if available, since board cores and libs are already installed there.
 
