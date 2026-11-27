@@ -324,6 +324,10 @@ GATE = r"""
   // maximum is clamped and the log says so; off again, the same payload is sent as it is
   { assert(!flowlimit_on(&flowlimit));
     flowlimit_configure(&flowlimit, FLOWLIMIT_FLOOR, 35, 16);
+    // data from the heat pump: direct heating and cooling, both zones water temperature
+    unsigned char data[203] = { 0x71, 0xC8, 0x01, 0x10 };
+    data[6] = (3 << 6) | 25; data[22] = 0x11; data[28] = 2 | (2 << 2);
+    flowlimit_update(&flowlimit, data, sizeof(data));
     byte buffer[256]; char log[256] = { 0 }; char payload[] = "60";
     assert(heatpump_command(find("SetZ1HeatRequestTemperature"), payload, buffer, log) == sizeof(panasonicSendQuery));
     assert(buffer[38] == 35 + 128 && strcmp(log, "SetZ1HeatRequestTemperature set to 60 [limit: Z1 heat request 60>35]") == 0);
@@ -336,6 +340,11 @@ GATE = r"""
     memset(buffer, 0xa5, sizeof(buffer));
     assert(heatpump_command(find("SetHeatToCoolTemp"), refused, buffer, log) == 0);
     for (byte b : buffer) assert(b == 0xa5);
+    // a room thermostat zone: the request is a room setpoint, sent as it is
+    data[22] = 0x13;
+    flowlimit_update(&flowlimit, data, sizeof(data));
+    char room[] = "21";
+    assert(heatpump_command(find("SetZ1HeatRequestTemperature"), room, buffer, log) == sizeof(panasonicSendQuery) && buffer[38] == 21 + 128);
     flowlimit_configure(&flowlimit, FLOWLIMIT_OFF, 35, 16);
     assert(heatpump_command(find("SetZ1HeatRequestTemperature"), payload, buffer, log) == sizeof(panasonicSendQuery) && buffer[38] == 60 + 128);
   }

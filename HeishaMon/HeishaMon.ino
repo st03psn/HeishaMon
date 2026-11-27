@@ -626,6 +626,10 @@ void publishFlowLimit(bool force) {
 }
 
 // A received data block: remember its values for the flow limit and correct a value outside the limit.
+// ESP32: the flow limit state is only written here and read by heatpump_command() / send_command(), all on
+// the loop() task (readSerial, MQTT callback, web server, rules, Modbus executeWrite). The serial TX task only
+// sends queued frames. The one reader on another task is the Modbus dry run (mainCommandAccepts, AsyncTCP),
+// whose result (the length) does not depend on the limit.
 void flowlimitReceived(const char *block) {
   flowlimit_update(&flowlimit, (const uint8_t *)block, DATASIZE);
   if (heishamonSettings.listenonly) return;
@@ -633,7 +637,8 @@ void flowlimitReceived(const char *block) {
   char msg[256];
   int len = flowlimit_watchdog(&flowlimit, millis(), cmd, msg, sizeof(msg));
   if (msg[0] != '\0') log_message(msg);
-  if (len > 0) send_command(cmd, len);
+  // counted as a try only when the command was accepted (sent, buffered or queued), else again next time
+  if (len > 0 && send_command(cmd, len)) flowlimit_sent(&flowlimit, millis());
 }
 
 // Commands that are not built by heatpump_command() (SendRawValue, the CZ-TAW1 proxy) get the flow limit
@@ -1053,15 +1058,16 @@ void popCommandBuffer() {
   }
 }
 
-void pushCommandBuffer(byte* command, int length) {
+bool pushCommandBuffer(byte* command, int length) {
   if (cmdnrel + 1 > MAXCOMMANDSINBUFFER) {
     log_message(_F("Too much commands already in buffer. Ignoring this commands.\n"));
-    return;
+    return false;
   }
   cmdbuffer[cmdend].length = length;
   memcpy(&cmdbuffer[cmdend].data, command, length);
   cmdend = (cmdend + 1) % (MAXCOMMANDSINBUFFER);
   cmdnrel++;
+  return true;
 }
 
 #ifdef ESP32
@@ -1155,16 +1161,15 @@ bool send_command(byte* command, int length) {
     log_message(_F("Command length out of range. Not sending this command."));
     return false;
   }
-  flowlimitGuard(command, length);
   if ( heishamonSettings.listenonly ) {
     log_message(_F("Not sending this command. Heishamon in listen only mode!"));
     return false;
   }
+  flowlimitGuard(command, length); // only for a command that really goes out, so the log never claims more
   struct cmdbuffer_t cmd;
   cmd.length = length;
   memcpy(&cmd.data, command, length);
-  xQueueSend(cmdQueue, &cmd, 0);
-  return true;
+  return xQueueSend(cmdQueue, &cmd, 0) == pdTRUE; // false: queue full, the command is dropped
 }
 
 #else
@@ -1175,15 +1180,14 @@ bool send_command(byte* command, int length) {
     log_message(_F("Command length out of range. Not sending this command."));
     return false;
   }
-  flowlimitGuard(command, length);
   if ( heishamonSettings.listenonly ) {
     log_message(_F("Not sending this command. Heishamon in listen only mode!"));
     return false;
   }
+  flowlimitGuard(command, length); // only for a command that really goes out, so the log never claims more
   if ( sending ) {
     log_message(_F("Already sending data. Buffering this send request"));
-    pushCommandBuffer(command, length);
-    return false;
+    return pushCommandBuffer(command, length); // true: buffered, it is sent after the current answer
   }
   sending = true; //simple semaphore to only allow one send command at a time, semaphore ends when answered data is received
 

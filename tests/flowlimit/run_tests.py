@@ -85,15 +85,21 @@ def glue_errors(f: dict) -> list:
         body = ino[start:ino.index("\n}\n", start)]
         guard = body.find("flowlimitGuard(command, length);")
         sent = min([i for i in (body.find("xQueueSend("), body.find("heatpumpSerial.write("), body.find("pushCommandBuffer(")) if i >= 0] or [-1])
+        listen = body.find("heishamonSettings.listenonly")
         if guard < 0 or sent < 0 or guard > sent:
             errors.append("send_command(): flowlimitGuard() must run before the command is queued, buffered or written")
+        if listen < 0 or guard < listen:
+            errors.append("send_command(): flowlimitGuard() only after the listen only check (the log must not claim a clamp that is not sent)")
+        if sent < 0 or "return false;" in body[sent:]:
+            errors.append("send_command(): the result must say whether the command was accepted (sent, buffered, queued)")
     try:
         guard = function(ino, "void flowlimitGuard(")
         need(guard, r"flowlimit_apply\(&flowlimit, command, length,", "flowlimitGuard() must apply the limit to the command")
         received = function(ino, "void flowlimitReceived(")
         need(received, r"flowlimit_update\(&flowlimit, \(const uint8_t \*\)block, DATASIZE\);\s*if \(heishamonSettings\.listenonly\) return;.*flowlimit_watchdog\(",
              "flowlimitReceived(): update from the data block, no watchdog in listen only mode")
-        need(received, r"if \(len > 0\) send_command\(cmd, len\);", "flowlimitReceived(): the correction is sent with send_command()")
+        need(received, r"if \(len > 0 && send_command\(cmd, len\)\) flowlimit_sent\(&flowlimit, millis\(\)\);",
+             "flowlimitReceived(): the correction is sent with send_command() and only counted when it was accepted")
     except ValueError:
         errors.append("flowlimitGuard() / flowlimitReceived() are missing")
     need(ino, r"if  \(data\[3\] == 0x10\) \{ //decode the normal data block\s*decode_heatpump_data\([^;]*\);\s*flowlimitReceived\(data\);",
@@ -160,7 +166,9 @@ if errors:
 MUTATIONS = [
     ("commands", "if (length > 0) flowlimit_apply(&flowlimit, cmd, length, log_msg, 256);", ""),
     ("commands", "  flowlimit_apply(&flowlimit, cmd, sizeof(panasonicSendQuery), log_msg, 256);\n", ""),
-    ("ino", "  flowlimitGuard(command, length);\n", ""),
+    ("ino", "  flowlimitGuard(command, length); // only", "  // only"),
+    ("ino", "if (len > 0 && send_command(cmd, len)) flowlimit_sent(&flowlimit, millis());", "if (len > 0) { send_command(cmd, len); flowlimit_sent(&flowlimit, millis()); }"),
+    ("ino", "return xQueueSend(cmdQueue, &cmd, 0) == pdTRUE;", "xQueueSend(cmdQueue, &cmd, 0);\n  return false;"),
     ("ino", "          flowlimitReceived(data);\n", ""),
     ("ino", "  if (heishamonSettings.listenonly) return;\n  uint8_t cmd[FLOWLIMIT_DATAGRAM_SIZE];", "  uint8_t cmd[FLOWLIMIT_DATAGRAM_SIZE];"),
     ("ino", "      publishFlowLimit(true);\n", ""),

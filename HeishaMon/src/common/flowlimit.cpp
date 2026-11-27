@@ -21,6 +21,7 @@ struct flowlimit_t flowlimit;
 
 #define BYTE_MODE 28
 #define BYTE_ZONES 6
+#define BYTE_SENSOR 22
 
 static const uint8_t heatCurveByte[2][2] PROGMEM = { { 75, 76 }, { 79, 80 } };
 static const uint8_t coolCurveByte[2][2] PROGMEM = { { 86, 87 }, { 90, 91 } };
@@ -47,6 +48,7 @@ void flowlimit_configure(struct flowlimit_t *fl, uint8_t surface, int heat_max, 
     fl->cool_min = (int8_t)cool_min;
     memset(fl->tries, 0, sizeof(fl->tries));
     fl->given_up = 0;
+    fl->pending = 0;
     fl->corrected = 0;
   }
 }
@@ -93,9 +95,21 @@ static int modeOf(const struct flowlimit_t *fl, const uint8_t *cmd, int shift, i
   return -1;
 }
 
+// zone sensor set by this datagram (byte 22 nibble, SetZ1SensorSettings), else the received one, else -1
+static int sensorOf(const struct flowlimit_t *fl, const uint8_t *cmd, int zone) {
+  const int field = (cmd[BYTE_SENSOR] >> (zone * 4)) & 0x0F;
+  if (field >= 1 && field <= 4) return field - 1;
+  if (field == 0 && fl->have_data) return fl->sensor[zone];
+  return -1;
+}
+
 static void request(const struct flowlimit_t *fl, uint8_t *cmd, int zone, bool cooling, int mode, int *changes, char *log, size_t logsize) {
   const uint8_t address = pgm_read_byte(cooling ? &coolRequestByte[zone] : &heatRequestByte[zone]);
   if (cmd[address] == 0) return;
+  // with an internal thermostat or a thermistor the request is a room setpoint, not a flow temperature;
+  // sensor not known: not touched
+  const int sensor = sensorOf(fl, cmd, zone);
+  if (sensor != 0 && sensor != 1) return;
   const int value = (int)cmd[address] - 128;
   const int limitTemp = cooling ? fl->cool_min : fl->heat_max;
   int limit;
@@ -111,7 +125,7 @@ static void request(const struct flowlimit_t *fl, uint8_t *cmd, int zone, bool c
       int point;
       if (cmd[curveByte] != 0) {
         point = (int)cmd[curveByte] - 128;
-      } else if (fl->have_data) {
+      } else if (fl->have_data && (fl->valid & FLOWLIMIT_VALID_CURVE(zone, cooling ? 1 : 0, i))) {
         point = cooling ? fl->cool_curve[zone][i] : fl->heat_curve[zone][i];
       } else {
         known = false;
@@ -130,6 +144,7 @@ static void request(const struct flowlimit_t *fl, uint8_t *cmd, int zone, bool c
   }
   if (cooling ? value >= limit : value <= limit) return;
   if (curve) limit = clampInt(limit, -5, 5);
+  // only ever towards the limit: a heat value is only lowered, a cool value only raised
   if (cooling ? value >= limit : value <= limit) return;
   cmd[address] = (uint8_t)(limit + 128);
   note(log, logsize, cooling ? K_COOL_REQUEST : K_HEAT_REQUEST, zone, value, limit);
@@ -166,14 +181,26 @@ void flowlimit_update(struct flowlimit_t *fl, const uint8_t *data, size_t len) {
   fl->zones = zones == 0 ? 1 : (zones == 1 ? 2 : 3);  // unknown: watch both
   const int operating = data[BYTE_ZONES] & 0x3F;
   fl->cooling = (operating == 18 || operating == 33 || operating == 34) ? 0 : 1;  // unknown: watch
+  uint16_t valid = 0;
   for (int zone = 0; zone < 2; zone++) {
+    const int sensor = ((data[BYTE_SENSOR] >> (zone * 4)) & 0x0F) - 1;
+    fl->sensor[zone] = (int8_t)((sensor >= 0 && sensor <= 3) ? sensor : -1);
     for (int i = 0; i < 2; i++) {
-      fl->heat_curve[zone][i] = (int8_t)((int)data[pgm_read_byte(&heatCurveByte[zone][i])] - 128);
-      fl->cool_curve[zone][i] = (int8_t)((int)data[pgm_read_byte(&coolCurveByte[zone][i])] - 128);
+      const uint8_t heat = data[pgm_read_byte(&heatCurveByte[zone][i])];
+      const uint8_t cool = data[pgm_read_byte(&coolCurveByte[zone][i])];
+      fl->heat_curve[zone][i] = (int8_t)((int)heat - 128);
+      fl->cool_curve[zone][i] = (int8_t)((int)cool - 128);
+      if (heat != 0) valid |= FLOWLIMIT_VALID_CURVE(zone, 0, i);  // a byte 0 is no value (not -128 degrees)
+      if (cool != 0) valid |= FLOWLIMIT_VALID_CURVE(zone, 1, i);
     }
-    fl->heat_request[zone] = (int8_t)((int)data[pgm_read_byte(&heatRequestByte[zone])] - 128);
-    fl->cool_request[zone] = (int8_t)((int)data[pgm_read_byte(&coolRequestByte[zone])] - 128);
+    const uint8_t heat = data[pgm_read_byte(&heatRequestByte[zone])];
+    const uint8_t cool = data[pgm_read_byte(&coolRequestByte[zone])];
+    fl->heat_request[zone] = (int8_t)((int)heat - 128);
+    fl->cool_request[zone] = (int8_t)((int)cool - 128);
+    if (heat != 0) valid |= FLOWLIMIT_VALID_REQUEST(zone, 0);
+    if (cool != 0) valid |= FLOWLIMIT_VALID_REQUEST(zone, 1);
   }
+  fl->valid = valid;
   fl->have_data = 1;
 }
 
@@ -199,32 +226,50 @@ static int partBytes(int part, uint8_t *bytes) {
   return 2;
 }
 
+// The received (valid) values of the given parts as a datagram, clamped like a command. Curve parts and request
+// parts go separately (requests = 1), so a request is judged against the received curve, not a clamped one the
+// heat pump may refuse.
+static void receivedParts(const struct flowlimit_t *fl, uint8_t parts, int requests, uint8_t *cmd, uint8_t *received, char *log, size_t logsize) {
+  header(cmd);
+  for (int part = 0; part < FLOWLIMIT_PARTS; part++) {
+    if (!((parts >> part) & 1) || (part & 1) != requests) continue;
+    const int zone = part >> 2;
+    const int cooling = (part >> 1) & 1;
+    uint8_t bytes[2];
+    const int count = partBytes(part, bytes);
+    for (int i = 0; i < count; i++) {
+      const bool valid = requests ? (fl->valid & FLOWLIMIT_VALID_REQUEST(zone, cooling)) : (fl->valid & FLOWLIMIT_VALID_CURVE(zone, cooling, i));
+      if (!valid) continue;
+      int8_t value;
+      if (requests) value = cooling ? fl->cool_request[zone] : fl->heat_request[zone];
+      else value = cooling ? fl->cool_curve[zone][i] : fl->heat_curve[zone][i];
+      cmd[bytes[i]] = (uint8_t)(value + 128);
+    }
+  }
+  memcpy(received, cmd, FLOWLIMIT_DATAGRAM_SIZE);
+  flowlimit_apply(fl, cmd, FLOWLIMIT_DATAGRAM_SIZE, log, logsize);
+}
+
 int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, char *log, size_t logsize) {
   if (log != NULL && logsize > 0) log[0] = '\0';
+  fl->pending = 0;
   if (!flowlimit_on(fl) || !fl->have_data) return 0;
 
-  // the received values as a datagram, through the same clamp as a command
+  // which parts are outside the limit: the received values through the same clamp as a command
+  uint8_t curves[FLOWLIMIT_DATAGRAM_SIZE], curvesReceived[FLOWLIMIT_DATAGRAM_SIZE];
   uint8_t received[FLOWLIMIT_DATAGRAM_SIZE];
-  header(received);
-  for (int zone = 0; zone < 2; zone++) {
-    for (int i = 0; i < 2; i++) {
-      received[pgm_read_byte(&heatCurveByte[zone][i])] = (uint8_t)(fl->heat_curve[zone][i] + 128);
-      received[pgm_read_byte(&coolCurveByte[zone][i])] = (uint8_t)(fl->cool_curve[zone][i] + 128);
-    }
-    received[pgm_read_byte(&heatRequestByte[zone])] = (uint8_t)(fl->heat_request[zone] + 128);
-    received[pgm_read_byte(&coolRequestByte[zone])] = (uint8_t)(fl->cool_request[zone] + 128);
-  }
-  header(cmd);
-  memcpy(cmd + 4, received + 4, FLOWLIMIT_DATAGRAM_SIZE - 4);
-  flowlimit_apply(fl, cmd, FLOWLIMIT_DATAGRAM_SIZE, NULL, 0);
+  receivedParts(fl, 0xFF, 0, curves, curvesReceived, NULL, 0);
+  receivedParts(fl, 0xFF, 1, cmd, received, NULL, 0);
 
   const bool due = !fl->corrected || (uint32_t)(now_ms - fl->last_ms) >= FLOWLIMIT_RETRY_MS;
   uint8_t send = 0;
   for (int part = 0; part < FLOWLIMIT_PARTS; part++) {
+    const uint8_t *after = (part & 1) ? cmd : curves;
+    const uint8_t *before = (part & 1) ? received : curvesReceived;
     uint8_t bytes[2];
     const int count = partBytes(part, bytes);
     bool outside = false;
-    for (int i = 0; i < count; i++) outside = outside || cmd[bytes[i]] != received[bytes[i]];
+    for (int i = 0; i < count; i++) outside = outside || after[bytes[i]] != before[bytes[i]];
     if (!outside) {
       fl->tries[part] = 0;
       continue;
@@ -244,23 +289,40 @@ int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, ch
   }
   if (send == 0) return 0;
 
-  // the correction: the received values of the parts corrected now, clamped, and only the bytes that change
-  header(cmd);
-  for (int part = 0; part < FLOWLIMIT_PARTS; part++) {
-    if (!((send >> part) & 1)) continue;
-    uint8_t bytes[2];
-    const int count = partBytes(part, bytes);
-    for (int i = 0; i < count; i++) cmd[bytes[i]] = received[bytes[i]];
-    fl->tries[part]++;
-  }
+  // the correction: the received values of the parts corrected now in one datagram, clamped like a command
+  // (a request whose curve is corrected in the same datagram is judged against the corrected curve, else
+  // against the received one), then only the changed bytes, everything else 0 = no change
   if (log != NULL && logsize > 0) {
     snprintf_P(log, logsize, PSTR("Flow limit: received value outside the limit (heating max %d, cooling min %d), sending a correction"), fl->heat_max, fl->cool_min);
   }
+  receivedParts(fl, send, 0, curves, curvesReceived, NULL, 0);
+  receivedParts(fl, send, 1, cmd, received, NULL, 0);
+  for (int i = 4; i < FLOWLIMIT_DATAGRAM_SIZE; i++) {
+    if (curvesReceived[i] != 0) received[i] = curvesReceived[i];
+  }
+  memcpy(cmd, received, FLOWLIMIT_DATAGRAM_SIZE);
   flowlimit_apply(fl, cmd, FLOWLIMIT_DATAGRAM_SIZE, log, logsize);
+  uint8_t pending = 0;
+  for (int part = 0; part < FLOWLIMIT_PARTS; part++) {
+    uint8_t bytes[2];
+    const int count = partBytes(part, bytes);
+    for (int i = 0; i < count; i++) {
+      if (((send >> part) & 1) && cmd[bytes[i]] != received[bytes[i]]) pending |= (uint8_t)(1 << part);
+    }
+  }
   for (int i = 4; i < FLOWLIMIT_DATAGRAM_SIZE; i++) {
     if (cmd[i] == received[i]) cmd[i] = 0;
   }
+  fl->pending = pending;
+  return pending ? FLOWLIMIT_DATAGRAM_SIZE : 0;
+}
+
+void flowlimit_sent(struct flowlimit_t *fl, uint32_t now_ms) {
+  if (fl->pending == 0) return;
+  for (int part = 0; part < FLOWLIMIT_PARTS; part++) {
+    if ((fl->pending >> part) & 1) fl->tries[part]++;
+  }
+  fl->pending = 0;
   fl->corrected = 1;
   fl->last_ms = now_ms;
-  return FLOWLIMIT_DATAGRAM_SIZE;
 }

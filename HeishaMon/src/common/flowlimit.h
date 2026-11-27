@@ -14,6 +14,8 @@
  *   40 41   zone 2 heat / cool request
  *   75 76   zone 1 heat curve target high / low      79 80  zone 2
  *   86 87   zone 1 cool curve target high / low      90 91  zone 2
+ *   22      bits 3-0 zone 1 sensor, bits 7-4 zone 2 sensor (value + 1: 0 = water temperature, 1 = external
+ *           thermostat, 2 = internal thermostat, 3 = thermistor)
  *   6       bits 7-6 zones state (value + 1: 0 = zone 1, 1 = zone 2, 2 = both), bits 5-0 operating mode
  *           (18 heat, 33 DHW, 34 heat + DHW: no cooling), received data only
  *
@@ -23,7 +25,11 @@
  *   - curve mode: the shift is lowered until highest heat curve target + shift <= heat_max
  *     (cooling: raised until lowest cool curve target + shift >= cool_min), within -5..5. The curve is
  *     taken from the same datagram where it sets it, else from the last received data;
- *   - mode or curve not known (no data yet): a request outside -5..5 counts as a direct target.
+ *   - the request of a zone is only touched while its sensor is known to be water temperature or external
+ *     thermostat; with an internal thermostat or a thermistor it is a room setpoint (no flow), unknown (no data
+ *     yet): left alone. Curve targets are always clamped;
+ *   - mode or curve not known (invalid mode bits, a received curve byte 0): a request outside -5..5 counts as a
+ *     direct target, a shift passes.
  *
  * Watchdog: when the received data shows a value outside the limit (set at the remote controller, by the
  * CZ-TAW1 or before the limit was switched on), one correcting datagram with only the clamped bytes, at most
@@ -75,12 +81,19 @@ struct flowlimit_t {
   int8_t cool_curve[2][2];
   int8_t heat_request[2];
   int8_t cool_request[2];
+  int8_t sensor[2];       // zone sensor (TOP111 / TOP112): 0 = water, 1 = external thermostat, 2 = internal
+                          // thermostat, 3 = thermistor, -1 = unknown
+  uint16_t valid;         // bit per received value, a byte 0 is not a value: FLOWLIMIT_VALID_CURVE / _REQUEST
   // watchdog
   uint8_t tries[FLOWLIMIT_PARTS];  // corrections sent while the part stayed outside the limit
   uint8_t given_up;                // bit per part
+  uint8_t pending;                 // parts of the correction flowlimit_watchdog() returned last
   uint8_t corrected;               // a correction was sent, last_ms is valid
   uint32_t last_ms;
 };
+
+#define FLOWLIMIT_VALID_CURVE(zone, cooling, point) (1u << ((zone) * 4 + (cooling) * 2 + (point)))
+#define FLOWLIMIT_VALID_REQUEST(zone, cooling) (1u << (8 + (zone) * 2 + (cooling)))
 
 extern struct flowlimit_t flowlimit;
 
@@ -102,8 +115,12 @@ int flowlimit_apply(const struct flowlimit_t *fl, uint8_t *cmd, size_t len, char
 void flowlimit_update(struct flowlimit_t *fl, const uint8_t *data, size_t len);
 
 // After flowlimit_update(): fills cmd (FLOWLIMIT_DATAGRAM_SIZE bytes) with a correction and returns its
-// length, or 0 when nothing is to be sent. log gets the reason or the warning (also when 0 is returned
+// length, or 0 when nothing is to be sent. The request of a zone is judged against the received curve, as a
+// command is (a curve the heat pump does not take still gets its shift lowered). log gets the reason or the warning (also when 0 is returned
 // and a part is given up now); log[0] == 0 when there is nothing to say.
 int flowlimit_watchdog(struct flowlimit_t *fl, uint32_t now_ms, uint8_t *cmd, char *log, size_t logsize);
+// The correction flowlimit_watchdog() returned was accepted for sending: count it and start the 10 minutes.
+// Not called (send queue full): the next data block tries again, nothing is counted.
+void flowlimit_sent(struct flowlimit_t *fl, uint32_t now_ms);
 
 #endif
