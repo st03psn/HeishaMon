@@ -923,9 +923,9 @@ function attemptReconnect(){
 }
 function startWebsockets(){
   if(typeof MozWebSocket!='undefined'){
-    oWebsocket=new MozWebSocket('ws://'+location.host+'/ws');
+    oWebsocket=new MozWebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/ws');
   } else if(typeof WebSocket!='undefined'){
-    oWebsocket=new WebSocket('ws://'+location.host+'/ws');
+    oWebsocket=new WebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/ws');
   }
   if(oWebsocket){
     oWebsocket.onopen=function(){bConnected=true;};
@@ -1636,7 +1636,12 @@ static const char settingsForm1[] FLASHPROG = R"====(
     <button type='button' data-tab='advanced' onclick="openSettingsTab('advanced')">Advanced</button>
     <button type='button' data-tab='system' onclick="openSettingsTab('system')">System</button>
     <button type='button' onclick="location.href='/security'">Web login</button>
-  </nav>
+)===="
+#ifdef ESP32
+R"====(    <button type='button' onclick="location.href='/https'">HTTPS</button>
+)===="
+#endif
+R"====(  </nav>
   <form accept-charset='UTF-8' action='/savesettings' method='POST'>
   <div class='panel' data-tab='basic' style='margin-bottom:16px'>
   <div class='panel-header'><h3>Network</h3></div>
@@ -2902,7 +2907,12 @@ static const char webBodySecurityOpen[] FLASHPROG = R"====(
     <button type='button' onclick="location.href='/settings#advanced'">Advanced</button>
     <button type='button' onclick="location.href='/settings#system'">System</button>
     <button type='button' class='active'>Web login</button>
-  </nav>
+)===="
+#ifdef ESP32
+R"====(    <button type='button' onclick="location.href='/https'">HTTPS</button>
+)===="
+#endif
+R"====(  </nav>
 )====";
 
 static const char webBodySecurityFirst[] FLASHPROG = R"====(
@@ -2969,6 +2979,71 @@ static const char webBodySecurityEnd[] FLASHPROG = R"====('></div>
   <div class='setting-row'><button type='submit' class='btn btn-primary'>Save host names</button></div>
 </form></div>
 <p style='font-size:12px;color:var(--text-muted)'>Forgot the web password? It can only be reset at the device: hold its boot button for more than 10 seconds (factory reset, all settings are lost). No network request can skip the login.</p>
+</div>
+)====";
+
+static const char webBodyHttpsOpen[] FLASHPROG = R"====(
+<div class='main-content' style='max-width:780px;margin:0 auto'>
+  <nav class='tabnav' id='settings_tabs' style='padding:0 0 14px;background:none'>
+    <button type='button' onclick="location.href='/settings#basic'">Basic</button>
+    <button type='button' onclick="location.href='/settings#heatpump'">Heat pump</button>
+    <button type='button' onclick="location.href='/settings#io'">Sensors &amp; GPIO</button>
+    <button type='button' onclick="location.href='/settings#advanced'">Advanced</button>
+    <button type='button' onclick="location.href='/settings#system'">System</button>
+    <button type='button' onclick="location.href='/security'">Web login</button>
+    <button type='button' class='active'>HTTPS</button>
+  </nav>
+)====";
+
+static const char webBodyHttpsNone[] FLASHPROG = R"====(
+<div class='panel' style='margin-bottom:16px'><div class='panel-header'><h3>HTTPS</h3></div>
+<div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>HTTPS is only available on the large board (ESP32-S3).
+The ESP8266 has too little RAM for a TLS server: one HTTPS connection needs about 40 kB, about all the RAM this board has free.
+Use the web login and keep the web interface in a network you trust, or put a reverse proxy with HTTPS in front of it.</span></div></div></div>
+</div>
+)====";
+
+static const char webBodyHttpsForm1[] FLASHPROG = R"====(
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>HTTPS (port 443)</h3></div>
+<form method='POST' action='/https' class='settings-grid'>
+  <input type='hidden' name='action' value='settings'>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>Status: )====";
+
+static const char webBodyHttpsForm2[] FLASHPROG = R"====(</span></div>
+  <div class='setting-row'><label class='setting-label'>HTTPS</label><div class='checkbox-wrap'><input type='checkbox' name='https' value='enabled' )====";
+
+static const char webBodyHttpsForm3[] FLASHPROG = R"====(></div><div class='setting-desc'>The first start makes a key and a self-signed certificate for this hostname (a few seconds). Browsers warn about a self-signed certificate: compare the fingerprint below with the one the browser shows, then accept it once.</div></div>
+  <div class='setting-row'><label class='setting-label'>Plain HTTP (port 80)</label><select name='http_mode' class='setting-input'>)====";
+
+static const char webBodyHttpsForm4[] FLASHPROG = R"====(</select><div class='setting-desc'><b>Redirect</b>: pages opened in a browser go to HTTPS; the API (/json, /command, /reboot, firmware upload, with or without an API key) stays on HTTP, so Home Assistant keeps working. <b>Off</b>: only the redirect of pages is left; Home Assistant and scripts must use https:// (and accept this certificate). In both modes the setup hotspot (192.168.4.1) stays on HTTP, and HTTP works as before as long as HTTPS is not running.</div></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Save</button></div>
+</form></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Certificate</h3></div>
+<div class='settings-grid'>
+)====";
+
+static const char webBodyHttpsCert[] FLASHPROG = R"====(
+  <div class='setting-row'>
+    <form method='POST' action='/https' style='display:inline' onsubmit="return confirm('Make a new key and certificate? Browsers warn again and must accept the new one.');"><input type='hidden' name='action' value='regenerate'><button type='submit' class='btn btn-ghost'>Make a new self-signed certificate</button></form>
+    <span class='setting-hint'>For example after the hostname or the IP address changed (a new hostname makes a new one by itself).</span>
+  </div>
+</div></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Own certificate</h3></div>
+<form method='POST' action='/https' enctype='multipart/form-data' class='settings-grid'>
+  <input type='hidden' name='action' value='upload'>
+  <div class='setting-row'><span class='setting-hint' style='margin-left:0'>A certificate of your own CA or of a public one (PEM, the chain may follow the certificate) and its private key (PEM, without a password). Only EC P-256 and RSA 2048 keys: a larger key would block the heat pump communication too long during every handshake. Key and certificate are checked first; if they do not fit, the current certificate stays. The key is stored on the device and never shown again.</span></div>
+  <div class='setting-row'><label class='setting-label'>Certificate (PEM)</label><input type='file' name='cert' accept='.pem,.crt,.cer' class='setting-input' required></div>
+  <div class='setting-row'><label class='setting-label'>Private key (PEM)</label><input type='file' name='key' accept='.pem,.key' class='setting-input' required></div>
+  <div class='setting-row'><button type='submit' class='btn btn-primary'>Upload and use</button></div>
+</form></div>
+<div class='panel' style='margin-bottom:16px'>
+<div class='panel-header'><h3>Measurements</h3></div>
+<div class='settings-grid'><div class='setting-row'><span class='setting-hint' style='margin-left:0'>)====";
+
+static const char webBodyHttpsEnd[] FLASHPROG = R"====(</span></div></div></div>
 </div>
 )====";
 

@@ -76,6 +76,7 @@ static const char p_settings[] PROGMEM = "/settings";
 static const char p_getsettings[] PROGMEM = "/getsettings";
 static const char p_rules[] PROGMEM = "/rules";
 static const char p_scandallas[] PROGMEM = "/scandallas";
+static const char p_https[] PROGMEM = "/https";
 
 #define WA_ANY 0
 #define WA_GET 1
@@ -126,12 +127,16 @@ const webauth_route_t webauth_routes[] PROGMEM = {
   { 160, WA_PAGE, WA_GET, p_rules },                       // rules page (also the answer of a failed /saverules)
   { 166, WA_PAGE, WA_GET, p_cacert },                      // CA certificate page
   { 180, WA_STATE, WA_GET, p_scandallas },                 // rescan 1-wire
+  { WEBAUTH_ROUTE_HTTPS_PAGE, WA_PAGE, WA_GET, p_https },  // HTTPS tab of the settings (ESP32; the ESP8266 says it has none)
+  { WEBAUTH_ROUTE_HTTPS_POST, WA_STATE, WA_POST, p_https }, // HTTPS on/off, HTTP mode, new certificate, certificate upload
   { 0, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },          // 404
   { WEBAUTH_ROUTE_TO_LOGIN, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
   { WEBAUTH_ROUTE_UNAUTHORIZED, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
   { WEBAUTH_ROUTE_FORBIDDEN, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
   { WEBAUTH_ROUTE_TOO_MANY, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
   { WEBAUTH_ROUTE_BAD_HOST, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
+  { WEBAUTH_ROUTE_TO_HTTPS, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
+  { WEBAUTH_ROUTE_HTTP_OFF, WEBAUTH_PUBLIC | WEBAUTH_INTERNAL, WA_ANY, NULL },
 };
 const uint8_t webauth_routes_count = sizeof(webauth_routes) / sizeof(webauth_routes[0]);
 
@@ -842,6 +847,92 @@ bool webauth_origin_matches(const char *origin, const char *host) {
   return equal_nocase(rest, strlen(rest), host, strlen(host));
 }
 
+/* Over TLS a page of the plain HTTP origin (which anybody on the path can change) must not act */
+bool webauth_origin_matches_transport(const char *origin, const char *host, bool tls) {
+  if(tls && (origin == NULL || strncasecmp_P(origin, PSTR("https://"), 8) != 0)) {
+    return false;
+  }
+  return webauth_origin_matches(origin, host);
+}
+
+/* ------------------------------------------------------------------ */
+/* HTTP and HTTPS                                                      */
+/* ------------------------------------------------------------------ */
+
+uint8_t webauth_http_mode(long value) {
+  return (value == WEBAUTH_HTTP_REDIRECT || value == WEBAUTH_HTTP_OFF) ? (uint8_t)value : (uint8_t)WEBAUTH_HTTP_ON;
+}
+
+static bool has_bearer(const struct webserver_request_t *req) {
+  const char *authz = req->header[WEBSERVER_HEADER_AUTHORIZATION];
+  return authz != NULL && strncasecmp_P(authz, PSTR("Bearer "), 7) == 0;
+}
+
+uint8_t webauth_transport(const struct webserver_request_t *req, const webauth_env_t *env, uint8_t route, uint8_t flags) {
+  if(req->tls || !env->https_on || env->hotspot) {
+    return WEBAUTH_TRANSPORT_OK;  // HTTPS, no HTTPS running, or the setup hotspot (always plain HTTP)
+  }
+  if(flags & WEBAUTH_ANYHOST) {
+    return WEBAUTH_TRANSPORT_OK;  // captive portal checks: only a redirect to the hotspot page
+  }
+  uint8_t mode = webauth_http_mode(env->http_mode);
+  if(mode == WEBAUTH_HTTP_ON) {
+    return WEBAUTH_TRANSPORT_OK;
+  }
+  bool bearer = has_bearer(req);
+  if((flags & WEBAUTH_PAGE) && req->method == WEBSERVER_METHOD_GET && !req->websocket && !bearer) {
+    return WEBAUTH_TRANSPORT_REDIRECT;  // a browser: the same page over HTTPS (nothing of it was run)
+  }
+  if(mode == WEBAUTH_HTTP_REDIRECT) {
+    // the API stays (Home Assistant: /json, /command, /reboot, /firmware); the forms of the browser
+    // and the live log belong to HTTPS: a session or a password must not travel in clear
+    if(route == WEBAUTH_ROUTE_LOGIN_POST || route == WEBAUTH_ROUTE_SECURITY_POST || route == WEBAUTH_ROUTE_HTTPS_POST) {
+      return WEBAUTH_TRANSPORT_REFUSE;
+    }
+    if((flags & WEBAUTH_WS) && !bearer) {
+      return WEBAUTH_TRANSPORT_REFUSE;
+    }
+    return WEBAUTH_TRANSPORT_OK;
+  }
+  return WEBAUTH_TRANSPORT_REFUSE;
+}
+
+static bool url_chars(const char *s) {
+  for(; *s; s++) {
+    if((unsigned char)*s <= 0x20 || (unsigned char)*s >= 0x7F) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool webauth_https_location(const struct webserver_request_t *req, const char *device_hosts, char *out, size_t size) {
+  const char *host = (req->truncated & (1 << WEBSERVER_HEADER_HOST)) ? NULL : req->header[WEBSERVER_HEADER_HOST];
+  char name[WEBSERVER_MAX_HOST + 1];
+  size_t n = 0;
+  if(host != NULL && webauth_host_allowed(host, device_hosts)) {
+    for(const char *p = host; *p && *p != ':' && n < sizeof(name) - 1; p++) {
+      name[n++] = *p;  // without the port of plain HTTP
+    }
+  } else {
+    // never a name of the request this device does not know (no open redirect): its first address
+    for(const char *p = device_hosts ? device_hosts : ""; *p && *p != ',' && n < sizeof(name) - 1; p++) {
+      name[n++] = *p;
+    }
+  }
+  name[n] = 0;
+  if(n == 0 || !url_chars(name)) {
+    return false;
+  }
+  const char *path = (req->path != NULL && req->path[0] == '/' && url_chars(req->path)) ? req->path : "/";
+  const char *query = (req->query != NULL && url_chars(req->query)) ? req->query : "";
+  int len = snprintf_P(out, size, PSTR("https://%s%s%s%s"), name, path, query[0] ? "?" : "", query);
+  if(len < 0 || (size_t)len >= size) {
+    len = snprintf_P(out, size, PSTR("https://%s%s"), name, path);  // a long query is dropped
+  }
+  return len > 0 && (size_t)len < size;
+}
+
 /* ------------------------------------------------------------------ */
 /* Lockout                                                             */
 /* ------------------------------------------------------------------ */
@@ -1177,7 +1268,8 @@ static bool is_form_route(uint8_t route) {
 
 bool webauth_is_answer_route(uint8_t route) {
   return route == WEBAUTH_ROUTE_TO_LOGIN || route == WEBAUTH_ROUTE_UNAUTHORIZED ||
-         route == WEBAUTH_ROUTE_FORBIDDEN || route == WEBAUTH_ROUTE_TOO_MANY || route == WEBAUTH_ROUTE_BAD_HOST;
+         route == WEBAUTH_ROUTE_FORBIDDEN || route == WEBAUTH_ROUTE_TOO_MANY || route == WEBAUTH_ROUTE_BAD_HOST ||
+         route == WEBAUTH_ROUTE_TO_HTTPS || route == WEBAUTH_ROUTE_HTTP_OFF;
 }
 
 /* what the 403 page of an unknown Host shows */
@@ -1254,9 +1346,25 @@ int8_t webauth_request(struct webserver_t *client, const struct webserver_reques
   // a cut value is never trusted
   const char *host = (req->truncated & (1 << WEBSERVER_HEADER_HOST)) ? NULL : req->header[WEBSERVER_HEADER_HOST];
   const char *origin = req->header[WEBSERVER_HEADER_ORIGIN];
-  bool origin_ok = origin == NULL || (!(req->truncated & (1 << WEBSERVER_HEADER_ORIGIN)) && webauth_origin_matches(origin, host));
+  bool origin_ok = origin == NULL || (!(req->truncated & (1 << WEBSERVER_HEADER_ORIGIN)) && webauth_origin_matches_transport(origin, host, req->tls != 0));
   bool host_ok = webauth_host_allowed(host, env->hosts);
   int8_t session = -1;
+
+  // plain HTTP while HTTPS runs: first, before any password, key or lockout is looked at
+  uint8_t transport = webauth_transport(req, env, route, flags);
+  if(transport == WEBAUTH_TRANSPORT_REDIRECT) {
+    char *location = (char *)malloc(WEBAUTH_LOCATION_MAX);
+    if(location != NULL && webauth_https_location(req, env->hosts, location, WEBAUTH_LOCATION_MAX)) {
+      client->route = WEBAUTH_ROUTE_TO_HTTPS;
+      client->userdata = location;
+      return WEBSERVER_REJECT;  // a GET: no body to drain
+    }
+    free(location);
+    return reject(client, req, WEBAUTH_ROUTE_HTTP_OFF, 0);
+  }
+  if(transport == WEBAUTH_TRANSPORT_REFUSE) {
+    return reject(client, req, WEBAUTH_ROUTE_HTTP_OFF, 0);
+  }
 
   // a page of another site (browsers send Sec-Fetch-Site): never changes anything, in both modes;
   // without it an <img src="http://<device>/reboot"> would reboot a device without a password
@@ -1530,7 +1638,7 @@ void webauth_close(struct webserver_t *client) {
     wipe(client->userdata, sizeof(struct webauth_form_t));
     free(client->userdata);
   }
-  if(client->route == WEBAUTH_ROUTE_BAD_HOST && client->userdata != NULL) {
+  if((client->route == WEBAUTH_ROUTE_BAD_HOST || client->route == WEBAUTH_ROUTE_TO_HTTPS) && client->userdata != NULL) {
     free(client->userdata);
   }
   if(is_form_route(client->route) || webauth_is_answer_route(client->route) ||
@@ -1544,6 +1652,7 @@ void webauth_close(struct webserver_t *client) {
 /* ------------------------------------------------------------------ */
 
 #define COOKIE_ATTRS "; Path=/; HttpOnly; SameSite=Strict"
+#define COOKIE_SECURE(client) ((client)->tls ? "; Secure" : "")  // over HTTPS: never sent back over plain HTTP
 
 int webauth_create_header(struct webserver_t *client, struct header_t *header) {
   char *b = (char *)header->buffer;
@@ -1554,6 +1663,17 @@ int webauth_create_header(struct webserver_t *client, struct header_t *header) {
       n = snprintf_P(b, room, PSTR("Location: /login\r\nCache-Control: no-store\r\n"));
       header->ptr += n;
       return -1;
+    }
+    case WEBAUTH_ROUTE_TO_HTTPS: {
+      const char *location = (const char *)client->userdata;
+      n = snprintf_P(b, room, PSTR("Location: %s\r\nCache-Control: no-store\r\n"), location ? location : "/");
+      header->ptr += n;
+      return -1;
+    }
+    case WEBAUTH_ROUTE_HTTP_OFF: {
+      n = snprintf_P(b, room, PSTR("Cache-Control: no-store\r\n"));
+      header->ptr += n;
+      return 0;
     }
     case WEBAUTH_ROUTE_UNAUTHORIZED: {
       n = snprintf_P(b, room, PSTR("WWW-Authenticate: Bearer realm=\"HeishaMon\"\r\nCache-Control: no-store\r\n"));
@@ -1573,8 +1693,8 @@ int webauth_create_header(struct webserver_t *client, struct header_t *header) {
       return 0;
     }
     case WEBAUTH_ROUTE_LOGOUT: {
-      n = snprintf_P(b, room, PSTR("Location: /login?m=%u\r\nSet-Cookie: " WEBAUTH_COOKIE_NAME "=" COOKIE_ATTRS "; Max-Age=0\r\nCache-Control: no-store\r\n"),
-                     (unsigned int)WEBAUTH_RESULT_LOGGED_OUT);
+      n = snprintf_P(b, room, PSTR("Location: /login?m=%u\r\nSet-Cookie: " WEBAUTH_COOKIE_NAME "=" COOKIE_ATTRS "%s; Max-Age=0\r\nCache-Control: no-store\r\n"),
+                     (unsigned int)WEBAUTH_RESULT_LOGGED_OUT, COOKIE_SECURE(client));
       header->ptr += n;
       return -1;
     }
@@ -1604,9 +1724,9 @@ int webauth_create_header(struct webserver_t *client, struct header_t *header) {
         n = snprintf_P(b, room, PSTR("Location: /security?m=%u\r\n"), (unsigned int)result);
       }
       if(cookie[0]) {
-        n += snprintf_P(b + n, room - n, PSTR("Set-Cookie: " WEBAUTH_COOKIE_NAME "=%s" COOKIE_ATTRS "\r\n"), cookie);
+        n += snprintf_P(b + n, room - n, PSTR("Set-Cookie: " WEBAUTH_COOKIE_NAME "=%s" COOKIE_ATTRS "%s\r\n"), cookie, COOKIE_SECURE(client));
       } else if(result == WEBAUTH_RESULT_REMOVED) {
-        n += snprintf_P(b + n, room - n, PSTR("Set-Cookie: " WEBAUTH_COOKIE_NAME "=" COOKIE_ATTRS "; Max-Age=0\r\n"));
+        n += snprintf_P(b + n, room - n, PSTR("Set-Cookie: " WEBAUTH_COOKIE_NAME "=" COOKIE_ATTRS "%s; Max-Age=0\r\n"), COOKIE_SECURE(client));
       }
       n += snprintf_P(b + n, room - n, PSTR("Cache-Control: no-store\r\n"));
       wipe(cookie, sizeof(cookie));
@@ -1672,6 +1792,16 @@ int webauth_write_answer(struct webserver_t *client) {
     case WEBAUTH_ROUTE_TO_LOGIN:
     case WEBAUTH_ROUTE_LOGOUT: {
       webserver_send(client, 302, (char *)"text/html", 0);
+    } break;
+    case WEBAUTH_ROUTE_TO_HTTPS: {
+      webserver_send(client, 302, (char *)"text/html", 0);  // the Location header is made here
+      free(client->userdata);
+      client->userdata = NULL;
+    } break;
+    case WEBAUTH_ROUTE_HTTP_OFF: {
+      static const char msg[] PROGMEM = "403 HTTP is switched off on this HeishaMon: use https://\n";
+      webserver_send(client, 403, (char *)"text/plain", 0);
+      webserver_send_content_P(client, msg, strlen_P(msg));
     } break;
     case WEBAUTH_ROUTE_LOGIN_POST:
     case WEBAUTH_ROUTE_SECURITY_POST: {

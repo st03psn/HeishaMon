@@ -194,12 +194,13 @@ static WiFiClient idle_client = { s_write, s_write_P, s_available, f_connected, 
 static const char *DEVICE_HOSTS = "192.168.1.5,192.168.4.1,heishamon,heishamon.local";  // as webauth_device_hosts() builds it
 static uint32_t client_ip = 0x0501a8c0;
 static std::string events;
+static uint8_t env_https_on = 0, env_http_mode = WEBAUTH_HTTP_ON, env_hotspot = 0, conn_tls = 0;  // HTTPS (ESP32)
 
 static int8_t callback(struct webserver_t *client, void *data) {
   bool other = (client != &clients[0].data);
   switch(client->step) {
     case WEBSERVER_CLIENT_REQUEST: {
-      webauth_env_t env = { client_ip, DEVICE_HOSTS };
+      webauth_env_t env = { client_ip, DEVICE_HOSTS, env_https_on, env_http_mode, env_hotspot };
       int8_t d = webauth_request(client, (struct webserver_request_t *)data, &env);
       char tmp[48];
       snprintf(tmp, sizeof(tmp), "%s r=%d;", d == WEBSERVER_ACCEPT ? "ACCEPT" : d == WEBSERVER_REJECT ? "REJECT" : "CLOSE-REQ", client->route);
@@ -290,6 +291,7 @@ static result_t run(const std::vector<std::string> &p) {
   webserver_reset_client(c);
   c->client = &fake;
   c->callback = callback;
+  c->tls = conn_tls;
   c->step = WEBSERVER_CLIENT_CONNECTING;
   c->lastseen = millis();
   int idle = 0;
@@ -691,7 +693,7 @@ static void test_routes() {
     { "GET", "/logout", 6 }, { "GET", "/security", 7 }, { "POST", "/security", 8 }, { "POST", "/savesettings", 110 },
     { "POST", "/saverules", 170 }, { "POST", "/cacert", 165 }, { "POST", "/firmware", 150 }, { "GET", "/settings", 120 },
     { "GET", "/getsettings", 130 }, { "GET", "/firmware", 140 }, { "GET", "/rules", 160 }, { "GET", "/cacert", 166 },
-    { "GET", "/scandallas", 180 }, { "GET", "/nothing", 0 }, { "GET", "/savesettings", 0 }, { "GET", "/JSON", 0 },
+    { "GET", "/scandallas", 180 }, { "GET", "/https", 175 }, { "POST", "/https", 176 }, { "GET", "/nothing", 0 }, { "GET", "/savesettings", 0 }, { "GET", "/JSON", 0 },
     { "POST", "/settings", -1 }, { "POST", "/nothing", -1 }, { "POST", "/rules", -1 },
   };
   for(auto &x : m) {
@@ -717,10 +719,11 @@ static void test_routes() {
       pub.insert(webauth_routes[i].route);
     }
   }
-  CHECK(pub == std::set<int>({ 0, 4, 5, 80, 81, WEBAUTH_ROUTE_TO_LOGIN, WEBAUTH_ROUTE_UNAUTHORIZED, WEBAUTH_ROUTE_FORBIDDEN, WEBAUTH_ROUTE_TOO_MANY, WEBAUTH_ROUTE_BAD_HOST }),
+  CHECK(pub == std::set<int>({ 0, 4, 5, 80, 81, WEBAUTH_ROUTE_TO_LOGIN, WEBAUTH_ROUTE_UNAUTHORIZED, WEBAUTH_ROUTE_FORBIDDEN, WEBAUTH_ROUTE_TOO_MANY, WEBAUTH_ROUTE_BAD_HOST,
+                              WEBAUTH_ROUTE_TO_HTTPS, WEBAUTH_ROUTE_HTTP_OFF }),
         "public routes changed");
   // state changing: every POST route and the GET routes that change something
-  int state[] = { 2, 3, 6, 8, 30, 60, 90, 100, 110, 111, 112, 113, 150, 165, 170, 180, 190, 191, 195 };
+  int state[] = { 2, 3, 6, 8, 30, 60, 90, 100, 110, 111, 112, 113, 150, 165, 170, 176, 180, 190, 191, 195 };
   for(int r : state) {
     CHECK(webauth_route_flags(r) & WEBAUTH_STATE, "route %d not state changing", r);
   }
@@ -1927,6 +1930,151 @@ static void test_failed_filter_forgets() {
   client_ip = 0x0501a8c0;
 }
 
+/*
+ * HTTPS (ESP32): plain HTTP while HTTPS runs (redirect of the pages, the API stays, or off), the
+ * setup hotspot, the Origin scheme over TLS and the Secure cookie.
+ */
+static void https_env(uint8_t on, uint8_t mode, uint8_t hotspot, uint8_t tls) {
+  env_https_on = on;
+  env_http_mode = mode;
+  env_hotspot = hotspot;
+  conn_tls = tls;
+}
+
+static void test_https() {
+  CHECK(webauth_http_mode(0) == WEBAUTH_HTTP_ON && webauth_http_mode(1) == WEBAUTH_HTTP_REDIRECT && webauth_http_mode(2) == WEBAUTH_HTTP_OFF, "modes");
+  CHECK(webauth_http_mode(-1) == WEBAUTH_HTTP_ON && webauth_http_mode(3) == WEBAUTH_HTTP_ON && webauth_http_mode(258) == WEBAUTH_HTTP_ON, "unknown mode");
+
+  fresh(false);
+  // HTTPS switched on but not running (no certificate, no network): HTTP stays as it was, whatever the mode
+  https_env(0, WEBAUTH_HTTP_OFF, 0, 0);
+  result_t r = run(get("/settings"));
+  CHECK(r.status == 200 && contains(r.events, "ACCEPT r=120;"), "%s", r.events.c_str());
+  r = run(get("/json"));
+  CHECK(contains(r.events, "ACCEPT r=20;"), "%s", r.events.c_str());
+
+  // running, HTTP on: no change
+  https_env(1, WEBAUTH_HTTP_ON, 0, 0);
+  r = run(get("/settings"));
+  CHECK(contains(r.events, "ACCEPT r=120;"), "%s", r.events.c_str());
+  r = run(post("/login", "password=x", origin()));
+  CHECK(!contains(r.events, "r=226"), "%s", r.events.c_str());
+
+  // redirect: the pages of a browser go to the same page over HTTPS, nothing of them runs
+  https_env(1, WEBAUTH_HTTP_REDIRECT, 0, 0);
+  r = run(get("/settings"));
+  CHECK(r.status == 302 && r.header("Location") == "https://192.168.1.5/settings" && contains(r.events, "REJECT r=225;") && !contains(r.events, "ACCEPT"),
+        "%s %s", r.events.c_str(), r.output.c_str());
+  r = run(get("/settings?tab=1", "", "HeishaMon.local:80"));
+  CHECK(r.header("Location") == "https://HeishaMon.local/settings?tab=1", "%s", r.output.c_str());
+  r = run(get("/togglelog"));  // a page that changes something: not run over HTTP
+  CHECK(r.status == 302 && !contains(r.events, "ACCEPT"), "%s", r.events.c_str());
+  // never to a name this device does not know (open redirect)
+  r = run(get("/settings", "", "evil.com"));
+  CHECK(r.status == 302 && r.header("Location") == "https://192.168.1.5/settings", "%s", r.output.c_str());
+  r = run(get("/settings", "", ""));
+  CHECK(r.header("Location") == "https://192.168.1.5/settings", "%s", r.output.c_str());
+  // a long query is dropped, the header stays within its buffer
+  r = run(get("/settings?" + std::string(400, 'q')));
+  CHECK(r.header("Location") == "https://192.168.1.5/settings", "%s", r.header("Location").c_str());
+  // the API stays on HTTP (Home Assistant: /json, /command, /reboot, /firmware)
+  r = run(get("/json"));
+  CHECK(contains(r.events, "ACCEPT r=20;"), "%s", r.events.c_str());
+  r = run(get("/reboot"));
+  CHECK(contains(r.events, "ACCEPT r=30;"), "%s", r.events.c_str());
+  r = run(post("/command", "SetHeatpump=1", origin()));
+  CHECK(contains(r.events, "ACCEPT r=100;"), "%s", r.events.c_str());
+  r = run(multipart_fw(100, ""));
+  CHECK(contains(r.events, "ACCEPT r=150;"), "%s", r.events.c_str());
+  r = run(get("/", "Authorization: Bearer 0123\r\n"));  // a script that reads the page with a key
+  CHECK(contains(r.events, "ACCEPT r=1;"), "%s", r.events.c_str());
+  // the forms of the browser and the live log only over HTTPS (password, session cookie, log in clear)
+  for(const char *path : { "/login", "/security", "/https" }) {
+    r = run(post(path, "password=x", origin()));
+    CHECK(r.status == 403 && contains(r.events, "REJECT r=226;"), "%s: %s", path, r.events.c_str());
+  }
+  r = run(get("/ws", WS + origin()));
+  CHECK(r.status == 403 && !r.websocket && contains(r.events, "r=226"), "%s", r.events.c_str());
+  // the captive portal checks and the setup hotspot stay on HTTP
+  r = run(get("/generate_204", "", "connectivitycheck.gstatic.com"));
+  CHECK(contains(r.events, "ACCEPT r=80;"), "%s", r.events.c_str());
+  https_env(1, WEBAUTH_HTTP_REDIRECT, 1, 0);
+  r = run(get("/settings", "", "192.168.4.1"));
+  CHECK(contains(r.events, "ACCEPT r=120;"), "%s", r.events.c_str());
+  r = run(post("/login", "password=x", origin("http://192.168.4.1"), "192.168.4.1"));
+  CHECK(!contains(r.events, "r=226"), "%s", r.events.c_str());
+
+  // off: the pages go to HTTPS, everything else is refused, except on the hotspot
+  https_env(1, WEBAUTH_HTTP_OFF, 0, 0);
+  r = run(get("/"));
+  CHECK(r.status == 302 && r.header("Location") == "https://192.168.1.5/", "%s", r.output.c_str());
+  for(const std::string &req : { get("/json"), get("/reboot"), post("/command", "SetHeatpump=1", origin()), get("/json", bearer("0123")),
+                                 get("/", bearer("0123")), get("/nothing"), get("/ws", WS + origin()) }) {
+    r = run(req);
+    CHECK(r.status == 403 && contains(r.events, "REJECT r=226;") && !contains(r.events, "ACCEPT"), "%s: %s", req.c_str(), r.events.c_str());
+  }
+  r = run(multipart_fw(100, ""));
+  CHECK(!contains(r.events, "ACCEPT"), "%s", r.events.c_str());
+  r = run(get("/generate_204", "", "connectivitycheck.gstatic.com"));
+  CHECK(contains(r.events, "ACCEPT r=80;"), "%s", r.events.c_str());
+  https_env(1, WEBAUTH_HTTP_OFF, 1, 0);
+  r = run(get("/settings", "", "192.168.4.1"));
+  CHECK(contains(r.events, "ACCEPT r=120;"), "hotspot with HTTP off: %s", r.events.c_str());
+  r = run(post("/savesettings", "a=1", origin("http://192.168.4.1"), "192.168.4.1"));
+  CHECK(contains(r.events, "ACCEPT r=110;"), "factory setup on the hotspot: %s", r.events.c_str());
+
+  // over TLS everything works, whatever the HTTP mode
+  https_env(1, WEBAUTH_HTTP_OFF, 0, 1);
+  r = run(get("/settings"));
+  CHECK(contains(r.events, "ACCEPT r=120;"), "%s", r.events.c_str());
+  r = run(get("/json"));
+  CHECK(contains(r.events, "ACCEPT r=20;"), "%s", r.events.c_str());
+  // Origin over TLS: https of the same host (port 443 is not written); an http:// page (anybody on the
+  // path can change it) or another host must not act
+  r = run(post("/command", "SetHeatpump=1", origin("https://192.168.1.5")));
+  CHECK(contains(r.events, "ACCEPT r=100;"), "%s", r.events.c_str());
+  r = run(post("/command", "SetHeatpump=1", origin("https://heishamon.local"), "heishamon.local"));
+  CHECK(contains(r.events, "ACCEPT r=100;"), "%s", r.events.c_str());
+  r = run(post("/command", "SetHeatpump=1", origin("https://heishamon.local:443"), "heishamon.local:443"));
+  CHECK(contains(r.events, "ACCEPT r=100;"), "explicit port: %s", r.events.c_str());
+  r = run(post("/command", "SetHeatpump=1", origin("http://192.168.1.5")));
+  CHECK(r.status == 403 && !contains(r.events, "ACCEPT"), "http Origin over TLS: %s", r.events.c_str());
+  r = run(post("/command", "SetHeatpump=1", origin("https://evil.com")));
+  CHECK(r.status == 403 && !contains(r.events, "ACCEPT"), "%s", r.events.c_str());
+  r = run(get("/ws", WS + origin("http://192.168.1.5")));
+  CHECK(!r.websocket, "websocket with an http Origin over TLS");
+  r = run(get("/ws", WS + origin("https://192.168.1.5")));
+  CHECK(r.websocket && contains(r.events, "ACCEPT r=210;"), "%s", r.events.c_str());
+  // plain HTTP keeps both schemes (an https page of this device is no risk to its http side)
+  https_env(1, WEBAUTH_HTTP_ON, 0, 0);
+  r = run(post("/command", "SetHeatpump=1", origin("https://192.168.1.5")));
+  CHECK(contains(r.events, "ACCEPT r=100;"), "%s", r.events.c_str());
+
+  // the session cookie over HTTPS is Secure (never sent back over plain HTTP)
+  fresh(true);
+  https_env(1, WEBAUTH_HTTP_REDIRECT, 0, 1);
+  r = run(post("/login", "password=correct+horse+battery", origin("https://192.168.1.5")));
+  CHECK(r.status == 302 && contains(r.header("Set-Cookie"), "; Secure") && contains(r.header("Set-Cookie"), "HttpOnly") && r.cookie().size() == 32,
+        "%s", r.output.c_str());
+  std::string tok = r.cookie();
+  r = run(get("/settings", cookie_hdr(tok)));
+  CHECK(contains(r.events, "ACCEPT r=120;"), "%s", r.events.c_str());
+  r = run(get("/logout", cookie_hdr(tok) + origin("https://192.168.1.5")));
+  CHECK(contains(r.header("Set-Cookie"), "; Secure") && contains(r.header("Set-Cookie"), "Max-Age=0"), "%s", r.output.c_str());
+  https_env(1, WEBAUTH_HTTP_ON, 0, 0);
+  r = run(post("/login", "password=correct+horse+battery", origin()));
+  CHECK(r.status == 302 && r.cookie().size() == 32 && !contains(r.header("Set-Cookie"), "Secure"), "%s", r.output.c_str());
+  // a refused login over HTTP is no try: no lockout, no budget used
+  https_env(1, WEBAUTH_HTTP_REDIRECT, 0, 0);
+  for(int i = 0; i < 20; i++) {
+    r = run(post("/login", "password=wrong+password", origin()));
+    CHECK(contains(r.events, "REJECT r=226;"), "%s", r.events.c_str());
+  }
+  CHECK(webauth_lock_wait_ms(client_ip) == 0 && webauth_lock_clean(client_ip), "refused logins were counted");
+  https_env(0, WEBAUTH_HTTP_ON, 0, 0);
+  fresh(false);
+}
+
 int main(int argc, char **argv) {
   if(argc > 1 && strcmp(argv[1], "--routes") == 0) {
     for(uint8_t i = 0; i < webauth_routes_count; i++) {
@@ -1942,6 +2090,7 @@ int main(int argc, char **argv) {
   test_hosts();
   test_lockout();
   test_routes();
+  test_https();
   test_login_off();
   test_first_password();
   test_close_others();
