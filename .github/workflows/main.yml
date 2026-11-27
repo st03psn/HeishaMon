@@ -13,7 +13,7 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write   # release builds open a PR adding the binaries to binaries/
+  pull-requests: write   # release builds of Egyras/HeishaMon open a PR adding the binaries to binaries/
 
 env:
   ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: "http://arduino.esp8266.com/stable/package_esp8266com_index.json https://espressif.github.io/arduino-esp32/package_esp32_dev_index.json"
@@ -53,12 +53,31 @@ jobs:
         run: echo "GIT_SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
         shell: bash
 
+      # A tag v<version> is a release of the fork: the board must report
+      # <version> without the leading "v", because the Home Assistant
+      # integration compares that with the tag of the latest release (also
+      # without "v") and builds the asset names from it. Other tags keep the
+      # old behaviour (version = tag name, prerelease).
       - name: Set build type env var
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          if [[ "$REF" == refs/tags/v* ]]; then
+            VERSION="${REF_NAME#v}"
+            # digits first (otherwise the integration never offers it), and only
+            # characters that are safe in asset names, URLs and version.h
+            if ! [[ "$VERSION" =~ ^[0-9][0-9A-Za-z.-]*$ ]]; then
+              echo "::error::Release tag '$REF_NAME' must look like v<digits>[.<digits>...][-suffix], e.g. v4.4.1-st03psn.1"
+              exit 1
+            fi
             echo "BUILD_TYPE=Release" >> $GITHUB_ENV
-            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
-          elif [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+          elif [[ "$REF" == refs/tags/* ]]; then
+            echo "BUILD_TYPE=Release" >> $GITHUB_ENV
+            echo "VERSION=$REF_NAME" >> $GITHUB_ENV
+          elif [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then
             echo "BUILD_TYPE=Nightly" >> $GITHUB_ENV
             echo "VERSION=Nightly-${{ env.GIT_SHORT_SHA }}" >> $GITHUB_ENV
           else
@@ -70,7 +89,8 @@ jobs:
       - name: Update version.h
         if: github.ref != 'refs/heads/main' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
         run: |
-          cd HeishaMon && sed -i 's/#define HEISHAMON_VERSION .*/#define HEISHAMON_VERSION "${{ env.VERSION }}"/' version.h && cat version.h
+          cd HeishaMon && sed -i "s|#define HEISHAMON_VERSION .*|#define HEISHAMON_VERSION \"$VERSION\"|" version.h && cat version.h
+          grep -qF "#define HEISHAMON_VERSION \"$VERSION\"" version.h
         shell: bash
 
       # arduino/setup-arduino-cli still targets the deprecated Node.js 20,
@@ -147,8 +167,10 @@ jobs:
           prerelease: true
           files: HeishaMon/HeishaMon_*.bin
 
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
+      # Tags that do not start with "v" (test tags) keep the old behaviour:
+      # a prerelease with the md5-named binaries.
+      - name: Publish prerelease for other tags
+        if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           name: "Release ${{ github.ref_name }}"
@@ -158,8 +180,62 @@ jobs:
           prerelease: true
           files: HeishaMon/HeishaMon_*.bin
 
-      - name: Open PR adding release binaries to binaries/
+      # The Home Assistant integration (custom_components/aquarea/update.py)
+      # reads releases/latest, which ignores prereleases and drafts, and
+      # downloads these assets by exact name:
+      #   HeishaMon.ino.esp32-v<version>.bin / .md5   (large board, ESP32-S3)
+      #   HeishaMon.ino.d1-v<version>.bin / .md5      (small board, ESP8266)
+      # <version> is the tag without "v", the same as the board reports.
+      - name: Prepare release assets and notes
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p release
+          cp "HeishaMon/HeishaMon_ESP32-Release-$MD5_ESP32.bin" "release/HeishaMon.ino.esp32-v$VERSION.bin"
+          echo "$MD5_ESP32" > "release/HeishaMon.ino.esp32-v$VERSION.md5"
+          cp "HeishaMon/HeishaMon_ESP8266-Release-$MD5_ESP8266.bin" "release/HeishaMon.ino.d1-v$VERSION.bin"
+          echo "$MD5_ESP8266" > "release/HeishaMon.ino.d1-v$VERSION.md5"
+          (cd release && for f in *.bin; do [ "$(md5sum "$f" | cut -d' ' -f1)" = "$(cat "${f%.bin}.md5")" ] || { echo "::error::checksum of $f"; exit 1; }; done)
+          ls -l release
+          # Release notes: the message of an annotated tag (checkout turns the
+          # tag into a lightweight one, so fetch it again), else a short line.
+          # The changes since the previous release are appended by GitHub.
+          git fetch --force --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG" || echo "::warning::could not fetch tag $TAG again, using short release notes"
+          if [ "$(git cat-file -t "refs/tags/$TAG")" = "tag" ]; then
+            git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > release-notes.md
+          else
+            echo "HeishaMon $TAG" > release-notes.md
+          fi
+          printf '\nCommit: %s\n' "${{ github.sha }}" >> release-notes.md
+          cat release-notes.md
+        shell: bash
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          name: "HeishaMon ${{ github.ref_name }}"
+          body_path: release-notes.md
+          generate_release_notes: true
+          prerelease: false
+          draft: false
+          make_latest: true
+          files: |
+            release/HeishaMon.ino.esp32-v${{ env.VERSION }}.bin
+            release/HeishaMon.ino.esp32-v${{ env.VERSION }}.md5
+            release/HeishaMon.ino.d1-v${{ env.VERSION }}.bin
+            release/HeishaMon.ino.d1-v${{ env.VERSION }}.md5
+            HeishaMon/HeishaMon_*.bin
+          fail_on_unmatched_files: true
+
+      # Only for the original project, which publishes its firmware in
+      # binaries/ on main (the integration falls back to that folder only for
+      # Egyras/HeishaMon). The fork ships its firmware as release assets only:
+      # committing every image would bloat the history, and its main branch is
+      # not where the fork is developed.
+      - name: Open PR adding release binaries to binaries/
+        if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'Egyras/HeishaMon'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}

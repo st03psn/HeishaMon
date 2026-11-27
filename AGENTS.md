@@ -68,7 +68,9 @@ Rulesets can be validated and behavior-tested **off-device**: `Examples/Rules/ha
 
 ### Versioning and releases
 
-`HeishaMon/version.h` holds `HEISHAMON_VERSION`; CI (`.github/workflows/main.yml`) overwrites it based on ref (tag → `Release`/tag name, scheduled/dispatch → `Nightly-<sha>`, otherwise `Alpha-<sha>`) and never runs a plain build on a bare push to `main`. Compiled binaries are named `HeishaMon_ESP8266-<type>-<md5>.bin` / `HeishaMon_ESP32-<type>-<md5>.bin`. `binaries/` in this repo holds released firmware for end users, split into `model-type-small` (ESP8266) and `model-type-large` (ESP32-S3).
+`HeishaMon/version.h` holds `HEISHAMON_VERSION`; CI (`.github/workflows/main.yml`) overwrites it based on ref (tag `v<version>` → `<version>` without the `v`, other tags → tag name, scheduled/dispatch → `Nightly-<sha>`, otherwise `Alpha-<sha>`) and never runs a plain build on a bare push to `main`. Compiled binaries are named `HeishaMon_ESP8266-<type>-<md5>.bin` / `HeishaMon_ESP32-<type>-<md5>.bin`. `binaries/` in this repo holds released firmware of the original project, split into `model-type-small` (ESP8266) and `model-type-large` (ESP32-S3); the step that opens a PR adding a release to `binaries/` only runs in `Egyras/HeishaMon`.
+
+How to release the fork: create an annotated tag `v<upstream version>-st03psn.<n>` (e.g. `v4.4.1-st03psn.1`, `<n>` counts up per fork release on the same upstream base) on `develop` or `main` and push it (`git push origin <tag>`). The workflow then publishes a normal (non-prerelease, latest) GitHub release with the assets `HeishaMon.ino.esp32-v<version>.bin`/`.md5` and `HeishaMon.ino.d1-v<version>.bin`/`.md5` (plus the md5-named binaries), release notes from the tag message and the generated changelog. These exact names and the version without `v` are what the Home Assistant integration (st03psn/heishamon-homeassistant, `custom_components/aquarea/update.py`) reads from `releases/latest`; do not rename them. Tags not starting with `v` still give a prerelease, which the integration ignores. Details in `README.md` ("Releases of this fork").
 
 ## Reference docs worth knowing about
 
